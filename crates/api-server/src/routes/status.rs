@@ -6,9 +6,9 @@
 //! strictly a developer convenience to confirm the service is alive + see
 //! basic counters at a glance.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::{
     extract::State,
@@ -19,42 +19,7 @@ use axum::{
     Router,
 };
 
-/// Shared process-wide state surfaced on the status page.
-///
-/// Cheap to `Arc::clone` into both the Axum router state and the request-
-/// counter middleware.
-#[derive(Debug)]
-pub struct AppState {
-    /// Monotonic start time; used for uptime math.
-    pub started_at: Instant,
-    /// Total HTTP requests served since process start, all routes + methods.
-    /// Incremented once per request by `request_counter_middleware`.
-    pub request_count: AtomicU64,
-    /// Listen address copied from Config at startup — cheap to stringify.
-    pub listen_addr: String,
-    /// Hostname reported by the kernel at startup (best-effort; falls back to
-    /// `"unknown"` if the OS lookup fails).
-    pub hostname: String,
-}
-
-impl AppState {
-    pub fn new(listen_addr: String) -> Arc<Self> {
-        Arc::new(Self {
-            started_at: Instant::now(),
-            request_count: AtomicU64::new(0),
-            listen_addr,
-            hostname: detect_hostname(),
-        })
-    }
-}
-
-/// Best-effort hostname lookup. Uses `HOSTNAME` / `COMPUTERNAME` env vars to
-/// avoid pulling in a platform-specific crate for a debug-only field.
-fn detect_hostname() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
-}
+use crate::state::AppState;
 
 /// Axum middleware that bumps the global request counter on every request.
 ///
@@ -124,8 +89,6 @@ fn render_html(state: &AppState, uptime: Duration, count: u64) -> String {
     // Rust version captured at build time (see build.rs).
     let rustc = env!("RUSTC_VERSION");
     let uptime_h = humanize(uptime);
-
-    // TODO: DB pool stats surface once PR #7 lands (sqlx on main).
 
     format!(
         r#"<!doctype html>
@@ -209,7 +172,7 @@ fn render_html(state: &AppState, uptime: Duration, count: u64) -> String {
     <ul class="links">
       <li><a href="/healthz">/healthz</a></li>
       <li><a href="/readyz">/readyz</a></li>
-      <li><a href="/v1/devices">/v1/devices</a> <span style="color:var(--muted)">(404 until PR #7 lands)</span></li>
+      <li><a href="/v1/devices">/v1/devices</a></li>
     </ul>
   </section>
 
@@ -253,7 +216,45 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
+
     use super::*;
+
+    /// Build a bare-bones `AppState` for rendering tests. `render_html` only
+    /// reads the process-level display fields (`started_at`, `request_count`,
+    /// `listen_addr`, `hostname`), so we stub the two storage trait objects
+    /// with live in-memory + tempdir-backed implementations to satisfy the
+    /// type without any mocking scaffolding.
+    async fn fake_state(listen: &str) -> AppState {
+        use crate::storage::{LocalFsBlobStore, SqliteMetadataStore};
+
+        // Tempdir leaks for the duration of the process — unit tests are
+        // short-lived and we never exercise the blob store from these tests.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let blobs = Arc::new(
+            LocalFsBlobStore::new(tmp.path())
+                .await
+                .expect("blob store"),
+        );
+        // Intentionally leak the TempDir so the path outlives this helper —
+        // we never actually touch the blob store, but the blob store holds
+        // paths referencing this dir.
+        std::mem::forget(tmp);
+        let meta = Arc::new(
+            SqliteMetadataStore::connect(":memory:")
+                .await
+                .expect("sqlite"),
+        );
+        AppState {
+            meta,
+            blobs,
+            started_at: Instant::now(),
+            request_count: AtomicU64::new(0),
+            listen_addr: listen.to_string(),
+            hostname: "unknown".to_string(),
+        }
+    }
 
     #[test]
     fn humanize_zero() {
@@ -290,7 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn render_html_contains_expected_fields() {
-        let state = AppState::new("0.0.0.0:8080".to_string());
+        let state = fake_state("0.0.0.0:8080").await;
         let html = render_html(&state, Duration::from_secs(65), 42);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("api-server"));

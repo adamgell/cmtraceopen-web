@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 /// Runtime configuration, populated from environment variables.
 ///
@@ -10,6 +11,14 @@ pub struct Config {
     /// Socket address to bind the HTTP listener to. Env: `CMTRACE_LISTEN_ADDR`.
     /// Default: `0.0.0.0:8080`.
     pub listen_addr: SocketAddr,
+
+    /// Root directory for blob staging + finalized blobs. Env:
+    /// `CMTRACE_DATA_DIR`. Default: `./data`.
+    pub data_dir: PathBuf,
+
+    /// SQLite DB path (file or `:memory:`). Env: `CMTRACE_SQLITE_PATH`.
+    /// Default: `<data_dir>/meta.sqlite`.
+    pub sqlite_path: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -27,6 +36,21 @@ impl Config {
             Err(_) => "0.0.0.0:8080".parse().expect("static default parses"),
         };
 
-        Ok(Self { listen_addr })
+        let data_dir = env::var("CMTRACE_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data"));
+
+        let sqlite_path = env::var("CMTRACE_SQLITE_PATH").unwrap_or_else(|_| {
+            data_dir
+                .join("meta.sqlite")
+                .to_string_lossy()
+                .to_string()
+        });
+
+        Ok(Self {
+            listen_addr,
+            data_dir,
+            sqlite_path,
+        })
     }
 }

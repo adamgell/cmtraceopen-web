@@ -1,6 +1,10 @@
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use api_server::{config::Config, router, AppState};
+use api_server::config::Config;
+use api_server::router;
+use api_server::state::AppState;
+use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -21,14 +25,32 @@ async fn main() -> ExitCode {
 
     info!(
         listen_addr = %config.listen_addr,
+        data_dir = %config.data_dir.display(),
+        sqlite_path = %config.sqlite_path,
         version = env!("CARGO_PKG_VERSION"),
         "starting cmtraceopen-api"
     );
 
+    let blobs = match LocalFsBlobStore::new(&config.data_dir).await {
+        Ok(b) => Arc::new(b),
+        Err(err) => {
+            eprintln!("fatal: failed to open blob store at {:?}: {err}", config.data_dir);
+            return ExitCode::from(1);
+        }
+    };
+
+    let meta = match SqliteMetadataStore::connect(&config.sqlite_path).await {
+        Ok(m) => Arc::new(m),
+        Err(err) => {
+            eprintln!("fatal: failed to open sqlite at {}: {err}", config.sqlite_path);
+            return ExitCode::from(1);
+        }
+    };
+
     // AppState is constructed here so `started_at` reflects the real
     // process start (before we block in `bind`). Cloned by reference into
     // the router and the request-counter middleware.
-    let state = AppState::new(config.listen_addr.to_string());
+    let state = AppState::new(meta, blobs, config.listen_addr.to_string());
 
     let app = router(state).layer(TraceLayer::new_for_http());
 
