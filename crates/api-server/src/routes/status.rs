@@ -268,6 +268,7 @@ mod tests {
             request_count: AtomicU64::new(0),
             listen_addr: listen.to_string(),
             hostname: "unknown".to_string(),
+            cors: crate::state::CorsConfig::default(),
         }
     }
 
