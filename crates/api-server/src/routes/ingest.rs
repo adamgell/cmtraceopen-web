@@ -110,11 +110,39 @@ async fn init(
     }
 
     // If a prior upload was interrupted for this (device, bundle), resume it.
+    //
+    // But only if the init invariants (sha256, size_bytes, content_kind) match
+    // what's on disk. A client re-initing the same bundle_id with a *different*
+    // sha / size / kind is almost certainly a bundle-id collision or a client
+    // bug — resuming would silently mix bytes from two different bundles, so
+    // reject it as 409 instead.
     if let Some(prior) = state
         .meta
         .find_resumable_upload(&device_id, req.bundle_id)
         .await?
     {
+        let new_sha = req.sha256.to_lowercase();
+        if prior.expected_sha256 != new_sha {
+            return Err(AppError::Conflict(format!(
+                "bundle {} already initialized with a different sha256 \
+                 (stored={}, requested={}); refusing to resume",
+                req.bundle_id, prior.expected_sha256, new_sha
+            )));
+        }
+        if prior.size_bytes != req.size_bytes {
+            return Err(AppError::Conflict(format!(
+                "bundle {} already initialized with a different sizeBytes \
+                 (stored={}, requested={}); refusing to resume",
+                req.bundle_id, prior.size_bytes, req.size_bytes
+            )));
+        }
+        if prior.content_kind != req.content_kind {
+            return Err(AppError::Conflict(format!(
+                "bundle {} already initialized with a different contentKind \
+                 (stored={}, requested={}); refusing to resume",
+                req.bundle_id, prior.content_kind, req.content_kind
+            )));
+        }
         return Ok((
             StatusCode::OK,
             Json(BundleInitResponse {

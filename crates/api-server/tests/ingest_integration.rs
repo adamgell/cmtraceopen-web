@@ -332,3 +332,119 @@ async fn large_chunk_above_axum_default_body_limit_is_accepted() {
         .unwrap();
     assert!(fin_resp.status().is_success());
 }
+
+/// Must-fix #2 regression: re-initializing the same `bundle_id` with a
+/// different `sha256` (or size / contentKind) while a prior upload is still
+/// open must 409 rather than silently returning the stale upload_id. That
+/// would let a retry mix bytes from a completely different bundle.
+#[tokio::test]
+async fn resume_with_drifted_init_invariants_is_rejected() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+
+    let device_id = "WIN-DRIFT-04";
+    let bundle_id = Uuid::now_v7();
+
+    // First init: sha of "aaaa".
+    let payload_a = b"aaaa".to_vec();
+    let sha_a = sha256_hex(&payload_a);
+    let init_a = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha_a.clone(),
+            size_bytes: payload_a.len() as u64,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert!(init_a.status().is_success(), "first init: {}", init_a.status());
+
+    // Second init, same bundle_id, different sha256 → 409.
+    let payload_b = b"bbbb".to_vec();
+    let sha_b = sha256_hex(&payload_b);
+    let init_b_sha = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha_b.clone(),
+            size_bytes: payload_a.len() as u64,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        init_b_sha.status(),
+        reqwest::StatusCode::CONFLICT,
+        "expected 409 on sha drift"
+    );
+    let body: serde_json::Value = init_b_sha.json().await.unwrap();
+    assert!(
+        body["message"].as_str().unwrap_or("").contains("sha256"),
+        "error body should name the drifted field: {body}"
+    );
+
+    // Second init, same bundle_id + sha, different sizeBytes → 409.
+    let init_b_size = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha_a.clone(),
+            size_bytes: (payload_a.len() as u64) + 1,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        init_b_size.status(),
+        reqwest::StatusCode::CONFLICT,
+        "expected 409 on size drift"
+    );
+
+    // Second init, same bundle_id + sha + size, different contentKind → 409.
+    let init_b_kind = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha_a.clone(),
+            size_bytes: payload_a.len() as u64,
+            content_kind: content_kind::EVIDENCE_ZIP.into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        init_b_kind.status(),
+        reqwest::StatusCode::CONFLICT,
+        "expected 409 on contentKind drift"
+    );
+
+    // Identical re-init returns a normal 200 (resume).
+    let init_again = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha_a.clone(),
+            size_bytes: payload_a.len() as u64,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(init_again.status(), reqwest::StatusCode::OK);
+    let resume: BundleInitResponse = init_again.json().await.unwrap();
+    assert_eq!(resume.resume_offset, 0);
+}
