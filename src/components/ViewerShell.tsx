@@ -1,63 +1,42 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { initWasm, parse } from "../lib/wasm-bridge";
+import { useCallback, useState } from "react";
 import type { ParseResult } from "../lib/log-types";
-import { DropZone } from "./DropZone";
-import { EntryList } from "./EntryList";
+import { LocalMode } from "./LocalMode";
+import { ApiMode } from "./ApiMode";
 
-type State =
-  | { tag: "init" }
-  | { tag: "idle" }
-  | { tag: "loading"; fileName: string }
-  | { tag: "loaded"; fileName: string; result: ParseResult }
-  | { tag: "error"; message: string };
+type Mode = "local" | "api";
+
+interface LoadedSummary {
+  fileName: string;
+  result: ParseResult;
+}
 
 /**
- * Top-level state machine for the v0 viewer: init → idle → loading →
- * loaded | error. WASM is initialized once on mount; file loads
- * read the file as text and dispatch to the parser.
+ * Top-level viewer shell.
+ *
+ * Since the `api-fetch` feature landed, the shell is little more than a
+ * chrome (title bar, mode toggle) that routes to one of two children:
+ *
+ *   - `LocalMode` — the original drag-and-drop + WASM parse flow.
+ *   - `ApiMode`   — fetch device → session → entries from the api-server.
+ *
+ * The shell itself no longer tracks parse state; each mode owns its own
+ * lifecycle. The only cross-cutting concern the shell still handles is
+ * the "loaded file" summary in the top bar, and even that is just a prop
+ * callback the local flow writes into — API mode doesn't use it.
  */
 export function ViewerShell() {
-  const [state, setState] = useState<State>({ tag: "init" });
-  // Monotonic request counter used to discard stale parse results when a user
-  // drops a new file before the previous parse resolves. Each handleFile call
-  // increments this and captures its own id; on resolution we only apply the
-  // setState if the captured id is still the latest.
-  const parseReqId = useRef(0);
+  const [mode, setMode] = useState<Mode>("local");
+  const [loaded, setLoaded] = useState<LoadedSummary | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        await initWasm();
-        if (!cancelled) setState({ tag: "idle" });
-      } catch (err) {
-        if (!cancelled) {
-          setState({ tag: "error", message: `WASM init failed: ${formatError(err)}` });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const handleLoaded = useCallback((info: LoadedSummary | null) => {
+    setLoaded(info);
   }, []);
 
-  const handleFile = useCallback(async (file: File) => {
-    const reqId = ++parseReqId.current;
-    setState({ tag: "loading", fileName: file.name });
-    try {
-      const text = await file.text();
-      const result = await parse(text, file.name, file.size);
-      // Guard against a stale parse: a newer handleFile call has superseded us.
-      if (parseReqId.current !== reqId) return;
-      setState({ tag: "loaded", fileName: file.name, result });
-    } catch (err) {
-      if (parseReqId.current !== reqId) return;
-      setState({ tag: "error", message: `Failed to parse ${file.name}: ${formatError(err)}` });
-    }
-  }, []);
-
-  const handleReset = useCallback(() => {
-    setState({ tag: "idle" });
+  // Clear any lingering local-mode summary when switching away so the top
+  // bar doesn't advertise a file that's no longer on screen.
+  const handleModeChange = useCallback((next: Mode) => {
+    setMode(next);
+    if (next !== "local") setLoaded(null);
   }, []);
 
   return (
@@ -70,7 +49,12 @@ export function ViewerShell() {
         color: "#222",
       }}
     >
-      <TopBar state={state} onReset={handleReset} />
+      <TopBar
+        mode={mode}
+        onModeChange={handleModeChange}
+        loaded={mode === "local" ? loaded : null}
+        onClose={() => setLoaded(null)}
+      />
       <main
         style={{
           flex: 1,
@@ -81,37 +65,23 @@ export function ViewerShell() {
           gap: 12,
         }}
       >
-        {state.tag === "error" && (
-          <ErrorBanner message={state.message} onDismiss={handleReset} />
-        )}
-        {state.tag === "init" && (
-          <CenteredMessage text="Initializing WASM module…" />
-        )}
-        {(state.tag === "idle" || state.tag === "loading") && (
-          <div style={{ maxWidth: 640, margin: "48px auto 0", width: "100%" }}>
-            <DropZone onFile={handleFile} disabled={state.tag === "loading"} />
-            {state.tag === "loading" && (
-              <div
-                style={{
-                  marginTop: 16,
-                  textAlign: "center",
-                  color: "#666",
-                  fontSize: 14,
-                }}
-              >
-                Parsing {state.fileName}…
-              </div>
-            )}
-          </div>
-        )}
-        {state.tag === "loaded" && <EntryList entries={state.result.entries} />}
+        {mode === "local" ? <LocalMode onLoaded={handleLoaded} /> : <ApiMode />}
       </main>
     </div>
   );
 }
 
-function TopBar({ state, onReset }: { state: State; onReset: () => void }) {
-  const loaded = state.tag === "loaded" ? state : null;
+function TopBar({
+  mode,
+  onModeChange,
+  loaded,
+  onClose,
+}: {
+  mode: Mode;
+  onModeChange: (m: Mode) => void;
+  loaded: LoadedSummary | null;
+  onClose: () => void;
+}) {
   return (
     <header
       style={{
@@ -124,6 +94,7 @@ function TopBar({ state, onReset }: { state: State; onReset: () => void }) {
       }}
     >
       <div style={{ fontWeight: 600 }}>CMTrace Open — Web</div>
+      <ModeToggle mode={mode} onChange={onModeChange} />
       {loaded && (
         <>
           <div style={{ color: "#555", fontSize: 13 }}>
@@ -147,7 +118,7 @@ function TopBar({ state, onReset }: { state: State; onReset: () => void }) {
           <div style={{ flex: 1 }} />
           <button
             type="button"
-            onClick={onReset}
+            onClick={onClose}
             style={{
               padding: "6px 12px",
               fontSize: 13,
@@ -165,63 +136,50 @@ function TopBar({ state, onReset }: { state: State; onReset: () => void }) {
   );
 }
 
-function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+function ModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: Mode;
+  onChange: (m: Mode) => void;
+}) {
+  const base: React.CSSProperties = {
+    padding: "4px 10px",
+    fontSize: 12,
+    border: "1px solid #ccc",
+    background: "white",
+    cursor: "pointer",
+  };
+  const active: React.CSSProperties = {
+    ...base,
+    background: "#111",
+    borderColor: "#111",
+    color: "white",
+  };
   return (
     <div
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 12,
-        padding: "10px 14px",
-        background: "#fef2f2",
-        border: "1px solid #fecaca",
-        color: "#991b1b",
-        borderRadius: 4,
-        whiteSpace: "pre-wrap",
-      }}
+      role="tablist"
+      aria-label="Viewer mode"
+      style={{ display: "inline-flex", borderRadius: 4, overflow: "hidden" }}
     >
-      <div style={{ flex: 1, fontSize: 13 }}>{message}</div>
       <button
         type="button"
-        onClick={onDismiss}
-        style={{
-          padding: "4px 10px",
-          fontSize: 12,
-          border: "1px solid #b91c1c",
-          background: "white",
-          color: "#b91c1c",
-          borderRadius: 4,
-          cursor: "pointer",
-        }}
+        role="tab"
+        aria-selected={mode === "local"}
+        onClick={() => onChange("local")}
+        style={mode === "local" ? active : { ...base, borderRight: "none" }}
       >
-        Dismiss
+        Local
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "api"}
+        onClick={() => onChange("api")}
+        style={mode === "api" ? active : base}
+      >
+        API
       </button>
     </div>
   );
-}
-
-function CenteredMessage({ text }: { text: string }) {
-  return (
-    <div
-      style={{
-        flex: 1,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "#666",
-      }}
-    >
-      {text}
-    </div>
-  );
-}
-
-function formatError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === "string") return err;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
 }

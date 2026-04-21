@@ -117,3 +117,48 @@ export interface ParseResult {
   fileSize: number;
   byteOffset: number;
 }
+
+// ---------------------------------------------------------------------------
+// API-mode wire DTOs.
+//
+// These mirror the camelCase types in `common-wire` (Rust) that the api-server
+// serializes over HTTP. Kept separate from the WASM-parser types above because
+// the API surfaces a different, server-side view of entries (persisted IDs,
+// file ids, millisecond timestamps) that does not need the full parser
+// specialization fields. When rendering API entries through `EntryList`, the
+// client maps `LogEntryDto` → `LogEntry` (see `ApiMode.tsx`).
+
+export type DeviceSummary = {
+  deviceId: string;
+  firstSeenUtc: string;
+  lastSeenUtc: string;
+  hostname?: string;
+  sessionCount: number;
+};
+
+export type SessionSummary = {
+  sessionId: string;
+  deviceId: string;
+  bundleId: string;
+  collectedUtc?: string;
+  ingestedUtc: string;
+  sizeBytes: number;
+  parseState: string;
+};
+
+export type LogEntryDto = {
+  entryId: number;
+  fileId: string;
+  lineNumber: number;
+  tsMs?: number;
+  severity: "Info" | "Warning" | "Error";
+  component?: string;
+  thread?: string;
+  message: string;
+  extras?: unknown;
+};
+
+export type Paginated<T> = {
+  items: T[];
+  nextCursor: string | null;
+};
