@@ -98,6 +98,75 @@ pub struct DeviceRow {
     pub session_count: i64,
 }
 
+/// Row-shaped view of the `files` table populated by parse-on-ingest.
+#[derive(Debug, Clone)]
+pub struct FileRow {
+    pub file_id: String,
+    pub session_id: String,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub format_detected: Option<String>,
+    pub parser_kind: Option<String>,
+    pub entry_count: u64,
+    pub parse_error_count: u64,
+}
+
+/// Row-shaped view of the `entries` table populated by parse-on-ingest.
+#[derive(Debug, Clone)]
+pub struct EntryRow {
+    pub entry_id: i64,
+    pub file_id: String,
+    pub line_number: u32,
+    pub ts_ms: Option<i64>,
+    /// Numeric severity in the DB (0/1/2). Rendered to string at the wire.
+    pub severity: i64,
+    pub component: Option<String>,
+    pub thread: Option<String>,
+    pub message: String,
+    /// Raw JSON text from `entries.extras_json`. Route handlers parse it
+    /// into a `serde_json::Value` for the DTO — keeping it as a string here
+    /// lets the storage layer stay json-library-free.
+    pub extras_json: Option<String>,
+}
+
+/// Filters applied by the entries-query route.
+///
+/// Any combination may be set. Semantics:
+///   - `file_id`: restrict to a single file_id.
+///   - `min_severity`: numeric floor on `entries.severity` (inclusive).
+///   - `after_ts_ms`: entries with `ts_ms >= after_ts_ms` (inclusive). Rows
+///     with NULL `ts_ms` are excluded when this bound is set.
+///   - `before_ts_ms`: entries with `ts_ms < before_ts_ms` (exclusive).
+///     Rows with NULL `ts_ms` are excluded when this bound is set.
+///   - `q_like`: plain substring filter; the caller builds the `%…%`
+///     wrapping so `LIKE` semantics (incl. escape handling) live in one
+///     place.
+///
+/// `cursor` carries the keyset position: the `(ts_ms, entry_id)` pair of the
+/// last row returned on the previous page. `None` means "start from the
+/// top."
+#[derive(Debug, Clone, Default)]
+pub struct EntryFilters {
+    pub file_id: Option<String>,
+    pub min_severity: Option<i64>,
+    pub after_ts_ms: Option<i64>,
+    pub before_ts_ms: Option<i64>,
+    pub q_like: Option<String>,
+    pub cursor: Option<EntryCursor>,
+}
+
+/// Keyset cursor over `ORDER BY ts_ms NULLS LAST, entry_id ASC`.
+///
+/// We store `ts_ms` as `Option<i64>` verbatim so the "NULLS LAST" tier is
+/// representable: a `None` cursor means the previous page ended on a
+/// NULL-timestamp row and the next page should continue among the
+/// NULL-timestamp tail, ordered by `entry_id`.
+#[derive(Debug, Clone)]
+pub struct EntryCursor {
+    pub ts_ms: Option<i64>,
+    pub entry_id: i64,
+}
+
 /// Parameters for creating a new upload session.
 #[derive(Debug, Clone)]
 pub struct NewUpload {
@@ -226,4 +295,26 @@ pub trait MetadataStore: Send + Sync + 'static {
         limit: u32,
         before: Option<(DateTime<Utc>, Uuid)>,
     ) -> Result<Vec<SessionRow>, StorageError>;
+
+    // ----- files / entries (parse-on-ingest sister PR) -----
+
+    /// List files belonging to a session. Keyset-paginated on `file_id`
+    /// ascending — UUIDv7 is time-sortable so this yields insertion order
+    /// without a dedicated created_utc column.
+    async fn list_files_for_session(
+        &self,
+        session_id: Uuid,
+        limit: u32,
+        after_file_id: Option<&str>,
+    ) -> Result<Vec<FileRow>, StorageError>;
+
+    /// Query parsed log entries for a session. Callers build [`EntryFilters`]
+    /// from the HTTP query string; this method returns one page plus the
+    /// cursor for the next page baked into the last row.
+    async fn query_entries(
+        &self,
+        session_id: Uuid,
+        filters: &EntryFilters,
+        limit: u32,
+    ) -> Result<Vec<EntryRow>, StorageError>;
 }
