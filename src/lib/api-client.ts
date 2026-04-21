@@ -17,6 +17,8 @@
 // error banners render something actionable. Network failures (e.g. api-server
 // down) surface as the underlying TypeError from `fetch`.
 
+import { InteractionRequiredAuthError } from "@azure/msal-browser";
+import { getApiScope, getMsalInstance } from "./auth-config";
 import type {
   DeviceSummary,
   LogEntryDto,
@@ -25,6 +27,53 @@ import type {
 } from "./log-types";
 
 const ENV_BASE = (import.meta.env.VITE_CMTRACE_API_BASE as string | undefined) ?? "";
+
+/**
+ * Acquire an Entra access token for the api-server, or `null` if the
+ * viewer is running in anonymous mode (no MSAL instance / scope configured)
+ * or if no operator account is signed in yet.
+ *
+ * Strategy:
+ *   1. acquireTokenSilent — uses the cached refresh token. Fast and
+ *      non-interactive; this is the path taken on every list call once
+ *      the operator has signed in once.
+ *   2. On InteractionRequiredAuthError (token expired, consent revoked,
+ *      conditional-access challenge), fall back to acquireTokenPopup so
+ *      the operator can re-authenticate without losing their place in the
+ *      viewer.
+ *
+ * Other errors (network, BrowserAuthError without an account, etc.) are
+ * swallowed and `null` is returned — the request will go out without an
+ * Authorization header and the api-server will respond 401, which the
+ * existing fetch-error path renders as a banner.
+ */
+export async function getAccessToken(): Promise<string | null> {
+  const instance = getMsalInstance();
+  const scope = getApiScope();
+  if (!instance || !scope) return null;
+
+  const account =
+    instance.getActiveAccount() ?? instance.getAllAccounts()[0] ?? null;
+  if (!account) return null;
+
+  try {
+    const result = await instance.acquireTokenSilent({
+      scopes: [scope],
+      account,
+    });
+    return result.accessToken;
+  } catch (err) {
+    if (err instanceof InteractionRequiredAuthError) {
+      try {
+        const result = await instance.acquireTokenPopup({ scopes: [scope] });
+        return result.accessToken;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+}
 
 /**
  * Configured API base. Empty string means same-origin (dev proxy or production
@@ -39,9 +88,17 @@ function url(path: string): string {
 
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const full = url(path);
+  const headers: Record<string, string> = { Accept: "application/json" };
+  // Attach the Entra bearer token when MSAL is configured + signed in.
+  // In anonymous mode getAccessToken() returns null and the request goes
+  // out unauthenticated (works against api-server's CMTRACE_AUTH_MODE=disabled).
+  const token = await getAccessToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const res = await fetch(full, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers,
     signal,
   });
   if (!res.ok) {
