@@ -33,6 +33,10 @@ If you genuinely need Docker, install colima or Docker Desktop first (out of sco
 1. **Ansible** (recommended) — idempotent, declarative. See `playbooks/deploy.yml` + `roles/launchd_service`.
 2. **Bash one-liner** — `examples/shell-only-deploy.sh` shows the raw `scp` + `launchctl` dance if you don't want an Ansible dependency.
 
+## Quick redeploy
+
+For the already-onboarded BigMac26, `scripts/redeploy.sh` is a one-liner wrapper around the `git pull` + `docker compose up -d --build` + smoke-test dance for the cmtraceopen-web stack. Use the Ansible path above for onboarding or multi-host work; use this script when the host is live and you just want the latest `main` (or a feature branch) rolled out. See [`scripts/README.md`](scripts/README.md) for flags and exit codes.
+
 ## Prereqs on the control machine
 
 - `ansible` (`brew install ansible`) — only for the Ansible path.
