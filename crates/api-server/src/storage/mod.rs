@@ -110,6 +110,41 @@ pub struct NewUpload {
     pub staged_path: String,
 }
 
+/// A logical file discovered inside a bundle and fed through the parser.
+///
+/// Used as the FK parent for [`NewEntry`] rows so a failing parse can be
+/// recorded alongside whatever entries did land — callers allocate `file_id`
+/// (UUID v7) up front so the entries can be linked before commit.
+#[derive(Debug, Clone)]
+pub struct NewFile {
+    pub file_id: Uuid,
+    pub session_id: Uuid,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub format_detected: Option<String>,
+    pub parser_kind: Option<String>,
+    pub entry_count: u32,
+    pub parse_error_count: u32,
+}
+
+/// A single parsed log entry destined for the `entries` table.
+///
+/// Severity is the numeric int form (0=Info/1=Warning/2=Error) the column
+/// stores — mapping from the parser's `Severity` enum happens in
+/// `pipeline::parse_worker`, so the storage layer doesn't take a parser dep.
+#[derive(Debug, Clone)]
+pub struct NewEntry {
+    pub session_id: Uuid,
+    pub file_id: Uuid,
+    pub line_number: u32,
+    pub ts_ms: Option<i64>,
+    pub severity: i32,
+    pub component: Option<String>,
+    pub thread: Option<String>,
+    pub message: String,
+    pub extras_json: Option<String>,
+}
+
 /// Content-addressed + session-keyed blob storage.
 #[async_trait]
 pub trait BlobStore: Send + Sync + 'static {
@@ -226,4 +261,31 @@ pub trait MetadataStore: Send + Sync + 'static {
         limit: u32,
         before: Option<(DateTime<Utc>, Uuid)>,
     ) -> Result<Vec<SessionRow>, StorageError>;
+
+    /// Flip `sessions.parse_state` to `ok` / `partial` / `failed` after the
+    /// background parse worker finishes. Any other value is accepted
+    /// verbatim so callers can add granular states later (e.g. `timeout`)
+    /// without a schema migration; the DB column is `TEXT`.
+    async fn update_session_parse_state(
+        &self,
+        session_id: Uuid,
+        state: &str,
+    ) -> Result<(), StorageError>;
+
+    // ----- parsed-files + entries -----
+
+    /// Insert a `files` row and return its `file_id` so the caller can fan
+    /// parsed entries into `insert_entries_batch` under the same FK.
+    ///
+    /// The caller allocates `file_id` (UUID v7) up front — this keeps the
+    /// trait SQLite-agnostic and lets a future Postgres backend use the same
+    /// insert without `RETURNING`.
+    async fn insert_file(&self, new: NewFile) -> Result<Uuid, StorageError>;
+
+    /// Bulk-insert parsed entries for one session in a single transaction.
+    ///
+    /// Wrapping in a transaction means a mid-batch failure can't leave the
+    /// `entries` table half-populated — the worker catches the error and
+    /// flips `parse_state` to `failed` cleanly. Empty input is a no-op.
+    async fn insert_entries_batch(&self, entries: Vec<NewEntry>) -> Result<(), StorageError>;
 }

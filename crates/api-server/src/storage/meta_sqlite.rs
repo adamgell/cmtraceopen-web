@@ -15,7 +15,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::{
-    DeviceRow, MetadataStore, NewUpload, SessionRow, StorageError, UploadRow,
+    DeviceRow, MetadataStore, NewEntry, NewFile, NewUpload, SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the migration directory into the binary. Path is relative to this
@@ -74,7 +74,11 @@ impl SqliteMetadataStore {
         Ok(Self { pool })
     }
 
-    #[cfg(test)]
+    /// Raw pool accessor, intended for integration-test assertions that
+    /// need to query tables the trait doesn't expose yet (e.g. `entries`).
+    /// Marked `#[doc(hidden)]` so it doesn't show up in public docs while
+    /// still being reachable from the integration-test crate.
+    #[doc(hidden)]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -503,6 +507,83 @@ impl MetadataStore for SqliteMetadataStore {
             });
         }
         Ok(out)
+    }
+
+    async fn update_session_parse_state(
+        &self,
+        session_id: Uuid,
+        state: &str,
+    ) -> Result<(), StorageError> {
+        let res = sqlx::query("UPDATE sessions SET parse_state = ? WHERE session_id = ?")
+            .bind(state)
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        if res.rows_affected() == 0 {
+            // Treat a missing session as a hard sqlx error: parse_state
+            // can't update on a nonexistent row, and callers expect the
+            // background worker to either flip the state or log the error.
+            return Err(StorageError::Sqlx(sqlx::Error::RowNotFound));
+        }
+        Ok(())
+    }
+
+    async fn insert_file(&self, new: NewFile) -> Result<Uuid, StorageError> {
+        sqlx::query(
+            r#"
+            INSERT INTO files
+              (file_id, session_id, relative_path, size_bytes,
+               format_detected, parser_kind, entry_count, parse_error_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(new.file_id.to_string())
+        .bind(new.session_id.to_string())
+        .bind(&new.relative_path)
+        .bind(new.size_bytes as i64)
+        .bind(new.format_detected.as_deref())
+        .bind(new.parser_kind.as_deref())
+        .bind(new.entry_count as i64)
+        .bind(new.parse_error_count as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(new.file_id)
+    }
+
+    async fn insert_entries_batch(&self, entries: Vec<NewEntry>) -> Result<(), StorageError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        // One explicit transaction per call. SQLite commits every statement
+        // individually otherwise, and a batch of thousands of entries would
+        // fsync once per row. Wrapping the inserts makes a 10k-entry batch
+        // a single commit and keeps a mid-batch error from leaving partial
+        // rows — the worker treats any Err here as "failed" and abandons
+        // the write.
+        let mut tx = self.pool.begin().await?;
+        for e in entries {
+            sqlx::query(
+                r#"
+                INSERT INTO entries
+                  (session_id, file_id, line_number, ts_ms,
+                   severity, component, thread, message, extras_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+            )
+            .bind(e.session_id.to_string())
+            .bind(e.file_id.to_string())
+            .bind(e.line_number as i64)
+            .bind(e.ts_ms)
+            .bind(e.severity as i64)
+            .bind(e.component.as_deref())
+            .bind(e.thread.as_deref())
+            .bind(&e.message)
+            .bind(e.extras_json.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }
 

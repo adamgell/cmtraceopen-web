@@ -22,10 +22,11 @@
 # context anyway (depends on the cmtraceopen submodule).
 /cmtrace-wasm
 
-# cmtraceopen submodule — the api-server build doesn't need it (common-wire
-# doesn't re-export LogEntry yet). Include it later when wire DTOs adopt
-# parser types.
-/cmtraceopen
+# cmtraceopen submodule — required by the api-server build now that the
+# parse-on-ingest worker depends on cmtraceopen-parser. The submodule is
+# pure Rust (no Tauri / native deps) so it compiles cleanly inside the
+# distroless toolchain. Submodule pointer is managed at the repo root
+# (.gitmodules); bump it deliberately to pick up upstream parser changes.
 
 # Ansible deploy kit — runs from the Mac control machine, not built into
 # the api-server image.
