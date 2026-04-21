@@ -41,6 +41,29 @@ pub struct AgentConfig {
     /// `tracing` filter directive. Accepts anything `EnvFilter::new` takes,
     /// but most deployments will just set `"info"` / `"debug"`.
     pub log_level: String,
+
+    /// Device identity string sent in the `X-Device-Id` header until mTLS
+    /// lands (Wave 3). Empty string means "fall back to hostname" in the
+    /// runtime (see `main.rs`); this lets tests override without changing
+    /// machine hostname.
+    #[serde(default)]
+    pub device_id: String,
+
+    /// Directories the `logs` collector walks for `.log` / `.txt` files.
+    /// Defaults cover the ConfigMgr + Intune + Entra-join log trees.
+    #[serde(default = "default_log_paths")]
+    pub log_paths: Vec<String>,
+}
+
+fn default_log_paths() -> Vec<String> {
+    vec![
+        // ConfigMgr client logs.
+        "C:\\Windows\\CCM\\Logs\\**\\*.log".into(),
+        // Intune Management Extension.
+        "C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\\**\\*.log".into(),
+        // DSRegCmd / Entra-join diagnostics drop here.
+        "C:\\Windows\\Logs\\DSRegCmd\\**\\*.log".into(),
+    ]
 }
 
 impl Default for AgentConfig {
@@ -51,6 +74,8 @@ impl Default for AgentConfig {
             evidence_schedule: String::from("0 3 * * *"),
             queue_max_bundles: 50,
             log_level: String::from("info"),
+            device_id: String::new(),
+            log_paths: default_log_paths(),
         }
     }
 }
@@ -130,8 +155,35 @@ impl AgentConfig {
         if let Ok(v) = std::env::var("CMTRACE_LOG_LEVEL") {
             cfg.log_level = v;
         }
+        if let Ok(v) = std::env::var("CMTRACE_DEVICE_ID") {
+            cfg.device_id = v;
+        }
 
         cfg
+    }
+
+    /// Resolve the device identity to send on the wire.
+    /// Precedence: explicit `device_id` config / env var → OS hostname → the
+    /// string `"unknown-device"`. Wave 3 replaces this with an mTLS-derived
+    /// identity; until then the `X-Device-Id` header is authoritative.
+    pub fn resolved_device_id(&self) -> String {
+        if !self.device_id.is_empty() {
+            return self.device_id.clone();
+        }
+        // `hostname` isn't in std; call the platform's env shim. Both
+        // Windows (`COMPUTERNAME`) and Unix (`HOSTNAME`) usually export one;
+        // we fall through to a constant rather than panicking.
+        if let Ok(h) = std::env::var("COMPUTERNAME") {
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        if let Ok(h) = std::env::var("HOSTNAME") {
+            if !h.is_empty() {
+                return h;
+            }
+        }
+        "unknown-device".into()
     }
 }
 
@@ -147,6 +199,17 @@ mod tests {
         assert_eq!(cfg.log_level, "info");
         assert!(cfg.api_endpoint.starts_with("https://"));
         assert!(!cfg.evidence_schedule.is_empty());
+        assert!(cfg.device_id.is_empty());
+        assert!(!cfg.log_paths.is_empty());
+    }
+
+    #[test]
+    fn resolved_device_id_prefers_explicit() {
+        let cfg = AgentConfig {
+            device_id: "WIN-UNIT-01".into(),
+            ..AgentConfig::default()
+        };
+        assert_eq!(cfg.resolved_device_id(), "WIN-UNIT-01");
     }
 
     #[test]

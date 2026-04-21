@@ -17,7 +17,10 @@
 // modules that genuinely need it.
 #![deny(unsafe_code)]
 
+pub mod collectors;
 pub mod config;
+pub mod queue;
+pub mod uploader;
 
 /// Human-readable banner string, emitted at startup and handy in tests.
 pub fn banner() -> String {

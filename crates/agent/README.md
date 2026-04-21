@@ -24,13 +24,23 @@ On a managed Windows device (typically deployed via MSI → service):
    (`%ProgramData%\CMTraceOpen\Agent\state.db`), chunk them, and upload to
    the api-server's ingest endpoint with resume-on-reconnect semantics.
 
-## What it does *today*
+## What it does *today* (Wave 2 M1)
 
-- Builds on Windows and Linux (Linux is a stub; the binary prints a
-  "Windows only" message and exits 1).
+- Builds on Windows and Linux via `#[cfg(target_os = "windows")]` gates.
 - Loads `AgentConfig` from either a TOML file or `CMTRACE_*` env vars.
-- Boots `tokio` + JSON-formatted `tracing`, logs a banner and the loaded
-  config, and parks on ctrl-c.
+- **Collectors**: walks configured log glob paths; on Windows shells out
+  to `wevtutil epl` for event logs and `dsregcmd /status` for join state.
+  Linux stubs return `NotSupported` manifest entries so CI compiles.
+- **Evidence orchestrator**: runs all collectors in parallel, zips the
+  result, sha256-hashes the zip.
+- **Persistent queue**: flat-file `{uuid}.zip` + `{uuid}.json` sidecars
+  with atomic-rename writes under `%ProgramData%\cmtraceopen-agent\queue\`.
+- **Uploader**: chunked resumable upload to the api-server's
+  `/v1/ingest/bundles` protocol (init → chunks → finalize) with
+  exponential-backoff retry (1s / 5s / 30s).
+- **`--oneshot`**: collect + enqueue + drain once and exit. Default
+  mode is a foreground daemon with interval-driven collection and a
+  30-second drain loop.
 
 ## Config
 
@@ -45,6 +55,8 @@ all fields (with `#[serde(default)]` filling gaps).
 | `evidence_schedule`     | `CMTRACE_EVIDENCE_SCHEDULE`    | `0 3 * * *`                     |
 | `queue_max_bundles`     | `CMTRACE_QUEUE_MAX_BUNDLES`    | `50`                            |
 | `log_level`             | `CMTRACE_LOG_LEVEL`            | `info`                          |
+| `device_id`             | `CMTRACE_DEVICE_ID`            | *(hostname fallback)*           |
+| `log_paths`             | *(no env override)*            | CCM + IME + DSRegCmd trees      |
 
 The file is expected at `%ProgramData%\CMTraceOpen\Agent\config.toml` in
 production, but `from_file` takes any `&Path`.
@@ -63,13 +75,32 @@ gated behind `cfg(target_os = "windows")` in `Cargo.toml`.
 
 ## Not yet in scope
 
-- Windows service registration (`windows_service::service_dispatcher`).
-- mTLS client cert loading.
-- Collectors (`logs.rs`, `event_logs.rs`, `dsregcmd.rs`, `evidence.rs`).
-- Upload queue (chunked / resumable).
-- SQLite cursor / queue state DB.
+- **Windows service registration** (`windows_service::service_dispatcher`).
+  Main loop runs as a foreground daemon; `sc.exe create` + `sc.exe start`
+  works for hand-testing until Wave 2 M2 wires the real SCM integration.
+- mTLS client cert loading (Wave 3).
+- TLS at the reqwest layer — see the big comment in `Cargo.toml`; the
+  agent currently talks plaintext HTTP, so production deployments front
+  the api-server with a TLS-terminating reverse proxy.
+- SQLite cursor DB — flat-file queue is good enough for MVP.
 - MSI packaging (WiX).
 - HKLM registry overrides and ADMX policy ingestion.
 
 Each of those is called out as a TODO comment in `src/main.rs` and will
 land as its own PR.
+
+## Running against a local api-server
+
+```bash
+# Terminal 1: api-server
+cargo run -p api-server
+
+# Terminal 2: one-shot agent against loopback
+CMTRACE_API_ENDPOINT=http://127.0.0.1:8080 \
+CMTRACE_DEVICE_ID=WIN-DEV-01 \
+CMTRACE_QUEUE_MAX_BUNDLES=10 \
+  cargo run -p agent -- --oneshot
+```
+
+The one-shot run collects once, enqueues, uploads, and exits. Check
+`GET /v1/devices/WIN-DEV-01/sessions` for the resulting session.
