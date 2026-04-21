@@ -261,6 +261,7 @@ mod tests {
                 .await
                 .expect("sqlite"),
         );
+        use crate::auth::{AuthMode, AuthState, JwksCache};
         AppState {
             meta,
             blobs,
@@ -268,6 +269,11 @@ mod tests {
             request_count: AtomicU64::new(0),
             listen_addr: listen.to_string(),
             hostname: "unknown".to_string(),
+            auth: AuthState {
+                mode: AuthMode::Disabled,
+                entra: None,
+                jwks: Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string())),
+            },
         }
     }
 

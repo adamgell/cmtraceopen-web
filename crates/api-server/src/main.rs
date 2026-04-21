@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use api_server::auth::{AuthMode, AuthState, JwksCache};
 use api_server::config::Config;
 use api_server::router;
 use api_server::state::AppState;
@@ -47,10 +48,38 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Build the auth state. In production the JWKS cache is pre-warmed on
+    // startup so the first real request doesn't pay for the discovery-URI
+    // round-trip; refresh failures here are logged but not fatal (the cache
+    // will try again on the first request).
+    if matches!(config.auth_mode, AuthMode::Disabled) {
+        warn!(
+            "CMTRACE_AUTH_MODE=disabled — operator-bearer auth BYPASSED. \
+             DEV-ONLY: never deploy with this flag."
+        );
+    }
+    let jwks = match config.entra.as_ref() {
+        Some(entra) => {
+            let cache = Arc::new(JwksCache::new(entra.jwks_uri.clone()));
+            if matches!(config.auth_mode, AuthMode::Enabled) {
+                if let Err(err) = cache.refresh().await {
+                    warn!(%err, "initial JWKS prefetch failed; will retry on first request");
+                }
+            }
+            cache
+        }
+        None => Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string())),
+    };
+    let auth_state = AuthState {
+        mode: config.auth_mode,
+        entra: config.entra.clone(),
+        jwks,
+    };
+
     // AppState is constructed here so `started_at` reflects the real
     // process start (before we block in `bind`). Cloned by reference into
     // the router and the request-counter middleware.
-    let state = AppState::new(meta, blobs, config.listen_addr.to_string());
+    let state = AppState::new(meta, blobs, config.listen_addr.to_string(), auth_state);
 
     let app = router(state).layer(TraceLayer::new_for_http());
 

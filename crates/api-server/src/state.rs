@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 use crate::storage::{BlobStore, MetadataStore};
 
 /// Default chunk size we advertise to agents: 8 MiB. Picked to balance
@@ -42,15 +43,19 @@ pub struct AppState {
     /// Hostname reported by the kernel at startup (best-effort; falls back to
     /// `"unknown"` if the OS lookup fails).
     pub hostname: String,
+    /// Operator-bearer auth configuration + JWKS cache. Consumed by the
+    /// `OperatorPrincipal` extractor on query routes.
+    pub auth: AuthState,
 }
 
 impl AppState {
-    /// Build the full shared state. `listen_addr` is the stringified bind
-    /// address used purely for display on the status page.
+    /// Build the full shared state with auth enabled. `listen_addr` is the
+    /// stringified bind address used purely for display on the status page.
     pub fn new(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
         listen_addr: String,
+        auth: AuthState,
     ) -> Arc<Self> {
         Arc::new(Self {
             meta,
@@ -59,7 +64,43 @@ impl AppState {
             request_count: AtomicU64::new(0),
             listen_addr,
             hostname: detect_hostname(),
+            auth,
         })
+    }
+
+    /// Test-only shortcut: build state with auth disabled and no Entra
+    /// config. Integration tests that don't exercise the auth surface
+    /// prefer this over hand-rolling a full `AuthState`.
+    pub fn new_auth_disabled(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+    ) -> Arc<Self> {
+        let auth = AuthState {
+            mode: AuthMode::Disabled,
+            entra: None,
+            jwks: Arc::new(JwksCache::new(
+                "http://127.0.0.1:1/unused".to_string(),
+            )),
+        };
+        Self::new(meta, blobs, listen_addr, auth)
+    }
+
+    /// Test helper: build state with auth enabled, pointed at a caller-
+    /// supplied JWKS cache (typically pre-seeded with a hand-minted pubkey).
+    pub fn new_with_auth(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        entra: EntraConfig,
+        jwks: Arc<JwksCache>,
+    ) -> Arc<Self> {
+        let auth = AuthState {
+            mode: AuthMode::Enabled,
+            entra: Some(entra),
+            jwks,
+        };
+        Self::new(meta, blobs, listen_addr, auth)
     }
 }
 
