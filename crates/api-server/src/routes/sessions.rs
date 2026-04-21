@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use common_wire::{Paginated, SessionSummary};
 
+use crate::auth::OperatorPrincipal;
 use crate::error::AppError;
 use crate::routes::{clamp_limit, decode_cursor, encode_cursor};
 use crate::state::AppState;
@@ -52,6 +53,7 @@ fn row_to_summary(r: SessionRow) -> SessionSummary {
 
 async fn list_for_device(
     State(state): State<Arc<AppState>>,
+    _principal: OperatorPrincipal,
     Path(device_id): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Paginated<SessionSummary>>, AppError> {
@@ -93,6 +95,7 @@ async fn list_for_device(
 
 async fn get_session(
     State(state): State<Arc<AppState>>,
+    _principal: OperatorPrincipal,
     Path(session_id): Path<Uuid>,
 ) -> Result<Json<SessionSummary>, AppError> {
     let row = state

@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 use common_wire::{FileSummary, Paginated};
 
+use crate::auth::OperatorPrincipal;
 use crate::error::AppError;
 use crate::routes::{clamp_limit, decode_cursor, encode_cursor};
 use crate::state::AppState;
@@ -56,6 +57,7 @@ fn row_to_summary(r: FileRow) -> FileSummary {
 #[tracing::instrument(skip_all, fields(%session_id, limit = ?q.limit, has_cursor = q.cursor.is_some()))]
 async fn list_files(
     State(state): State<Arc<AppState>>,
+    _principal: OperatorPrincipal,
     Path(session_id): Path<Uuid>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Paginated<FileSummary>>, AppError> {
