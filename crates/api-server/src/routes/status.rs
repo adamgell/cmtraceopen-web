@@ -179,7 +179,7 @@ fn render_html(state: &AppState, uptime: Duration, count: u64) -> String {
   <section class="card">
     <h2>Companion tools</h2>
     <ul class="links">
-      <li><a href="http://{host_only}:8081">Adminer (Postgres UI)</a></li>
+      <li><a href="http://{host_only}:8082">Adminer (Postgres UI)</a></li>
     </ul>
   </section>
 
@@ -299,6 +299,6 @@ mod tests {
         assert!(html.contains(">42<"));
         assert!(html.contains("0.0.0.0:8080"));
         assert!(html.contains("/healthz"));
-        assert!(html.contains(":8081"));
+        assert!(html.contains(":8082"));
     }
 }
