@@ -265,3 +265,70 @@ async fn happy_path_multi_chunk_and_bad_offset_rejected() {
         .unwrap();
     assert_eq!(no_device.status(), reqwest::StatusCode::BAD_REQUEST);
 }
+
+/// Must-fix #1 regression: before the body-limit fix, Axum's 2 MiB default
+/// body cap would 413 any chunk over ~2 MiB before the handler ran. We send
+/// a 4 MiB chunk (comfortably past the old ceiling, well under the 32 MiB
+/// MAX_CHUNK_SIZE) and assert it's accepted end-to-end.
+#[tokio::test]
+async fn large_chunk_above_axum_default_body_limit_is_accepted() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+
+    let device_id = "WIN-BIG-03";
+    // 4 MiB deterministic payload. Above Axum's 2 MiB default, below our
+    // 32 MiB MAX_CHUNK_SIZE cap.
+    let size = 4 * 1024 * 1024;
+    let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let sha = sha256_hex(&payload);
+    let bundle_id = Uuid::now_v7();
+
+    let init: BundleInitResponse = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha.clone(),
+            size_bytes: payload.len() as u64,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .put(format!(
+            "{}/v1/ingest/bundles/{}/chunks?offset=0",
+            server.base, init.upload_id
+        ))
+        .header("x-device-id", device_id)
+        .body(payload.clone())
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "4 MiB chunk should not be rejected by body limit; got {}",
+        resp.status()
+    );
+
+    let fin_resp = client
+        .post(format!(
+            "{}/v1/ingest/bundles/{}/finalize",
+            server.base, init.upload_id
+        ))
+        .header("x-device-id", device_id)
+        .json(&BundleFinalizeRequest {
+            final_sha256: sha.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert!(fin_resp.status().is_success());
+}

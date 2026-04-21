@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{post, put};
 use axum::{Json, Router};
@@ -31,10 +31,17 @@ use crate::state::{AppState, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE};
 use crate::storage::{NewUpload, SessionRow, StorageError};
 
 pub fn router(state: Arc<AppState>) -> Router {
+    // Axum's default request-body limit is 2 MiB, which would silently 413
+    // every chunk above that ceiling before our MAX_CHUNK_SIZE check had a
+    // chance to run. Lift the limit on the ingest sub-router to the same
+    // constant the handler enforces, so the two values can never drift.
+    // Other routers (devices/sessions/health) keep the tight default.
+    let body_limit = MAX_CHUNK_SIZE as usize;
     Router::new()
         .route("/v1/ingest/bundles", post(init))
         .route("/v1/ingest/bundles/{upload_id}/chunks", put(put_chunk))
         .route("/v1/ingest/bundles/{upload_id}/finalize", post(finalize))
+        .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
 

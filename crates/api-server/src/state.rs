@@ -14,6 +14,11 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
 /// Hard per-chunk cap. Protects the server from OOM if a misbehaving agent
 /// sends a multi-GB PUT body.
+///
+/// This value is the single source of truth for the ingest-route body limit:
+/// the Axum router layers [`axum::extract::DefaultBodyLimit::max`] at
+/// exactly this size on the ingest sub-router so it can never drift from the
+/// runtime check in the chunk handler.
 pub const MAX_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 
 pub struct AppState {
