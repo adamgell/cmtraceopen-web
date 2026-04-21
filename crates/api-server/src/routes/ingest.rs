@@ -239,13 +239,8 @@ async fn put_chunk(
         )));
     }
 
-    if q.offset != upload.offset_bytes {
-        return Err(AppError::from(StorageError::OffsetMismatch {
-            expected: upload.offset_bytes,
-            actual: q.offset,
-        }));
-    }
-
+    // size_bytes is immutable for a given upload_id so this pre-flight
+    // overflow check against the stale snapshot is still correct.
     let new_offset = q.offset.saturating_add(body_len);
     if new_offset > upload.size_bytes {
         return Err(AppError::from(StorageError::SizeOverflow {
@@ -254,14 +249,43 @@ async fn put_chunk(
         }));
     }
 
-    state
-        .blobs
-        .put_chunk(upload_id, q.offset, &body)
-        .await?;
-    state
+    // Atomic reservation of the offset slot. The previous read-then-write
+    // sequence let two concurrent PUTs at the same offset both pass the
+    // check; a single conditional UPDATE closes that race at the DB level.
+    let reserved = state
         .meta
-        .set_upload_offset(upload_id, new_offset)
+        .compare_and_set_upload_offset(upload_id, q.offset, new_offset)
         .await?;
+    if !reserved {
+        // Someone else advanced the cursor. Re-fetch for an accurate error
+        // body so the client can retry at the real cursor.
+        let current = state
+            .meta
+            .get_upload(upload_id)
+            .await
+            .map(|u| u.offset_bytes)
+            // If it disappeared, fall back to the stale snapshot value.
+            .unwrap_or(upload.offset_bytes);
+        return Err(AppError::from(StorageError::OffsetMismatch {
+            expected: current,
+            actual: q.offset,
+        }));
+    }
+
+    // DB slot reserved; append bytes. If the blob write fails after we've
+    // already advanced the cursor, the upload can't finalize (sha will
+    // mismatch) — the client will re-init. Inverting the order (blob first,
+    // then DB) would leave two concurrent PUTs appending at the same byte
+    // range, which is worse.
+    if let Err(e) = state.blobs.put_chunk(upload_id, q.offset, &body).await {
+        warn!(
+            %upload_id,
+            offset = q.offset,
+            error = %e,
+            "blob append failed after offset reservation; upload left in broken state"
+        );
+        return Err(AppError::from(e));
+    }
 
     Ok(Json(ChunkResponse { next_offset: new_offset }))
 }

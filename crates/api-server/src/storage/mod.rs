@@ -179,6 +179,23 @@ pub trait MetadataStore: Send + Sync + 'static {
         new_offset: u64,
     ) -> Result<(), StorageError>;
 
+    /// Atomically advance the cursor iff it currently equals
+    /// `expected_offset`. Returns `Ok(true)` when exactly one row updated,
+    /// `Ok(false)` when the row exists but the cursor had already moved
+    /// (i.e. a concurrent PUT won the race), and
+    /// `Err(UploadNotFound)` when the upload_id doesn't exist at all.
+    ///
+    /// Callers use this to make the "read offset → write offset" sequence
+    /// in the chunk handler atomic at the DB level, closing the
+    /// time-of-check/time-of-use race between two concurrent PUTs at the
+    /// same offset.
+    async fn compare_and_set_upload_offset(
+        &self,
+        upload_id: Uuid,
+        expected_offset: u64,
+        new_offset: u64,
+    ) -> Result<bool, StorageError>;
+
     async fn mark_upload_finalized(&self, upload_id: Uuid) -> Result<(), StorageError>;
 
     /// Look up an existing upload for (device_id, bundle_id) that we can

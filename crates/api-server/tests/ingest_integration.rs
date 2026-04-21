@@ -448,3 +448,92 @@ async fn resume_with_drifted_init_invariants_is_rejected() {
     let resume: BundleInitResponse = init_again.json().await.unwrap();
     assert_eq!(resume.resume_offset, 0);
 }
+
+/// Must-fix #3 regression: the atomic compare-and-set on offset_bytes means
+/// exactly one of two concurrent PUTs at the same offset wins. The other
+/// gets a 409 offset_mismatch. Without the CAS, both could pass the
+/// read-then-write check and double-write.
+#[tokio::test]
+async fn concurrent_chunks_at_same_offset_one_wins() {
+    let server = start_server().await;
+    let base = server.base.clone();
+    let client = reqwest::Client::new();
+
+    let device_id = "WIN-RACE-05";
+    let payload: Vec<u8> = (0..8192u32).map(|i| (i % 251) as u8).collect();
+    let sha = sha256_hex(&payload);
+    let bundle_id = Uuid::now_v7();
+
+    let init: BundleInitResponse = client
+        .post(format!("{base}/v1/ingest/bundles"))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha.clone(),
+            size_bytes: payload.len() as u64,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Fire two PUTs at offset=0 concurrently.
+    let upload_id = init.upload_id;
+    let base1 = base.clone();
+    let body1 = payload.clone();
+    let h1 = tokio::spawn({
+        let client = client.clone();
+        async move {
+            client
+                .put(format!(
+                    "{base1}/v1/ingest/bundles/{upload_id}/chunks?offset=0"
+                ))
+                .header("x-device-id", device_id)
+                .body(body1)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    });
+    let base2 = base.clone();
+    let body2 = payload.clone();
+    let h2 = tokio::spawn({
+        let client = client.clone();
+        async move {
+            client
+                .put(format!(
+                    "{base2}/v1/ingest/bundles/{upload_id}/chunks?offset=0"
+                ))
+                .header("x-device-id", device_id)
+                .body(body2)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    });
+
+    let s1 = h1.await.unwrap();
+    let s2 = h2.await.unwrap();
+
+    let successes = [s1, s2].iter().filter(|s| s.is_success()).count();
+    let conflicts = [s1, s2]
+        .iter()
+        .filter(|s| **s == reqwest::StatusCode::CONFLICT)
+        .count();
+    assert_eq!(
+        successes, 1,
+        "exactly one PUT should win (got s1={s1}, s2={s2})"
+    );
+    assert_eq!(
+        conflicts, 1,
+        "the loser must 409 offset_mismatch (got s1={s1}, s2={s2})"
+    );
+}

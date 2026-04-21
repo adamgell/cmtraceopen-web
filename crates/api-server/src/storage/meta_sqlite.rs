@@ -234,6 +234,43 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn compare_and_set_upload_offset(
+        &self,
+        upload_id: Uuid,
+        expected_offset: u64,
+        new_offset: u64,
+    ) -> Result<bool, StorageError> {
+        // Single conditional UPDATE makes the offset check atomic at the
+        // SQLite level: two concurrent PUTs at the same offset can't both
+        // succeed because only one `WHERE offset_bytes = ?` will match.
+        let res = sqlx::query(
+            "UPDATE uploads SET offset_bytes = ? \
+             WHERE upload_id = ? AND offset_bytes = ?",
+        )
+        .bind(new_offset as i64)
+        .bind(upload_id.to_string())
+        .bind(expected_offset as i64)
+        .execute(&self.pool)
+        .await?;
+
+        if res.rows_affected() == 1 {
+            return Ok(true);
+        }
+        // 0 rows — either the upload_id doesn't exist or the offset moved.
+        // Disambiguate with a cheap existence check so the handler can return
+        // the right HTTP status (404 vs 409).
+        let exists = sqlx::query("SELECT 1 FROM uploads WHERE upload_id = ?")
+            .bind(upload_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some();
+        if exists {
+            Ok(false)
+        } else {
+            Err(StorageError::UploadNotFound(upload_id))
+        }
+    }
+
     async fn mark_upload_finalized(&self, upload_id: Uuid) -> Result<(), StorageError> {
         let res = sqlx::query("UPDATE uploads SET finalized = 1 WHERE upload_id = ?")
             .bind(upload_id.to_string())
