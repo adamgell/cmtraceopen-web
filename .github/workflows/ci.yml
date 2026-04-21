@@ -1,0 +1,126 @@
+name: "cmtraceopen-web: CI"
+
+on:
+  push:
+    branches: [main]
+  # Run on PRs to any branch so stacked PRs (e.g. feat/ansible-deploy-kit
+  # targeting feat/api-server-scaffold) still get verified before merge.
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check & Test
+    runs-on: ubuntu-latest
+    steps:
+      # --- Checkout ------------------------------------------------------
+      # cmtraceopen is a git submodule at ./cmtraceopen; cmtrace-wasm path-
+      # depends on `../cmtraceopen/crates/cmtraceopen-parser`. Pin recorded
+      # in .gitmodules — hermetic.
+      #
+      # `submodules: true` (not `recursive`) because cmtraceopen has some
+      # accidentally-tracked Claude-worktree gitlinks under .claude/worktrees/
+      # that aren't real submodules (no .gitmodules entry). They'll be
+      # cleaned up in a follow-up on cmtraceopen; until then, skip recursion.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      # --- Rust toolchain ------------------------------------------------
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            cmtrace-wasm/target/
+          key: >-
+            ${{ runner.os }}-cargo-${{
+              hashFiles('Cargo.lock', 'cmtrace-wasm/Cargo.lock')
+            }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # --- Rust: root workspace (api-server + common-wire) --------------
+      - name: cargo check (workspace)
+        run: cargo check --workspace
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+      - name: cargo clippy (workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --- Rust: cmtrace-wasm (self-hosting workspace, wasm target) ----
+      - name: cargo check (cmtrace-wasm, wasm32)
+        working-directory: cmtrace-wasm
+        run: cargo check --target wasm32-unknown-unknown
+
+      - name: cargo clippy (cmtrace-wasm, wasm32)
+        working-directory: cmtrace-wasm
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+
+      # --- wasm-pack (pre-built release binary, not cargo install) ------
+      # Avoids the ~5 min `cargo install wasm-pack` build and its ring
+      # compile on the runner. The installer drops wasm-pack in /usr/local/bin.
+      - name: Install wasm-pack
+        run: |
+          curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
+          wasm-pack --version
+
+      # --- Node + pnpm ---------------------------------------------------
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm via corepack
+        run: |
+          corepack enable
+          corepack prepare --activate
+          pnpm --version
+
+      - name: Cache pnpm store
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.local/share/pnpm/store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # --- Full build (wasm:build + tsc --noEmit + vite build) ---------
+      - name: pnpm build
+        run: pnpm build
+
+      # --- Docker image build (sanity; no push) -------------------------
+      # Ensures the Dockerfile stays buildable on every PR. Uses buildx so
+      # --mount=type=cache in the Dockerfile works. linux/amd64 only here;
+      # ARM64 images are produced locally on Colima (Apple Silicon) and on-
+      # demand via `docker buildx build --platform linux/arm64,linux/amd64`.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build api-server image (no push)
+        run: |
+          docker buildx build \
+            --file crates/api-server/Dockerfile \
+            --tag cmtraceopen-api:ci \
+            --load \
+            .
