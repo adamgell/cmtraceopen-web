@@ -16,9 +16,16 @@
 #                                 before deploying. Set false if you want the
 #                                 playbook to NEVER auto-pull (e.g. on a host
 #                                 where you manage branches manually).
+#   compose_stack_git_recursive  clone/update with --recurse-submodules so
+#                                 gitlink entries (e.g. the cmtraceopen parser
+#                                 crate vendored into cmtraceopen-web) are
+#                                 populated. Leave true unless the target repo
+#                                 has no submodules or you're deliberately
+#                                 vendoring them out of band.
 
 compose_stack_compose_file: docker-compose.yml
 compose_stack_pull_if_exists: true
+compose_stack_git_recursive: true
 
 # Homebrew paths — Apple Silicon default. Override for Intel.
 compose_stack_brew_prefix: /opt/homebrew
