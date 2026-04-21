@@ -18,7 +18,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KIT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-SSH_KEY="$KIT_DIR/id_ed25519"
+
+# Default SSH key: the control machine's own ~/.ssh/id_ed25519. Override with
+# `-i PATH` or the CMTRACE_SSH_KEY env var if you want to use the kit-bundled
+# key (`$KIT_DIR/id_ed25519`) or a non-default location.
+SSH_KEY="${CMTRACE_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 
 # ---------------------------------------------------------------------------
 # Remote target
@@ -48,12 +52,15 @@ Options:
   -b, --branch NAME     Branch to deploy (default: main)
   -s, --skip-build      docker compose up -d without --build (fast redeploy)
   -n, --no-smoke        Skip the post-deploy curl health checks
+  -i, --ssh-key PATH    SSH private key (default: \$HOME/.ssh/id_ed25519,
+                        override via CMTRACE_SSH_KEY env var)
   -h, --help            Show this help and exit
 
 Examples:
   $(basename "$0")                         # deploy main, full rebuild
   $(basename "$0") --branch feat/foo       # deploy a feature branch
   $(basename "$0") --skip-build            # fast restart, same image
+  $(basename "$0") -i ./dev/bigmac-runner-kit/id_ed25519   # use kit-bundled key
 EOF
 }
 
@@ -75,6 +82,11 @@ while [ $# -gt 0 ]; do
       NO_SMOKE=1
       shift
       ;;
+    -i|--ssh-key)
+      [ $# -ge 2 ] || { echo "ERROR: --ssh-key needs a value" >&2; exit 1; }
+      SSH_KEY="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -92,7 +104,8 @@ done
 # ---------------------------------------------------------------------------
 if [ ! -f "$SSH_KEY" ]; then
   echo "ERROR: SSH key not found at $SSH_KEY" >&2
-  echo "       The kit expects an ed25519 private key at dev/bigmac-runner-kit/id_ed25519." >&2
+  echo "       Default is \$HOME/.ssh/id_ed25519. Override with -i/--ssh-key PATH" >&2
+  echo "       or CMTRACE_SSH_KEY env var (e.g. dev/bigmac-runner-kit/id_ed25519)." >&2
   exit 2
 fi
 
