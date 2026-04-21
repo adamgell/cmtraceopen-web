@@ -1,0 +1,31 @@
+{
+  "name": "cmtraceopen-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Browser log viewer for CMTrace Open — parses logs client-side via WebAssembly.",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "wasm:build": "wasm-pack build cmtrace-wasm --target web --out-dir ../pkg",
+    "dev": "pnpm wasm:build && vite",
+    "build": "pnpm wasm:build && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "pnpm wasm:build && tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

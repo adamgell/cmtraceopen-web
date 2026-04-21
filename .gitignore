@@ -1,0 +1,27 @@
+# Node
+node_modules/
+.npm
+.pnpm-store/
+
+# Build output
+dist/
+pkg/
+
+# Rust
+target/
+crates/**/target/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Claude Code local
+.claude/settings.local.json
+.claude/worktrees/
+.claude-dev-shell.ps1

@@ -1,0 +1,25 @@
+[package]
+name = "cmtrace-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "wasm-bindgen wrapper around cmtraceopen-parser for the cmtraceopen-web browser viewer."
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Relative path dep: requires cmtraceopen to be checked out as a sibling directory.
+cmtraceopen-parser = { path = "../../cmtraceopen/crates/cmtraceopen-parser" }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[features]
+default = ["console_error_panic_hook"]
+
+# wasm-opt is run by wasm-pack on release builds; aggressive size optimization.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
