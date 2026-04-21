@@ -35,6 +35,11 @@ RUN apt-get update \
 # Copy the workspace. .dockerignore keeps the context tight (no node_modules,
 # no React frontend, no cmtrace-wasm — the latter has a sibling-repo path
 # dep that would break inside the container).
+#
+# The cmtraceopen submodule IS in context now: api-server's parse-on-ingest
+# worker depends on cmtraceopen-parser. Make sure the host has run
+# `git submodule update --init --recursive` before kicking off the build,
+# otherwise this COPY brings in an empty cmtraceopen/ and the build fails.
 COPY . .
 
 # Release build of just the api-server crate (and its transitive dep on

@@ -12,7 +12,7 @@ use api_server::state::AppState;
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
 use common_wire::ingest::{
     content_kind, BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest,
-    BundleInitResponse,
+    BundleInitResponse, ChunkUploadResponse,
 };
 use common_wire::{Paginated, SessionSummary};
 use sha2::{Digest, Sha256};
@@ -106,8 +106,8 @@ async fn happy_path_single_chunk() {
         .await
         .unwrap();
     assert!(resp.status().is_success(), "chunk status: {}", resp.status());
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["nextOffset"], payload.len() as u64);
+    let body: ChunkUploadResponse = resp.json().await.unwrap();
+    assert_eq!(body.next_offset, payload.len() as u64);
 
     // finalize
     let fin: BundleFinalizeResponse = client
@@ -148,7 +148,18 @@ async fn happy_path_single_chunk() {
     assert_eq!(list.items[0].session_id, fin.session_id);
     assert_eq!(list.items[0].bundle_id, bundle_id);
     assert_eq!(list.items[0].size_bytes, payload.len() as u64);
-    assert_eq!(list.items[0].parse_state, "pending");
+    // parse_state races with the background parse worker: the finalize
+    // response returned "pending" above (asserted), but by the time this
+    // list call lands the worker may have already flipped the state —
+    // and since this test ships a non-zip "hello bundle" payload under
+    // content_kind=evidence-zip, the worker will surface "failed". Both
+    // are legitimate outcomes for an ingest test that doesn't care about
+    // parsing; pin the set to just exclude "ok" / "partial" drift.
+    assert!(
+        matches!(list.items[0].parse_state.as_str(), "pending" | "failed"),
+        "unexpected parse_state: {}",
+        list.items[0].parse_state
+    );
 
     // And reachable directly.
     let one: SessionSummary = client

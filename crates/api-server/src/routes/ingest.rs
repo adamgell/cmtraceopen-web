@@ -22,11 +22,12 @@ use uuid::Uuid;
 
 use common_wire::ingest::{
     content_kind, BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest,
-    BundleInitResponse,
+    BundleInitResponse, ChunkUploadResponse,
 };
 
 use crate::error::AppError;
 use crate::extract::DeviceId;
+use crate::pipeline::parse_worker::{self, ParseDeps};
 use crate::state::{AppState, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE};
 use crate::storage::{NewUpload, SessionRow, StorageError};
 
@@ -219,12 +220,6 @@ struct ChunkQuery {
     offset: u64,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ChunkResponse {
-    #[serde(rename = "nextOffset")]
-    next_offset: u64,
-}
-
 #[instrument(
     skip_all,
     fields(
@@ -240,7 +235,7 @@ async fn put_chunk(
     Path(upload_id): Path<Uuid>,
     Query(q): Query<ChunkQuery>,
     body: Bytes,
-) -> Result<Json<ChunkResponse>, AppError> {
+) -> Result<Json<ChunkUploadResponse>, AppError> {
     let upload = state.meta.get_upload(upload_id).await?;
 
     // Device binding: the upload belongs to the device that created it. A
@@ -315,7 +310,7 @@ async fn put_chunk(
     }
 
     info!(next_offset = new_offset, "chunk accepted");
-    Ok(Json(ChunkResponse { next_offset: new_offset }))
+    Ok(Json(ChunkUploadResponse { next_offset: new_offset }))
 }
 
 #[instrument(
@@ -435,8 +430,27 @@ async fn finalize(
         Err(e) => return Err(AppError::from(e)),
     }
 
-    // TODO(M2): enqueue a background parse job using cmtraceopen-parser from
-    // the sibling submodule. For MVP parse_state stays "pending".
+    // Spawn the parse worker as a fire-and-forget background task. We
+    // intentionally don't block finalize on parsing — the response goes
+    // back to the agent immediately with parse_state = "pending", and the
+    // worker flips it to "ok" / "partial" / "failed" once it finishes.
+    // Errors are logged via tracing in the worker; nothing to await here.
+    let parse_deps = ParseDeps {
+        meta: state.meta.clone(),
+        blobs: state.blobs.clone(),
+    };
+    let parse_blob_uri = row.blob_uri.clone();
+    let parse_content_kind = row.content_kind.clone();
+    let parse_session_id = row.session_id;
+    tokio::spawn(async move {
+        parse_worker::parse_session(
+            parse_session_id,
+            parse_blob_uri,
+            parse_content_kind,
+            parse_deps,
+        )
+        .await;
+    });
 
     info!(
         %session_id,
@@ -444,7 +458,7 @@ async fn finalize(
         %device_id,
         bundle_id = %upload.bundle_id,
         size_bytes = row.size_bytes,
-        "bundle finalized"
+        "bundle finalized; parse worker spawned"
     );
 
     Ok((

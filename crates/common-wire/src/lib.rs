@@ -67,6 +67,16 @@ pub mod ingest {
         pub resume_offset: u64,
     }
 
+    /// Server → agent: chunk accepted; here's the byte offset to send next.
+    /// Returned from `PUT /v1/ingest/bundles/{upload_id}/chunks?offset=N`.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct ChunkUploadResponse {
+        /// Byte offset immediately after the bytes the server just committed.
+        /// Clients should send the next chunk at this offset.
+        pub next_offset: u64,
+    }
+
     /// Agent → server: finalize an upload.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -174,6 +184,7 @@ pub struct Paginated<T> {
 // Re-exports so downstream crates can use the flat path if they prefer.
 pub use ingest::{
     BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest, BundleInitResponse,
+    ChunkUploadResponse,
 };
 pub use query::{FileSummary, LogEntryDto};
 pub use registry::{DeviceSummary, SessionSummary};
