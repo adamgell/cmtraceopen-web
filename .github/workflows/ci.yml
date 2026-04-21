@@ -31,7 +31,10 @@ jobs:
         with:
           repository: adamgell/cmtraceopen
           path: cmtraceopen
-          ref: main
+          # TODO(phase-1-merge): flip back to `main` once adamgell/cmtraceopen#155
+          # (parser crate extraction) merges. Until then, `main` has no
+          # crates/cmtraceopen-parser/ yet, and cmtrace-wasm's path dep fails.
+          ref: feat/platform-split
 
       # --- Rust toolchain ------------------------------------------------
       - name: Setup Rust
