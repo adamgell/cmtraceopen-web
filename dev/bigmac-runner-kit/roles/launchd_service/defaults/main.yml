@@ -1,0 +1,31 @@
+---
+# launchd_service role — deploy a list of user-scope LaunchAgents on macOS.
+#
+# Each entry in `launchd_services` becomes ~/Library/LaunchAgents/<label>.plist
+# and gets (re)loaded via launchctl when the file changes.
+#
+# Entry schema:
+#   label:         required. Reverse-DNS string, also used as filename stem.
+#                  e.g. "one.gell.myservice"
+#   program_args:  required. List of strings passed to `ProgramArguments`.
+#                  e.g. ["/opt/homebrew/bin/node", "/Users/Adam.Gell/app/server.js"]
+#   working_dir:   optional. Default: $HOME.
+#   env:           optional dict of env vars set via `EnvironmentVariables`.
+#                  e.g. { PORT: "8080", NODE_ENV: "production" }
+#   run_at_load:   optional bool. Default true. Start immediately when loaded.
+#   keep_alive:    optional. Default { Crashed: true, SuccessfulExit: false }.
+#                  Set to `false` for one-shots, `true` for always-restart,
+#                  or a dict for fine-grained control (see man launchd.plist).
+#   throttle:      optional int seconds between restart attempts. Default 10.
+#   schedule:      optional dict. If set, renders as StartCalendarInterval
+#                  (cron-like). Keys: Minute, Hour, Day, Weekday (Sun=0), Month.
+#                  Omit a key to mean "every". Mutually useful with run_at_load=false.
+#   stdout_path:   optional. Default: ~/Library/Logs/<label>.log
+#   stderr_path:   optional. Default: same as stdout_path
+#   process_type:  optional. "Background" | "Standard" | "Adaptive" | "Interactive".
+#                  Default "Background".
+launchd_services: []
+
+launchd_user_home: "/Users/{{ ansible_user | default('Adam.Gell') }}"
+launchd_agents_dir: "{{ launchd_user_home }}/Library/LaunchAgents"
+launchd_logs_dir: "{{ launchd_user_home }}/Library/Logs"

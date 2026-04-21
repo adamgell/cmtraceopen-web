@@ -1,0 +1,10 @@
+---
+# Deploy a list of launchd services to BigMac26.
+# Override `launchd_services` at invocation time or in a vars file.
+- name: Deploy launchd services to Mac hosts
+  hosts: mac_hosts
+  gather_facts: false
+  vars_files:
+    - ../examples/hello-service.yml
+  roles:
+    - role: launchd_service

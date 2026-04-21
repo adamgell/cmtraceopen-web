@@ -1,0 +1,29 @@
+---
+# Example launchd_services list. Referenced from playbooks/deploy.yml.
+# Replace with your own service(s).
+launchd_services:
+  # A trivial always-on HTTP server as a smoke test. Visit http://192.168.2.50:9999
+  - label: one.gell.hello
+    program_args:
+      - /usr/bin/python3
+      - -m
+      - http.server
+      - "9999"
+      - --bind
+      - 0.0.0.0
+    working_dir: /Users/Adam.Gell
+    env:
+      PYTHONUNBUFFERED: "1"
+    keep_alive:
+      Crashed: true
+      SuccessfulExit: false
+
+  # An every-5-minutes cron-style job (no long-running process).
+  # - label: one.gell.tick
+  #   program_args: ["/bin/sh", "-c", "echo tick $(date -Iseconds) >> /tmp/tick.log"]
+  #   run_at_load: false
+  #   keep_alive: false
+  #   schedule: { Minute: "*/5" }   # NOTE: launchd's StartCalendarInterval
+  #                                 # accepts integers, not cron wildcards.
+  #                                 # For */N, use multiple entries or omit
+  #                                 # the key (meaning "every"). See launchd.plist(5).
