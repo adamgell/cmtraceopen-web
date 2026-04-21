@@ -13,19 +13,13 @@ use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
+use common_wire::ErrorBody;
 
 pub const DEVICE_ID_HEADER: &str = "x-device-id";
 
 /// Extracted device identity. Just a newtype over the header value for now.
 #[derive(Debug, Clone)]
 pub struct DeviceId(pub String);
-
-#[derive(Serialize)]
-struct ErrBody<'a> {
-    error: &'a str,
-    message: &'a str,
-}
 
 impl<S> FromRequestParts<S> for DeviceId
 where
@@ -42,9 +36,9 @@ where
         let s = hv.to_str().map_err(|_| {
             (
                 StatusCode::BAD_REQUEST,
-                Json(ErrBody {
-                    error: "bad_request",
-                    message: "X-Device-Id must be ASCII",
+                Json(ErrorBody {
+                    error: "bad_request".into(),
+                    message: "X-Device-Id must be ASCII".into(),
                 }),
             )
                 .into_response()
@@ -54,9 +48,9 @@ where
         if trimmed.is_empty() || trimmed.len() > 256 {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(ErrBody {
-                    error: "bad_request",
-                    message: "X-Device-Id must be 1..=256 chars",
+                Json(ErrorBody {
+                    error: "bad_request".into(),
+                    message: "X-Device-Id must be 1..=256 chars".into(),
                 }),
             )
                 .into_response());
@@ -69,9 +63,9 @@ where
 fn missing_header_response() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ErrBody {
-            error: "bad_request",
-            message: "missing X-Device-Id header (MVP device identity until mTLS lands)",
+        Json(ErrorBody {
+            error: "bad_request".into(),
+            message: "missing X-Device-Id header (MVP device identity until mTLS lands)".into(),
         }),
     )
         .into_response()
