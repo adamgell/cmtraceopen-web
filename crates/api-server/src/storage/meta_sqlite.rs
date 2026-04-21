@@ -7,10 +7,11 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::{
@@ -30,8 +31,25 @@ impl SqliteMetadataStore {
     /// Open (or create) a SQLite DB at `path` and run pending migrations.
     /// `path` may be `:memory:` for tests.
     pub async fn connect(path: &str) -> Result<Self, StorageError> {
+        // WAL + busy_timeout on every connection:
+        //
+        //   * journal_mode=WAL lets multiple readers coexist with a single
+        //     writer instead of the default rollback-journal's whole-DB
+        //     lock, which matters as soon as the ingest + query paths share
+        //     the pool under load.
+        //   * busy_timeout=5s tells SQLite to sleep-and-retry instead of
+        //     immediately throwing SQLITE_BUSY when a writer is mid-commit.
+        //     Without it sqlx surfaces transient BUSY errors as hard 5xx
+        //     even under modest contention.
+        //
+        // In-memory DBs ignore journal_mode (they're always MEMORY), but
+        // applying the option is harmless and keeps the code path uniform
+        // for tests.
+        let busy = Duration::from_secs(5);
         let opts = if path == ":memory:" {
             SqliteConnectOptions::from_str("sqlite::memory:")?
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(busy)
         } else {
             // Make sure the parent directory exists so a default dev path
             // like ./data/meta.sqlite just works.
@@ -43,6 +61,8 @@ impl SqliteMetadataStore {
             SqliteConnectOptions::from_str(&format!("sqlite://{path}"))?
                 .create_if_missing(true)
                 .foreign_keys(true)
+                .journal_mode(SqliteJournalMode::Wal)
+                .busy_timeout(busy)
         };
 
         let pool = SqlitePoolOptions::new()
