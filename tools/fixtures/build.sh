@@ -64,7 +64,23 @@ cat > "${STAGE}/evidence/logs/test.log" <<'LOG'
 LOG
 
 # Pin mtimes so zip headers are deterministic.
-find "${STAGE}" -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
+#
+# GNU touch accepts `-d "@<epoch>"`, but macOS / BSD touch does not —
+# it wants `-t YYYYMMDDhhmm.ss`. Detect the flavor once and wrap the
+# per-file call so the script is portable between Linux CI, macOS dev
+# boxes, and Git Bash on Windows (which ships GNU coreutils).
+set_epoch_mtime() {
+  if touch --version 2>/dev/null | grep -q GNU; then
+    touch -d "@${SOURCE_DATE_EPOCH}" "$@"
+  else
+    local formatted
+    formatted=$(date -r "${SOURCE_DATE_EPOCH}" +%Y%m%d%H%M.%S 2>/dev/null)
+    touch -t "${formatted}" "$@"
+  fi
+}
+export -f set_epoch_mtime
+export SOURCE_DATE_EPOCH
+find "${STAGE}" -exec bash -c 'set_epoch_mtime "$@"' _ {} +
 
 # Build zip deterministically:
 #   -X  strip extra fields (uid/gid, extended timestamps)
