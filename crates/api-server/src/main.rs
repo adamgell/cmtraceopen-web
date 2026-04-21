@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use api_server::config::Config;
 use api_server::router;
-use api_server::state::AppState;
+use api_server::state::{AppState, CorsConfig};
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -27,6 +27,8 @@ async fn main() -> ExitCode {
         listen_addr = %config.listen_addr,
         data_dir = %config.data_dir.display(),
         sqlite_path = %config.sqlite_path,
+        cors_origins = ?config.allowed_origins,
+        cors_credentials = config.allow_credentials,
         version = env!("CARGO_PKG_VERSION"),
         "starting cmtraceopen-api"
     );
@@ -50,7 +52,11 @@ async fn main() -> ExitCode {
     // AppState is constructed here so `started_at` reflects the real
     // process start (before we block in `bind`). Cloned by reference into
     // the router and the request-counter middleware.
-    let state = AppState::new(meta, blobs, config.listen_addr.to_string());
+    let cors = CorsConfig {
+        allowed_origins: config.allowed_origins.clone(),
+        allow_credentials: config.allow_credentials,
+    };
+    let state = AppState::with_cors(meta, blobs, config.listen_addr.to_string(), cors);
 
     let app = router(state).layer(TraceLayer::new_for_http());
 

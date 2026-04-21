@@ -15,6 +15,20 @@ use std::time::Instant;
 
 use crate::storage::{BlobStore, MetadataStore};
 
+/// Subset of [`crate::config::Config`] that the router threads into layers.
+///
+/// Kept as a small `Clone` struct (rather than an `Arc<Config>`) so tests can
+/// build one in-line without going through `Config::from_env`. Populated from
+/// the full `Config` in `main.rs` and defaulted (empty list, credentials
+/// disabled) in integration tests that don't care about CORS.
+#[derive(Debug, Clone, Default)]
+pub struct CorsConfig {
+    /// Exact origins to allow. Empty = fail closed (no cross-origin traffic).
+    pub allowed_origins: Vec<String>,
+    /// Mirror of [`crate::config::Config::allow_credentials`].
+    pub allow_credentials: bool,
+}
+
 /// Default chunk size we advertise to agents: 8 MiB. Picked to balance
 /// round-trip overhead against memory-per-request. Agents MAY send smaller
 /// chunks; the server enforces a hard cap (32 MiB) per chunk regardless.
@@ -42,15 +56,33 @@ pub struct AppState {
     /// Hostname reported by the kernel at startup (best-effort; falls back to
     /// `"unknown"` if the OS lookup fails).
     pub hostname: String,
+    /// CORS settings threaded into the outer layer at router-build time. Kept
+    /// on `AppState` so tests and `main.rs` share a single construction path.
+    pub cors: CorsConfig,
 }
 
 impl AppState {
     /// Build the full shared state. `listen_addr` is the stringified bind
     /// address used purely for display on the status page.
+    ///
+    /// Integration tests that don't exercise CORS can call this helper; it
+    /// defaults to an empty allowed-origins list (fail-closed). Call sites
+    /// that need CORS (the real `main.rs`, the CORS integration tests) use
+    /// [`AppState::with_cors`] instead.
     pub fn new(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
         listen_addr: String,
+    ) -> Arc<Self> {
+        Self::with_cors(meta, blobs, listen_addr, CorsConfig::default())
+    }
+
+    /// Same as [`AppState::new`] but with an explicit CORS config.
+    pub fn with_cors(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        cors: CorsConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
             meta,
@@ -59,6 +91,7 @@ impl AppState {
             request_count: AtomicU64::new(0),
             listen_addr,
             hostname: detect_hostname(),
+            cors,
         })
     }
 }
