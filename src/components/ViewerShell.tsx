@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { initWasm, parse } from "../lib/wasm-bridge";
 import type { ParseResult } from "../lib/log-types";
 import { DropZone } from "./DropZone";
@@ -18,6 +18,11 @@ type State =
  */
 export function ViewerShell() {
   const [state, setState] = useState<State>({ tag: "init" });
+  // Monotonic request counter used to discard stale parse results when a user
+  // drops a new file before the previous parse resolves. Each handleFile call
+  // increments this and captures its own id; on resolution we only apply the
+  // setState if the captured id is still the latest.
+  const parseReqId = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -37,12 +42,16 @@ export function ViewerShell() {
   }, []);
 
   const handleFile = useCallback(async (file: File) => {
+    const reqId = ++parseReqId.current;
     setState({ tag: "loading", fileName: file.name });
     try {
       const text = await file.text();
-      const result = await parse(text, file.name);
+      const result = await parse(text, file.name, file.size);
+      // Guard against a stale parse: a newer handleFile call has superseded us.
+      if (parseReqId.current !== reqId) return;
       setState({ tag: "loaded", fileName: file.name, result });
     } catch (err) {
+      if (parseReqId.current !== reqId) return;
       setState({ tag: "error", message: `Failed to parse ${file.name}: ${formatError(err)}` });
     }
   }, []);
@@ -78,13 +87,22 @@ export function ViewerShell() {
         {state.tag === "init" && (
           <CenteredMessage text="Initializing WASM module…" />
         )}
-        {state.tag === "idle" && (
+        {(state.tag === "idle" || state.tag === "loading") && (
           <div style={{ maxWidth: 640, margin: "48px auto 0", width: "100%" }}>
-            <DropZone onFile={handleFile} />
+            <DropZone onFile={handleFile} disabled={state.tag === "loading"} />
+            {state.tag === "loading" && (
+              <div
+                style={{
+                  marginTop: 16,
+                  textAlign: "center",
+                  color: "#666",
+                  fontSize: 14,
+                }}
+              >
+                Parsing {state.fileName}…
+              </div>
+            )}
           </div>
-        )}
-        {state.tag === "loading" && (
-          <CenteredMessage text={`Parsing ${state.fileName}…`} />
         )}
         {state.tag === "loaded" && <EntryList entries={state.result.entries} />}
       </main>
