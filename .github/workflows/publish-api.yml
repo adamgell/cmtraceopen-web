@@ -1,0 +1,97 @@
+name: "cmtraceopen-web: Publish api-server to GHCR"
+
+# Publishes the api-server Docker image to GitHub Container Registry
+# (ghcr.io/adamgell/cmtraceopen-api) on `api-v*` tags. Removes the
+# "rebuild from source on BigMac every deploy" friction — the Ansible
+# compose_stack role can pull the published image in a follow-up.
+#
+# Tag format: `api-v<semver>` (e.g. api-v0.1.0, api-v0.2.0-rc.1).
+# See docs/release.md for the release cut procedure.
+
+on:
+  push:
+    tags:
+      - "api-v*"
+  # Manual trigger — useful for re-publishing a tag or doing a
+  # push-less dry-run build (e.g. to validate multi-arch still works).
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push image to GHCR (false = build-only dry run)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-api-server:
+    name: Build & publish api-server image
+    runs-on: ubuntu-latest
+    steps:
+      # --- Checkout ------------------------------------------------------
+      # `submodules: true` because the parser crate lives in the
+      # cmtraceopen submodule (path-depended on by api-server via the
+      # workspace). See ci.yml for the rationale against `recursive`.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      # --- QEMU (for linux/arm64 emulation on an amd64 runner) ----------
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      # --- Buildx --------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      # --- GHCR login ----------------------------------------------------
+      # GITHUB_TOKEN is auto-provided; `packages: write` in the
+      # permissions block above scopes it for ghcr.io pushes.
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Metadata / tags ----------------------------------------------
+      # Strip the `api-v` prefix off the git tag to produce semver image
+      # tags. For a stable release like api-v0.1.0 this produces:
+      #   - 0.1.0    (exact)
+      #   - 0.1      (minor)
+      #   - latest   (newest stable via flavor=latest=auto)
+      # For a pre-release like api-v0.2.0-rc.1 only the exact
+      # `0.2.0-rc.1` tag is emitted (no `latest`, no minor rollup).
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ghcr.io/adamgell/cmtraceopen-api
+          tags: |
+            type=match,pattern=api-v(.*),group=1
+            type=match,pattern=api-v(\d+\.\d+)\.\d+$,group=1
+          flavor: |
+            latest=auto
+
+      # --- Build & push --------------------------------------------------
+      # Multi-arch via QEMU emulation. Pushes on tag triggers; on
+      # workflow_dispatch, honors the `push` input so reviewers can do a
+      # dry-run build without uploading an image.
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: crates/api-server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
