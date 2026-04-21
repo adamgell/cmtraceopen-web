@@ -1,106 +1,245 @@
 // cmtraceopen-agent binary entrypoint.
 //
-// This is the skeleton. Today the Windows build just boots tracing, loads
-// config, logs the banner, and parks on ctrl-c. The Linux build is a stub
-// so CI can still run `cargo check -p agent` — we ship a single crate, not
-// a matrix of per-OS crates.
+// Wave 2 M1 shape: runs as a foreground daemon (or a `--oneshot` mode
+// for testing) that collects evidence, enqueues it, and drains the
+// queue to the api-server. The Windows-service registration is still a
+// TODO — see the block comment in `run`.
 //
-// Planned follow-up work (ordered by how we think we'll land it):
+// Planned follow-up work:
 //
-//   1. Windows service registration via
-//      `windows_service::service_dispatcher::start`, including status
-//      reporting (StartPending -> Running -> StopPending -> Stopped) and
-//      wiring SERVICE_CONTROL_STOP into graceful shutdown.
-//   2. mTLS client cert loading from `Cert:\LocalMachine\My` (or an
-//      enrollment-provisioned PFX under %ProgramData%\CMTraceOpen\Agent),
-//      then plumbing the resulting `rustls::ClientConfig` into the upload
-//      client.
-//   3. Collection scheduler (cron-like, driven by `config.evidence_schedule`)
-//      that invokes the individual collectors and hands their output to
-//      the upload queue.
-//   4. Collectors: `logs.rs` (ccmexec.log etc.), `event_logs.rs` (Windows
-//      Event Log pull), `dsregcmd.rs` (Entra / AD join status), `evidence.rs`
-//      (scheduled full pulls).
-//   5. Upload queue: chunked, resumable uploads mirroring the api-server's
-//      ingest protocol (see common-wire) plus retry/backoff.
-//   6. State DB: SQLite cursor DB at
-//      `%ProgramData%\CMTraceOpen\Agent\state.db` recording last-offset
-//      per log source + upload queue state.
-//   7. MSI packaging via WiX — separate repo track; this crate just
-//      produces the .exe the MSI wraps.
-//   8. HKLM registry overrides + ADMX policy ingestion.
+//   1. **TODO (Wave 2 M2):** Windows service registration via
+//      `windows_service::service_dispatcher::start`. The service should
+//      report status back to the SCM (StartPending → Running →
+//      StopPending → Stopped) and hook SERVICE_CONTROL_STOP into a
+//      graceful `CancellationToken`. For now the binary is a foreground
+//      daemon — `sc.exe create` + `sc.exe start` works for hand-testing.
+//   2. mTLS client cert loading from `Cert:\LocalMachine\My` (or a
+//      provisioned PFX under `%ProgramData%\CMTraceOpen\Agent`). Until
+//      that lands, identity comes from the `X-Device-Id` header via the
+//      `CMTRACE_DEVICE_ID` config knob.
+//   3. Collection scheduler (cron-like from `config.evidence_schedule`).
+//      MVP loop runs on a simple `tokio::time::interval` and the
+//      `--oneshot` flag skips the loop entirely.
+//   4. HKLM registry overrides + ADMX policy ingestion.
 
 #![forbid(unsafe_code)]
 
-#[cfg(target_os = "windows")]
-mod windows_entry {
-    use std::process::ExitCode;
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::time::Duration;
 
-    use cmtraceopen_agent::{banner, config::AgentConfig};
-    use tokio::signal;
-    use tracing::{info, warn};
-    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use cmtraceopen_agent::collectors::dsregcmd::DsRegCmdCollector;
+use cmtraceopen_agent::collectors::event_logs::EventLogsCollector;
+use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
+use cmtraceopen_agent::collectors::logs::LogsCollector;
+use cmtraceopen_agent::config::AgentConfig;
+use cmtraceopen_agent::queue::{Queue, QueueState};
+use cmtraceopen_agent::uploader::{Uploader, UploaderConfig};
+use cmtraceopen_agent::banner;
+use tokio::signal;
+use tracing::{error, info, warn};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    #[tokio::main]
-    pub async fn main() -> ExitCode {
-        // Env-var layered config is the right default for the scaffold. Once
-        // the service wrapper lands, swap this for the
-        // file-then-registry-then-env precedence described in the plan.
-        let config = AgentConfig::from_env_or_default();
-        init_tracing(&config.log_level);
+/// MVP collection cadence when running in foreground-daemon mode. The
+/// real scheduler reads `config.evidence_schedule` — see TODO above.
+const COLLECT_INTERVAL: Duration = Duration::from_secs(60 * 15);
 
-        info!(banner = %banner(), "cmtraceopen-agent starting");
-        info!(
-            api_endpoint = %config.api_endpoint,
-            request_timeout_secs = config.request_timeout_secs,
-            evidence_schedule = %config.evidence_schedule,
-            queue_max_bundles = config.queue_max_bundles,
-            "loaded config"
-        );
+/// How often to drain the upload queue. Independent of the collect
+/// cadence so failed uploads still retry on a short clock even if new
+/// bundles are collected slowly.
+const DRAIN_INTERVAL: Duration = Duration::from_secs(30);
 
-        // TODO: register as a Windows service:
-        //   windows_service::service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
-        // TODO: load mTLS client cert from LocalMachine\My.
-        // TODO: open the SQLite cursor/queue DB.
-        // TODO: spawn the collection scheduler.
-        // TODO: spawn the upload queue drain task.
+/// Backoff applied to a bundle that failed upload. Separate from the
+/// per-HTTP-call retry inside [`Uploader`] — this is queue-level.
+const QUEUE_FAIL_BACKOFF: Duration = Duration::from_secs(300);
 
-        // Scaffold no-op loop: park until ctrl-c so a human can still smoke
-        // test the binary from a dev shell.
-        match signal::ctrl_c().await {
-            Ok(()) => info!("received ctrl-c, shutting down"),
-            Err(err) => warn!(%err, "failed to install ctrl-c handler"),
-        }
+#[tokio::main]
+async fn main() -> ExitCode {
+    // Minimal arg parse — one flag, no need for a full arg crate.
+    let oneshot = std::env::args().any(|a| a == "--oneshot");
 
-        info!("cmtraceopen-agent stopped cleanly");
-        ExitCode::SUCCESS
-    }
+    let config = AgentConfig::from_env_or_default();
+    init_tracing(&config.log_level);
 
-    fn init_tracing(log_level: &str) {
-        // JSON output, matching the api-server so downstream log shippers
-        // can parse both streams with one pipeline. RUST_LOG wins if set.
-        let filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new(format!("cmtraceopen_agent={log_level},warn")));
-
-        tracing_subscriber::registry()
-            .with(fmt::layer().json().with_current_span(false))
-            .with(filter)
-            .init();
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn main() -> std::process::ExitCode {
-    windows_entry::main()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn main() -> std::process::ExitCode {
-    // Stub for non-Windows targets. The crate still builds on Linux so CI
-    // can run `cargo check -p agent`, but the resulting binary refuses to
-    // do anything — all the real surface area is Win32-specific.
-    eprintln!(
-        "cmtraceopen-agent only runs on Windows (this binary exists in the build matrix for CI compile checks)."
+    info!(banner = %banner(), oneshot, "cmtraceopen-agent starting");
+    info!(
+        api_endpoint = %config.api_endpoint,
+        device_id = %config.resolved_device_id(),
+        queue_max_bundles = config.queue_max_bundles,
+        "loaded config"
     );
-    std::process::ExitCode::from(1)
+
+    match run(config, oneshot).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error!(error = %e, "agent exited with error");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Concrete runtime. Returns on graceful shutdown or fatal error.
+async fn run(config: AgentConfig, oneshot: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Queue lives under %ProgramData% in production; the integration
+    // test overrides via a different `Queue::open(..)` path.
+    let queue_root = Queue::default_root();
+    let queue = Queue::open(&queue_root).await?;
+
+    // Staging area for in-progress evidence collection. Sibling of the
+    // queue so a `du -sh` over the agent's data dir is one walk.
+    let work_root = queue_root
+        .parent()
+        .map(|p| p.join("work"))
+        .unwrap_or_else(|| PathBuf::from("./work"));
+    tokio::fs::create_dir_all(&work_root).await?;
+
+    let orchestrator = build_orchestrator(&config, work_root.clone());
+    let uploader = Uploader::new(UploaderConfig::new(
+        config.api_endpoint.clone(),
+        config.resolved_device_id(),
+        Duration::from_secs(config.request_timeout_secs),
+    ))?;
+
+    if oneshot {
+        // One pass: collect + enqueue + drain once, exit.
+        collect_and_enqueue(&orchestrator, &queue, &work_root).await;
+        drain(&queue, &uploader).await;
+        info!("oneshot complete");
+        return Ok(());
+    }
+
+    // Daemon mode: two concurrent tasks + ctrl-c.
+    let mut collect_tick = tokio::time::interval(COLLECT_INTERVAL);
+    let mut drain_tick = tokio::time::interval(DRAIN_INTERVAL);
+    // Skip the initial immediate tick on the collect side — we don't want
+    // to fire a collection before the daemon is even done booting. Drain
+    // we DO want right away in case the queue has crash-survivor entries.
+    collect_tick.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = collect_tick.tick() => {
+                collect_and_enqueue(&orchestrator, &queue, &work_root).await;
+            }
+            _ = drain_tick.tick() => {
+                drain(&queue, &uploader).await;
+            }
+            result = signal::ctrl_c() => {
+                if let Err(e) = result {
+                    warn!(error = %e, "ctrl-c handler failed");
+                }
+                info!("received shutdown signal, exiting daemon loop");
+                break;
+            }
+        }
+    }
+
+    info!("cmtraceopen-agent stopped cleanly");
+    Ok(())
+}
+
+fn build_orchestrator(config: &AgentConfig, work_root: PathBuf) -> EvidenceOrchestrator {
+    EvidenceOrchestrator::new(
+        LogsCollector::new(config.log_paths.clone()),
+        EventLogsCollector::with_defaults(),
+        DsRegCmdCollector::new(),
+        work_root,
+    )
+}
+
+/// Run one collect pass and enqueue the result. Errors are logged — a
+/// transient collection failure shouldn't tear the daemon down.
+async fn collect_and_enqueue(
+    orch: &EvidenceOrchestrator,
+    queue: &Queue,
+    work_root: &std::path::Path,
+) {
+    match orch.collect_once().await {
+        Ok(bundle) => {
+            let bundle_id = bundle.metadata.bundle_id;
+            match queue.enqueue(bundle.metadata, &bundle.zip_path).await {
+                Ok(_) => info!(%bundle_id, "bundle enqueued"),
+                Err(e) => warn!(%bundle_id, error = %e, "enqueue failed"),
+            }
+            // Clean up the collector staging dir; zip has been moved.
+            if let Err(e) = tokio::fs::remove_dir_all(&bundle.staging_dir).await {
+                warn!(dir = %bundle.staging_dir.display(), error = %e, "failed to clean staging dir");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "collection failed");
+            // Touch work_root so rustc doesn't optimize the borrow away
+            // in release — also handy for future use when we partition
+            // staging by collection run id.
+            let _ = work_root;
+        }
+    }
+}
+
+/// Drain pending bundles from the queue. Upload errors are recorded on
+/// the queue entry so the bundle is retried on the next drain tick.
+async fn drain(queue: &Queue, uploader: &Uploader) {
+    // MVP: process one pending bundle per drain tick. Keeps the drain
+    // cadence predictable and prevents a burst of queued bundles from
+    // hogging the reactor.
+    let next = match queue.next_pending().await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(error = %e, "queue read failed");
+            return;
+        }
+    };
+    let Some(entry) = next else {
+        return;
+    };
+    let bundle_id = entry.metadata.bundle_id;
+    if let Err(e) = queue.mark_uploading(bundle_id).await {
+        warn!(%bundle_id, error = %e, "mark_uploading failed");
+        return;
+    }
+
+    match uploader.upload(&entry.metadata, &entry.zip_path).await {
+        Ok(resp) => {
+            info!(
+                %bundle_id,
+                session_id = %resp.session_id,
+                parse_state = %resp.parse_state,
+                "upload succeeded"
+            );
+            if let Err(e) = queue.mark_done(bundle_id).await {
+                warn!(%bundle_id, error = %e, "mark_done failed");
+            }
+        }
+        Err(e) => {
+            warn!(%bundle_id, error = %e, "upload failed; will retry");
+            if let Err(markerr) = queue
+                .mark_failed(bundle_id, e.to_string(), QUEUE_FAIL_BACKOFF)
+                .await
+            {
+                warn!(%bundle_id, error = %markerr, "mark_failed failed");
+            }
+        }
+    }
+
+    // If we successfully uploaded and the entry is now Done, we can
+    // purge the bundle zip immediately — but keep the sidecar so ops
+    // can see the Done state. For MVP we purge zips only; the sidecar
+    // sweeper comes later.
+    if let Ok(current) = queue.get(bundle_id).await {
+        if matches!(current.state, QueueState::Done { .. }) {
+            if let Err(e) = tokio::fs::remove_file(&current.zip_path).await {
+                warn!(%bundle_id, error = %e, "post-upload zip purge failed");
+            }
+        }
+    }
+}
+
+fn init_tracing(log_level: &str) {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(format!("cmtraceopen_agent={log_level},warn")));
+
+    tracing_subscriber::registry()
+        .with(fmt::layer().json().with_current_span(false))
+        .with(filter)
+        .init();
 }
