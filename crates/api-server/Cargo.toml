@@ -53,3 +53,9 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "io-util", "sync", "time"] }
+# The parse-on-ingest integration test builds a synthetic evidence-zip
+# bundle in memory and then re-uses sqlx to assert on the entries table.
+# Reuse the same zip crate the api-server depends on so there's one
+# code path being exercised end-to-end.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "macros"] }

@@ -74,7 +74,11 @@ impl SqliteMetadataStore {
         Ok(Self { pool })
     }
 
-    #[cfg(test)]
+    /// Raw pool accessor, intended for integration-test assertions that
+    /// need to query tables the trait doesn't expose yet (e.g. `entries`).
+    /// Marked `#[doc(hidden)]` so it doesn't show up in public docs while
+    /// still being reachable from the integration-test crate.
+    #[doc(hidden)]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
