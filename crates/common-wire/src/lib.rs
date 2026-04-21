@@ -114,6 +114,53 @@ pub mod registry {
     }
 }
 
+pub mod query {
+    //! Per-session entry + file query DTOs.
+    //!
+    //! These intentionally mirror only the fields surfaced on the wire, not
+    //! `cmtraceopen-parser::LogEntry` verbatim. Keeping the wire DTO flat +
+    //! self-contained lets the web/api side evolve independently of the
+    //! desktop parser crate (which carries many format-specific fields and
+    //! would otherwise bloat every response payload).
+    use super::*;
+
+    /// One row from the `files` table: a single raw log file that was
+    /// extracted out of a bundle and parsed.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct FileSummary {
+        pub file_id: String,
+        pub session_id: String,
+        pub relative_path: String,
+        pub size_bytes: u64,
+        pub format_detected: Option<String>,
+        pub parser_kind: Option<String>,
+        pub entry_count: u64,
+        pub parse_error_count: u64,
+    }
+
+    /// One parsed log entry, flattened for the viewer API.
+    ///
+    /// `extras` is an opaque JSON object surfacing format-specific fields
+    /// (`http_method`, `result_code`, IIS verb, etc.) without committing the
+    /// wire to the desktop parser's rich `LogEntry` enum. Clients that care
+    /// about a specific field can look it up by name.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct LogEntryDto {
+        pub entry_id: i64,
+        pub file_id: String,
+        pub line_number: u32,
+        pub ts_ms: Option<i64>,
+        /// Enum-like string: `"Info"` | `"Warning"` | `"Error"`.
+        pub severity: String,
+        pub component: Option<String>,
+        pub thread: Option<String>,
+        pub message: String,
+        pub extras: Option<serde_json::Value>,
+    }
+}
+
 /// Generic keyset-paginated envelope. `next_cursor` is an opaque, base64 token
 /// that clients pass back verbatim to fetch the next page. `None` means no
 /// more results.
@@ -128,6 +175,7 @@ pub struct Paginated<T> {
 pub use ingest::{
     BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest, BundleInitResponse,
 };
+pub use query::{FileSummary, LogEntryDto};
 pub use registry::{DeviceSummary, SessionSummary};
 
 #[cfg(test)]
@@ -149,6 +197,50 @@ mod tests {
         assert!(v.get("sizeBytes").is_some());
         assert!(v.get("contentKind").is_some());
         assert!(v.get("size_bytes").is_none(), "snake_case should not appear");
+    }
+
+    #[test]
+    fn file_summary_uses_camel_case() {
+        let fs = query::FileSummary {
+            file_id: "f1".into(),
+            session_id: "s1".into(),
+            relative_path: "a.log".into(),
+            size_bytes: 10,
+            format_detected: Some("cmtrace".into()),
+            parser_kind: Some("cmtrace".into()),
+            entry_count: 3,
+            parse_error_count: 0,
+        };
+        let v = serde_json::to_value(&fs).unwrap();
+        assert!(v.get("fileId").is_some());
+        assert!(v.get("sessionId").is_some());
+        assert!(v.get("relativePath").is_some());
+        assert!(v.get("sizeBytes").is_some());
+        assert!(v.get("formatDetected").is_some());
+        assert!(v.get("parserKind").is_some());
+        assert!(v.get("entryCount").is_some());
+        assert!(v.get("parseErrorCount").is_some());
+    }
+
+    #[test]
+    fn log_entry_dto_uses_camel_case_and_supports_extras() {
+        let e = query::LogEntryDto {
+            entry_id: 7,
+            file_id: "f1".into(),
+            line_number: 42,
+            ts_ms: Some(1_700_000_000_000),
+            severity: "Info".into(),
+            component: Some("ccmexec".into()),
+            thread: None,
+            message: "hello".into(),
+            extras: Some(serde_json::json!({ "httpMethod": "GET" })),
+        };
+        let v = serde_json::to_value(&e).unwrap();
+        assert!(v.get("entryId").is_some());
+        assert!(v.get("fileId").is_some());
+        assert!(v.get("lineNumber").is_some());
+        assert!(v.get("tsMs").is_some());
+        assert_eq!(v.get("extras").unwrap().get("httpMethod").unwrap(), "GET");
     }
 
     #[test]
