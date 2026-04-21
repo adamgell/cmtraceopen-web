@@ -53,7 +53,7 @@ cmtraceopen-web/
 When the full stack is running via `docker compose up`, two debugging UIs are exposed on the host:
 
 - <http://localhost:8080/> — api-server status page: uptime, request counter, build metadata, links to `/healthz` + `/readyz`.
-- <http://localhost:8081/> — [Adminer](https://www.adminer.org/) web UI for Postgres. Log in with:
+- <http://localhost:8082/> — [Adminer](https://www.adminer.org/) web UI for Postgres. Log in with:
   - System: `PostgreSQL`
   - Server: `postgres`
   - Username: `cmtrace`

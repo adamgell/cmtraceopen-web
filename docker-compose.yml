@@ -39,7 +39,7 @@ services:
     restart: unless-stopped
 
   # Adminer — web UI for poking at the Postgres dev DB. Connect via
-  # http://localhost:8081 and enter:
+  # http://localhost:8082 and enter:
   #   System:   PostgreSQL
   #   Server:   postgres
   #   Username: cmtrace
@@ -50,7 +50,7 @@ services:
   adminer:
     image: adminer:latest
     ports:
-      - "8081:8080"
+      - "8082:8080"
     depends_on:
       postgres:
         condition: service_healthy
