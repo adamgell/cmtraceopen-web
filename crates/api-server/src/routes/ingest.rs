@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use common_wire::ingest::{
     content_kind, BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest,
-    BundleInitResponse,
+    BundleInitResponse, ChunkUploadResponse,
 };
 
 use crate::error::AppError;
@@ -219,12 +219,6 @@ struct ChunkQuery {
     offset: u64,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct ChunkResponse {
-    #[serde(rename = "nextOffset")]
-    next_offset: u64,
-}
-
 #[instrument(
     skip_all,
     fields(
@@ -240,7 +234,7 @@ async fn put_chunk(
     Path(upload_id): Path<Uuid>,
     Query(q): Query<ChunkQuery>,
     body: Bytes,
-) -> Result<Json<ChunkResponse>, AppError> {
+) -> Result<Json<ChunkUploadResponse>, AppError> {
     let upload = state.meta.get_upload(upload_id).await?;
 
     // Device binding: the upload belongs to the device that created it. A
@@ -315,7 +309,7 @@ async fn put_chunk(
     }
 
     info!(next_offset = new_offset, "chunk accepted");
-    Ok(Json(ChunkResponse { next_offset: new_offset }))
+    Ok(Json(ChunkUploadResponse { next_offset: new_offset }))
 }
 
 #[instrument(

@@ -12,7 +12,7 @@ use api_server::state::AppState;
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
 use common_wire::ingest::{
     content_kind, BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest,
-    BundleInitResponse,
+    BundleInitResponse, ChunkUploadResponse,
 };
 use common_wire::{Paginated, SessionSummary};
 use sha2::{Digest, Sha256};
@@ -106,8 +106,8 @@ async fn happy_path_single_chunk() {
         .await
         .unwrap();
     assert!(resp.status().is_success(), "chunk status: {}", resp.status());
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["nextOffset"], payload.len() as u64);
+    let body: ChunkUploadResponse = resp.json().await.unwrap();
+    assert_eq!(body.next_offset, payload.len() as u64);
 
     // finalize
     let fin: BundleFinalizeResponse = client
