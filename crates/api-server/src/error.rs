@@ -4,7 +4,7 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Serialize;
+use common_wire::ErrorBody;
 use tracing::error;
 
 use crate::storage::StorageError;
@@ -25,12 +25,6 @@ pub enum AppError {
 
     #[error("internal error: {0}")]
     Internal(String),
-}
-
-#[derive(Serialize)]
-struct ErrorBody<'a> {
-    error: &'a str,
-    message: String,
 }
 
 impl IntoResponse for AppError {
@@ -66,7 +60,7 @@ impl IntoResponse for AppError {
         };
 
         let body = ErrorBody {
-            error: code,
+            error: code.to_string(),
             message: self.to_string(),
         };
         (status, Json(body)).into_response()

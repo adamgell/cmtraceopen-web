@@ -1,18 +1,11 @@
 use axum::{routing::get, Json, Router};
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    service: &'static str,
-    version: &'static str,
-}
+use common_wire::HealthResponse;
 
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse {
-        status: "ok",
-        service: env!("CARGO_PKG_NAME"),
-        version: env!("CARGO_PKG_VERSION"),
+        status: "ok".to_string(),
+        service: env!("CARGO_PKG_NAME").to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
 
