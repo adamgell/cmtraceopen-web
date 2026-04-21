@@ -109,6 +109,19 @@ jobs:
       - name: pnpm build
         run: pnpm build
 
+      # --- WASM parser regression canary --------------------------------
+      # Build a Node-target wasm-pack bundle (separate from the `--target web`
+      # output the viewer uses) and parse a real text fixture from the
+      # cmtraceopen submodule. Asserts entry count + formatDetected match the
+      # known-good values pinned in the parser crate's regression tests. If
+      # the WASM parser ever drifts from the desktop-side Rust parser's
+      # behavior, this step fails. See scripts/wasm-smoke.mjs.
+      - name: wasm-pack build (nodejs target, for smoke test)
+        run: pnpm wasm:build:node
+
+      - name: wasm parser smoke test
+        run: pnpm wasm:smoke
+
       # --- Docker image build (sanity; no push) -------------------------
       # Ensures the Dockerfile stays buildable on every PR. Uses buildx so
       # --mount=type=cache in the Dockerfile works. linux/amd64 only here;
