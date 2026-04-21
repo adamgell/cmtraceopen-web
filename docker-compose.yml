@@ -23,10 +23,13 @@ services:
       - "8080:8080"
     environment:
       CMTRACE_LISTEN_ADDR: 0.0.0.0:8080
+      CMTRACE_DATA_DIR: /data
       RUST_LOG: ${RUST_LOG:-api_server=info,tower_http=info,axum=info,warn}
       # Placeholder — api-server ignores this today. Wired up when the
       # metadata store lands in a follow-up commit.
       CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace
+    volumes:
+      - api-data:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -55,3 +58,4 @@ services:
 
 volumes:
   pg-data:
+  api-data:

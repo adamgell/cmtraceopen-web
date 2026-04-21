@@ -45,15 +45,26 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p api-server \
  && cp /workspace/target/release/cmtraceopen-api /usr/local/bin/cmtraceopen-api
 
+# ---- Data-dir prep ----------------------------------------------------------
+# Distroless has no shell / no mkdir / no chown, so we can't create and
+# chown the blob-store root in the runtime stage itself. Stage an empty
+# /data owned by UID:GID 65532:65532 (distroless `nonroot`) here, then
+# COPY --from= it into the runtime image.
+FROM debian:bookworm-slim AS dataprep
+RUN mkdir -p /data && chown 65532:65532 /data
+
 # ---- Runtime ----------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12 AS runtime
 
 COPY --from=builder /usr/local/bin/cmtraceopen-api /usr/local/bin/cmtraceopen-api
+COPY --from=dataprep --chown=65532:65532 /data /data
 
 USER nonroot:nonroot
 EXPOSE 8080
+VOLUME ["/data"]
 
 ENV CMTRACE_LISTEN_ADDR=0.0.0.0:8080 \
+    CMTRACE_DATA_DIR=/data \
     RUST_LOG=api_server=info,tower_http=info,axum=info,warn
 
 ENTRYPOINT ["/usr/local/bin/cmtraceopen-api"]
