@@ -15,7 +15,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::{
-    DeviceRow, MetadataStore, NewEntry, NewFile, NewUpload, SessionRow, StorageError, UploadRow,
+    DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile, NewUpload,
+    SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the migration directory into the binary. Path is relative to this
@@ -74,10 +75,13 @@ impl SqliteMetadataStore {
         Ok(Self { pool })
     }
 
-    /// Raw pool accessor, intended for integration-test assertions that
-    /// need to query tables the trait doesn't expose yet (e.g. `entries`).
-    /// Marked `#[doc(hidden)]` so it doesn't show up in public docs while
-    /// still being reachable from the integration-test crate.
+    /// Access the underlying pool.
+    ///
+    /// Public because integration tests in the `tests/` directory are a
+    /// separate compilation unit and need to seed/assert against tables
+    /// directly (e.g. `files`/`entries` rows populated by the parse worker
+    /// or used by the entries-query route). Not intended for production use
+    /// outside of tests.
     #[doc(hidden)]
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -584,6 +588,186 @@ impl MetadataStore for SqliteMetadataStore {
         }
         tx.commit().await?;
         Ok(())
+    }
+
+    async fn list_files_for_session(
+        &self,
+        session_id: Uuid,
+        limit: u32,
+        after_file_id: Option<&str>,
+    ) -> Result<Vec<FileRow>, StorageError> {
+        // Keyset on file_id ASC. UUIDv7 is time-sortable, so this gives a
+        // stable insertion-order walk through the files table.
+        let limit_i = limit as i64;
+        let rows = if let Some(after) = after_file_id {
+            sqlx::query(
+                r#"
+                SELECT file_id, session_id, relative_path, size_bytes,
+                       format_detected, parser_kind, entry_count, parse_error_count
+                FROM files
+                WHERE session_id = ? AND file_id > ?
+                ORDER BY file_id ASC
+                LIMIT ?
+                "#,
+            )
+            .bind(session_id.to_string())
+            .bind(after)
+            .bind(limit_i)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT file_id, session_id, relative_path, size_bytes,
+                       format_detected, parser_kind, entry_count, parse_error_count
+                FROM files
+                WHERE session_id = ?
+                ORDER BY file_id ASC
+                LIMIT ?
+                "#,
+            )
+            .bind(session_id.to_string())
+            .bind(limit_i)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(FileRow {
+                file_id: r.get::<String, _>("file_id"),
+                session_id: r.get::<String, _>("session_id"),
+                relative_path: r.get::<String, _>("relative_path"),
+                size_bytes: r.get::<i64, _>("size_bytes") as u64,
+                format_detected: r.get::<Option<String>, _>("format_detected"),
+                parser_kind: r.get::<Option<String>, _>("parser_kind"),
+                entry_count: r.get::<i64, _>("entry_count") as u64,
+                parse_error_count: r.get::<i64, _>("parse_error_count") as u64,
+            });
+        }
+        Ok(out)
+    }
+
+    async fn query_entries(
+        &self,
+        session_id: Uuid,
+        filters: &EntryFilters,
+        limit: u32,
+    ) -> Result<Vec<EntryRow>, StorageError> {
+        // We assemble the SQL dynamically because the combinatoric count of
+        // optional filters (up to 5, plus the cursor tier) is large enough
+        // that writing N pre-baked variants would be worse than a small
+        // string builder. Every value is still bound, not interpolated — no
+        // user input reaches the SQL text.
+        //
+        // Ordering: `ts_ms IS NULL ASC, ts_ms ASC, entry_id ASC`.
+        // In SQLite, `ts_ms IS NULL` evaluates to 0 (non-null) before 1
+        // (null) under ASC, which gives us NULLS LAST semantics without a
+        // dedicated clause (SQLite doesn't support NULLS LAST on indexed
+        // queries anyway). Keyset cursor has to handle three cases:
+        //   a) cursor.ts_ms is Some — next page starts strictly after that
+        //      (ts_ms, entry_id) tuple within the non-null tier, OR anywhere
+        //      in the null tier.
+        //   b) cursor.ts_ms is None — we're walking the null tier; continue
+        //      with entry_id > cursor.entry_id inside IS NULL rows.
+        //
+        // Binding order matters: we push bindings into `args` in the same
+        // order their `?` placeholders appear in the SQL.
+        let mut sql = String::from(
+            "SELECT entry_id, file_id, line_number, ts_ms, severity, \
+             component, thread, message, extras_json \
+             FROM entries WHERE session_id = ?",
+        );
+
+        // Each push below appends both a SQL fragment and a binder closure
+        // we'll invoke on the final query in order. This avoids the typical
+        // sqlx-dynamic-query trap of needing `Box<dyn Any>` binders.
+        enum Bind<'a> {
+            Str(&'a str),
+            OwnedStr(String),
+            I64(i64),
+        }
+        let mut binds: Vec<Bind> = Vec::with_capacity(8);
+        binds.push(Bind::OwnedStr(session_id.to_string()));
+
+        if let Some(ref fid) = filters.file_id {
+            sql.push_str(" AND file_id = ?");
+            binds.push(Bind::Str(fid));
+        }
+        if let Some(sev) = filters.min_severity {
+            sql.push_str(" AND severity >= ?");
+            binds.push(Bind::I64(sev));
+        }
+        if let Some(after) = filters.after_ts_ms {
+            // Inclusive lower bound. NULL ts_ms rows are excluded — a user
+            // asking "after time X" is asking a time-sorted question, so
+            // the timestamp-less tail isn't meaningful.
+            sql.push_str(" AND ts_ms IS NOT NULL AND ts_ms >= ?");
+            binds.push(Bind::I64(after));
+        }
+        if let Some(before) = filters.before_ts_ms {
+            // Exclusive upper bound. Same NULL-exclusion rationale as above.
+            sql.push_str(" AND ts_ms IS NOT NULL AND ts_ms < ?");
+            binds.push(Bind::I64(before));
+        }
+        if let Some(ref q) = filters.q_like {
+            sql.push_str(" AND message LIKE ?");
+            binds.push(Bind::Str(q));
+        }
+        if let Some(ref c) = filters.cursor {
+            match c.ts_ms {
+                Some(ts) => {
+                    // Non-null tier continuation: advance past (ts, entry_id)
+                    // but stay in the non-null rows, OR drop into the null
+                    // tail (which orders after every non-null row).
+                    sql.push_str(
+                        " AND ( \
+                           (ts_ms IS NOT NULL AND (ts_ms > ? OR (ts_ms = ? AND entry_id > ?))) \
+                           OR ts_ms IS NULL \
+                         )",
+                    );
+                    binds.push(Bind::I64(ts));
+                    binds.push(Bind::I64(ts));
+                    binds.push(Bind::I64(c.entry_id));
+                }
+                None => {
+                    // Null tier continuation: stay in IS NULL rows, advance
+                    // past entry_id.
+                    sql.push_str(" AND ts_ms IS NULL AND entry_id > ?");
+                    binds.push(Bind::I64(c.entry_id));
+                }
+            }
+        }
+
+        sql.push_str(" ORDER BY (ts_ms IS NULL) ASC, ts_ms ASC, entry_id ASC LIMIT ?");
+        binds.push(Bind::I64(limit as i64));
+
+        let mut q = sqlx::query(&sql);
+        for b in &binds {
+            q = match b {
+                Bind::Str(s) => q.bind(*s),
+                Bind::OwnedStr(s) => q.bind(s.as_str()),
+                Bind::I64(n) => q.bind(*n),
+            };
+        }
+        let rows = q.fetch_all(&self.pool).await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(EntryRow {
+                entry_id: r.get::<i64, _>("entry_id"),
+                file_id: r.get::<String, _>("file_id"),
+                // SQLite stores as INTEGER; cast down via i64 → u32.
+                line_number: r.get::<i64, _>("line_number") as u32,
+                ts_ms: r.get::<Option<i64>, _>("ts_ms"),
+                severity: r.get::<i64, _>("severity"),
+                component: r.get::<Option<String>, _>("component"),
+                thread: r.get::<Option<String>, _>("thread"),
+                message: r.get::<String, _>("message"),
+                extras_json: r.get::<Option<String>, _>("extras_json"),
+            });
+        }
+        Ok(out)
     }
 }
 

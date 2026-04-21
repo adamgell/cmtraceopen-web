@@ -1,4 +1,6 @@
 pub mod devices;
+pub mod entries;
+pub mod files;
 pub mod health;
 pub mod ingest;
 pub mod sessions;
