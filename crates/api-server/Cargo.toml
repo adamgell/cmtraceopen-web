@@ -16,7 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "fs", "io-util", "sync"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
@@ -25,3 +25,23 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 common-wire = { path = "../common-wire" }
+# Storage: SQLite via sqlx with explicit rustls (avoid native-tls / OpenSSL
+# on Windows dev boxes) plus chrono + uuid type adapters.
+# Use runtime-tokio without TLS: SQLite is a local file, and pulling in
+# rustls/ring forces a C toolchain (clang) on aarch64-windows dev boxes.
+# When we move to Postgres (M2+), pick tls-rustls-aws-lc-rs explicitly.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "chrono", "uuid", "macros", "migrate"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+bytes = "1"
+async-trait = "0.1"
+base64 = "0.22"
+
+[dev-dependencies]
+# Integration tests talk to a local loopback server — no TLS needed, and
+# disabling the default TLS features keeps clang off the build path.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "io-util", "sync", "time"] }
