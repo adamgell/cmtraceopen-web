@@ -1,0 +1,22 @@
+# CI overlay used by .github/workflows/compose-smoke.yml.
+#
+# Layered on top of docker-compose.yml so the smoke job exercises the same
+# stack contributors run locally, with only the env-var deltas needed for
+# automated runs:
+#
+#   * CMTRACE_AUTH_MODE=disabled — bypass any device-cert / bearer auth
+#     when it lands. Today the api-server has no auth gate, so this is a
+#     no-op forward-compat hint; the moment auth is wired in, this overlay
+#     keeps the smoke test green without rewriting the workflow.
+#   * RUST_LOG=...debug — extra verbosity so a failed smoke leaves enough
+#     breadcrumbs in `docker compose logs api-server` to diagnose without
+#     re-running locally.
+#
+# Usage (in CI):
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build
+
+services:
+  api-server:
+    environment:
+      CMTRACE_AUTH_MODE: disabled
+      RUST_LOG: api_server=debug,tower_http=info,axum=info,warn
