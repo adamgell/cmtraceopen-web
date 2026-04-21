@@ -20,12 +20,17 @@ jobs:
     steps:
       # --- Checkout ------------------------------------------------------
       # cmtraceopen is a git submodule at ./cmtraceopen; cmtrace-wasm path-
-      # depends on `../cmtraceopen/crates/cmtraceopen-parser`. `submodules:
-      # recursive` pins to the commit recorded in .gitmodules — hermetic.
+      # depends on `../cmtraceopen/crates/cmtraceopen-parser`. Pin recorded
+      # in .gitmodules — hermetic.
+      #
+      # `submodules: true` (not `recursive`) because cmtraceopen has some
+      # accidentally-tracked Claude-worktree gitlinks under .claude/worktrees/
+      # that aren't real submodules (no .gitmodules entry). They'll be
+      # cleaned up in a follow-up on cmtraceopen; until then, skip recursion.
       - name: Checkout (with submodules)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          submodules: recursive
+          submodules: true
 
       # --- Rust toolchain ------------------------------------------------
       - name: Setup Rust
