@@ -2,10 +2,17 @@
 // `cmtraceopen-parser::models::log_entry`. Field names are camelCased
 // because the Rust types use `#[serde(rename_all = "camelCase")]`.
 //
+// Optional Rust fields (`Option<T>`) are represented as `T | undefined`
+// because `serde_wasm_bindgen` emits `undefined` (not `null`) for
+// `Option::None`. Fields annotated `#[serde(skip_serializing_if = "…")]`
+// on the Rust side may be absent on the object entirely — which JS also
+// reads back as `undefined`, so a single `T | undefined` accurately covers
+// both shapes.
+//
 // This is a minimal v0 mirror — only the fields the web viewer actually
-// renders or introspects are typed strictly. Unused extended fields
-// (IIS, DNS, Panther, DHCP, CmtLog specializations, etc.) are elided
-// here and can be added as the UI grows.
+// renders or introspects are typed strictly. Extended specialized fields
+// (IIS, DNS, Panther, DHCP, CmtLog specializations, etc.) are included
+// as optional so callers can widen the UI without revisiting this file.
 
 export type Severity = "Info" | "Warning" | "Error";
 
@@ -18,31 +25,76 @@ export type LogFormat =
   | "DnsAudit"
   | "CmtLog";
 
+export type EntryKind = "Log" | "Section" | "Iteration" | "Header";
+
+/**
+ * Span of a recognized error code inside a log message. Mirrors
+ * `cmtraceopen_parser::error_db::lookup::ErrorCodeSpan` exactly.
+ * `start`/`end` are UTF-16 code unit offsets (JS `String.slice` semantics).
+ */
 export interface ErrorCodeSpan {
   start: number;
   end: number;
-  code: string;
-  // Additional resolved metadata may be present but is not used in v0.
-  [key: string]: unknown;
+  codeHex: string;
+  codeDecimal: string;
+  description: string;
+  category: string;
 }
 
 export interface LogEntry {
   id: number;
   lineNumber: number;
   message: string;
-  component: string | null;
-  timestamp: number | null;
-  timestampDisplay: string | null;
+  component: string | undefined;
+  timestamp: number | undefined;
+  timestampDisplay: string | undefined;
   severity: Severity;
-  thread: number | null;
-  threadDisplay: string | null;
-  sourceFile: string | null;
+  thread: number | undefined;
+  threadDisplay: string | undefined;
+  sourceFile: string | undefined;
   format: LogFormat;
   filePath: string;
-  timezoneOffset: number | null;
+  timezoneOffset: number | undefined;
+  /** Absent when empty — see `#[serde(skip_serializing_if = "Vec::is_empty")]`. */
   errorCodeSpans?: ErrorCodeSpan[];
-  // Optional/extended fields from specialized parsers — not surfaced in v0.
-  [key: string]: unknown;
+  // --- Specialized/extended fields (DHCP, Panther, IIS, DNS, CmtLog). ---
+  // All of these carry `#[serde(skip_serializing_if = "Option::is_none")]`
+  // on the Rust side, so they are absent (undefined) unless the relevant
+  // parser produced them.
+  ipAddress?: string;
+  hostName?: string;
+  macAddress?: string;
+  resultCode?: string;
+  gleCode?: string;
+  setupPhase?: string;
+  operationName?: string;
+  httpMethod?: string;
+  uriStem?: string;
+  uriQuery?: string;
+  statusCode?: number;
+  subStatus?: number;
+  timeTakenMs?: number;
+  clientIp?: string;
+  serverIp?: string;
+  userAgent?: string;
+  serverPort?: number;
+  username?: string;
+  win32Status?: number;
+  queryName?: string;
+  queryType?: string;
+  responseCode?: string;
+  dnsDirection?: string;
+  dnsProtocol?: string;
+  sourceIp?: string;
+  dnsFlags?: string;
+  dnsEventId?: number;
+  zoneName?: string;
+  entryKind?: EntryKind;
+  whatif?: boolean;
+  sectionName?: string;
+  sectionColor?: string;
+  iteration?: string;
+  tags?: string[];
 }
 
 export interface ParserSelectionInfo {
@@ -51,8 +103,8 @@ export interface ParserSelectionInfo {
   provenance: string;
   parseQuality: string;
   recordFraming: string;
-  dateOrder: string | null;
-  specialization: string | null;
+  dateOrder: string | undefined;
+  specialization: string | undefined;
 }
 
 export interface ParseResult {
