@@ -1,0 +1,49 @@
+---
+# Deploy the cmtraceopen-web api-server stack (api-server + postgres) to a Mac
+# runner via Colima. Idempotent — safe to re-run on a fresh Mac or BigMac26.
+#
+# Usage:
+#   ansible-playbook playbooks/deploy-api.yml
+#   ansible-playbook playbooks/deploy-api.yml --check                       # dry run
+#   ansible-playbook playbooks/deploy-api.yml -e compose_stack_branch=main  # override branch
+#   ansible-playbook playbooks/deploy-api.yml -t docker_config              # just patch ~/.docker/config.json
+#
+# Prereqs on the target Mac:
+#   - Homebrew installed at /opt/homebrew (Apple Silicon) — see the
+#     colima_dev_env role README for the install one-liner.
+#   - SSH key auth for the ansible_user (see the kit's top-level README).
+
+- name: Deploy api-server stack to Mac runner
+  hosts: mac_hosts
+  gather_facts: true
+
+  vars:
+    # ---- colima_dev_env sizing ------------------------------------------
+    # Rust release build in a container wants headroom. 4 CPU / 6 GiB is
+    # the MVP default; bump for faster builds or more concurrent services.
+    colima_dev_env_cpu: 4
+    colima_dev_env_memory: 6
+
+    # ---- compose_stack target -------------------------------------------
+    compose_stack_repo_url: https://github.com/adamgell/cmtraceopen-web.git
+    compose_stack_dest: "{{ ansible_env.HOME }}/repo/cmtraceopen-web"
+    compose_stack_branch: main
+    compose_stack_compose_file: docker-compose.yml
+
+  roles:
+    - role: colima_dev_env
+    - role: compose_stack
+
+  post_tasks:
+    - name: Smoke test /healthz
+      ansible.builtin.uri:
+        url: http://localhost:8080/healthz
+        return_content: true
+      register: _healthz
+      retries: 15
+      delay: 2
+      until: _healthz.status | default(0) == 200
+
+    - name: Show /healthz payload
+      ansible.builtin.debug:
+        msg: "{{ _healthz.json }}"

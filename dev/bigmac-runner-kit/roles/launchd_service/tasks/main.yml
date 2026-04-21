@@ -1,0 +1,67 @@
+---
+# launchd_service — idempotent deploy of user-scope LaunchAgents.
+# Pattern: render plist -> if changed, unload+load -> ensure loaded.
+
+- name: Skip if no services requested
+  ansible.builtin.meta: end_host
+  when: launchd_services | length == 0
+
+- name: Ensure LaunchAgents directory exists
+  ansible.builtin.file:
+    path: "{{ launchd_agents_dir }}"
+    state: directory
+    mode: "0755"
+  tags: [launchd_service]
+
+- name: Ensure Logs directory exists
+  ansible.builtin.file:
+    path: "{{ launchd_logs_dir }}"
+    state: directory
+    mode: "0755"
+  tags: [launchd_service]
+
+- name: Render LaunchAgent plists
+  ansible.builtin.template:
+    src: service.plist.j2
+    dest: "{{ launchd_agents_dir }}/{{ item.label }}.plist"
+    mode: "0644"
+  register: _plists
+  loop: "{{ launchd_services }}"
+  loop_control:
+    label: "{{ item.label }}"
+  tags: [launchd_service]
+
+- name: Unload agents whose plist changed
+  ansible.builtin.command:
+    cmd: "launchctl unload -w {{ launchd_agents_dir }}/{{ item.item.label }}.plist"
+  failed_when: false
+  changed_when: false
+  loop: "{{ _plists.results | selectattr('changed', 'equalto', true) | list }}"
+  loop_control:
+    label: "{{ item.item.label }}"
+  tags: [launchd_service]
+
+- name: Load agents whose plist changed
+  ansible.builtin.command:
+    cmd: "launchctl load -w {{ launchd_agents_dir }}/{{ item.item.label }}.plist"
+  changed_when: true
+  loop: "{{ _plists.results | selectattr('changed', 'equalto', true) | list }}"
+  loop_control:
+    label: "{{ item.item.label }}"
+  tags: [launchd_service]
+
+- name: Ensure agents are loaded (idempotent bootstrap)
+  ansible.builtin.shell:
+    cmd: |
+      if ! launchctl list | grep -q "{{ item.label }}"; then
+        launchctl load -w {{ launchd_agents_dir }}/{{ item.label }}.plist
+        echo loaded
+      else
+        echo already-loaded
+      fi
+  register: _load
+  changed_when: "'loaded' == _load.stdout"
+  loop: "{{ launchd_services }}"
+  loop_control:
+    label: "{{ item.label }}"
+  tags: [launchd_service]

@@ -1,0 +1,95 @@
+---
+# compose_stack — idempotent clone + `docker compose up -d --build`.
+
+- name: Assert required vars
+  ansible.builtin.assert:
+    that:
+      - compose_stack_repo_url is defined
+      - compose_stack_dest is defined
+      - compose_stack_branch is defined
+    fail_msg: "compose_stack_repo_url, compose_stack_dest, and compose_stack_branch are all required."
+  tags: [compose_stack, always]
+
+- name: Ensure parent directory exists
+  ansible.builtin.file:
+    path: "{{ compose_stack_dest | dirname }}"
+    state: directory
+    mode: "0755"
+  tags: [compose_stack]
+
+- name: Check if repo already checked out
+  ansible.builtin.stat:
+    path: "{{ compose_stack_dest }}/.git"
+  register: _repo_git_dir
+  tags: [compose_stack]
+
+- name: Clone repo (first time)
+  ansible.builtin.git:
+    repo: "{{ compose_stack_repo_url }}"
+    dest: "{{ compose_stack_dest }}"
+    version: "{{ compose_stack_branch }}"
+    update: false
+  when: not _repo_git_dir.stat.exists
+  tags: [compose_stack]
+
+- name: Fast-forward existing checkout to requested branch
+  # Uses ansible.builtin.git with update:true so it idempotently advances to
+  # the remote branch tip. If auth fails (common on private repos without a
+  # credential helper in the SSH session), fall through so the operator can
+  # manage the checkout by hand.
+  ansible.builtin.git:
+    repo: "{{ compose_stack_repo_url }}"
+    dest: "{{ compose_stack_dest }}"
+    version: "{{ compose_stack_branch }}"
+    update: true
+    force: false
+  when:
+    - _repo_git_dir.stat.exists
+    - compose_stack_pull_if_exists | bool
+  register: _git_update
+  failed_when: false
+  tags: [compose_stack]
+
+- name: Warn if git update failed
+  ansible.builtin.debug:
+    msg: >-
+      git update failed ({{ _git_update.msg | default('unknown') }}); continuing
+      with whatever's on disk at {{ compose_stack_dest }}. Configure git
+      auth (e.g. a credential helper or switch to SSH) to auto-pull.
+  when:
+    - _git_update is defined
+    - _git_update is failed
+  tags: [compose_stack]
+
+- name: docker compose up -d --build
+  ansible.builtin.command:
+    cmd: "{{ compose_stack_brew_prefix }}/bin/docker compose -f {{ compose_stack_compose_file }} up -d --build"
+    chdir: "{{ compose_stack_dest }}"
+  environment:
+    DOCKER_HOST: "{{ compose_stack_docker_host }}"
+    DOCKER_BUILDKIT: "1"
+    COMPOSE_DOCKER_CLI_BUILD: "1"
+  register: _compose_up
+  # `up -d` is inherently non-idempotent output-wise; flag changed when new
+  # containers/images were created or rebuilt.
+  changed_when: >-
+    'Started' in _compose_up.stderr
+    or 'Created' in _compose_up.stderr
+    or 'Recreated' in _compose_up.stderr
+    or 'Built' in _compose_up.stderr
+  tags: [compose_stack]
+
+- name: Show docker compose status
+  ansible.builtin.command:
+    cmd: "{{ compose_stack_brew_prefix }}/bin/docker compose -f {{ compose_stack_compose_file }} ps"
+    chdir: "{{ compose_stack_dest }}"
+  environment:
+    DOCKER_HOST: "{{ compose_stack_docker_host }}"
+  register: _compose_ps
+  changed_when: false
+  tags: [compose_stack]
+
+- name: Report docker compose status
+  ansible.builtin.debug:
+    msg: "{{ _compose_ps.stdout_lines }}"
+  tags: [compose_stack]

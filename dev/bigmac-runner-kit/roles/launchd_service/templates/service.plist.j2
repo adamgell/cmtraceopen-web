@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{{ item.label }}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+{% for arg in item.program_args %}
+        <string>{{ arg }}</string>
+{% endfor %}
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{ item.working_dir | default(launchd_user_home) }}</string>
+
+{% if item.env is defined and item.env %}
+    <key>EnvironmentVariables</key>
+    <dict>
+{% for k, v in item.env.items() %}
+        <key>{{ k }}</key>
+        <string>{{ v }}</string>
+{% endfor %}
+    </dict>
+{% endif %}
+
+    <key>RunAtLoad</key>
+    <{{ (item.run_at_load | default(true)) | ternary('true', 'false') }}/>
+
+{% set ka = item.keep_alive | default({'Crashed': true, 'SuccessfulExit': false}) %}
+{% if ka is mapping %}
+    <key>KeepAlive</key>
+    <dict>
+{% for k, v in ka.items() %}
+        <key>{{ k }}</key>
+        <{{ v | ternary('true', 'false') }}/>
+{% endfor %}
+    </dict>
+{% elif ka is sameas true %}
+    <key>KeepAlive</key>
+    <true/>
+{% endif %}
+
+{% if item.schedule is defined and item.schedule %}
+    <key>StartCalendarInterval</key>
+    <dict>
+{% for k, v in item.schedule.items() %}
+        <key>{{ k }}</key>
+        <integer>{{ v }}</integer>
+{% endfor %}
+    </dict>
+{% endif %}
+
+    <key>StandardOutPath</key>
+    <string>{{ item.stdout_path | default(launchd_logs_dir + '/' + item.label + '.log') }}</string>
+    <key>StandardErrorPath</key>
+    <string>{{ item.stderr_path | default(item.stdout_path | default(launchd_logs_dir + '/' + item.label + '.log')) }}</string>
+
+    <key>ThrottleInterval</key>
+    <integer>{{ item.throttle | default(10) }}</integer>
+
+    <key>ProcessType</key>
+    <string>{{ item.process_type | default('Background') }}</string>
+</dict>
+</plist>

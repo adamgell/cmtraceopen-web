@@ -1,0 +1,44 @@
+---
+# colima_dev_env role — ensure Colima + Docker tooling is installed on a macOS
+# host and the Docker CLI is wired to talk to Colima's socket.
+#
+# What this role does:
+#   1. Installs brew formulas: colima, docker, docker-compose, docker-buildx, jq
+#   2. Patches ~/.docker/config.json to:
+#        - drop any stale `credsStore` (e.g. leftover `docker-credential-desktop`
+#          from a Docker Desktop uninstall — blocks public image pulls)
+#        - add `cliPluginsExtraDirs` so brew-installed compose + buildx plugins
+#          are discovered by the Docker CLI
+#   3. Starts Colima with the configured CPU / memory / disk (no-op if already
+#      running)
+#
+# Intended as a prereq for the `compose_stack` role (and any other compose-
+# based deploy playbook targeting macOS).
+
+# Homebrew paths — Apple Silicon default. Override on Intel (/usr/local/...).
+colima_dev_env_brew_bin: /opt/homebrew/bin/brew
+colima_dev_env_brew_prefix: /opt/homebrew
+
+# Formulas to ensure present. docker-buildx is REQUIRED — Dockerfiles that use
+# BuildKit cache mounts (`--mount=type=cache,...`) fall back to the legacy
+# builder without it and fail to build.
+colima_dev_env_brew_packages:
+  - colima
+  - docker
+  - docker-compose
+  - docker-buildx
+  - jq
+
+# Where brew drops docker CLI plugins. Added to cliPluginsExtraDirs.
+colima_dev_env_docker_plugins_dir: "{{ colima_dev_env_brew_prefix }}/lib/docker/cli-plugins"
+
+# Colima socket path. Used as DOCKER_HOST by the compose_stack role.
+colima_dev_env_docker_host: "unix://{{ ansible_env.HOME }}/.colima/default/docker.sock"
+
+# Colima VM sizing. 4 CPU / 6 GiB is the MVP default — enough for a Rust
+# release build of the api-server plus a postgres container without thrashing.
+# Crank higher for parallel builds or heavier workloads (BigMac26 currently
+# runs 12/12).
+colima_dev_env_cpu: 4
+colima_dev_env_memory: 6          # GiB
+colima_dev_env_disk: 60           # GiB
