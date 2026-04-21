@@ -16,12 +16,18 @@ use uuid::Uuid;
 
 use super::{
     DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile, NewUpload,
-    SessionRow, StorageError, UploadRow,
+    PoolStats, SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the migration directory into the binary. Path is relative to this
 /// crate's `Cargo.toml` (the manifest dir).
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Max connections the pool is permitted to grow to. Mirrored into
+/// [`PoolStats::max_size`] so the status page doesn't have to ask sqlx for a
+/// value that's fixed at startup. Kept in sync with the `max_connections`
+/// call in [`SqliteMetadataStore::connect`] — change both together.
+const POOL_MAX_CONNECTIONS: u32 = 8;
 
 #[derive(Clone)]
 pub struct SqliteMetadataStore {
@@ -67,7 +73,7 @@ impl SqliteMetadataStore {
         };
 
         let pool = SqlitePoolOptions::new()
-            .max_connections(8)
+            .max_connections(POOL_MAX_CONNECTIONS)
             .connect_with(opts)
             .await?;
 
@@ -114,6 +120,19 @@ fn parse_ts_opt(s: Option<String>) -> Result<Option<DateTime<Utc>>, StorageError
 
 #[async_trait]
 impl MetadataStore for SqliteMetadataStore {
+    fn pool_stats(&self) -> PoolStats {
+        // `size()` / `num_idle()` on `sqlx::Pool` are non-blocking snapshot
+        // reads, so this is cheap enough to call on every `GET /` render.
+        // `size()` returns u32; `num_idle()` returns usize (which we saturate
+        // down to u32 — pool is bounded by `POOL_MAX_CONNECTIONS` so the cast
+        // can't lose information in practice).
+        PoolStats {
+            size: self.pool.size(),
+            idle: u32::try_from(self.pool.num_idle()).unwrap_or(u32::MAX),
+            max_size: POOL_MAX_CONNECTIONS,
+        }
+    }
+
     async fn upsert_device(
         &self,
         device_id: &str,
@@ -786,5 +805,20 @@ mod tests {
         assert_eq!(rows[0].device_id, "WIN-1");
         assert_eq!(rows[0].hostname.as_deref(), Some("lab01"));
         assert_eq!(rows[0].session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn pool_stats_reports_sane_values_after_connect() {
+        // A freshly-connected store has at least one live connection (the one
+        // that ran the migrations), all idle once setup returns, and
+        // `max_size` pinned to the compile-time ceiling. We assert coarse
+        // invariants instead of exact counts because sqlx is free to prewarm
+        // additional connections — the status-page consumer only cares that
+        // the numbers are non-negative and internally consistent.
+        let store = SqliteMetadataStore::connect(":memory:").await.unwrap();
+        let stats = store.pool_stats();
+        assert_eq!(stats.max_size, POOL_MAX_CONNECTIONS);
+        assert!(stats.size <= stats.max_size, "size {} > max {}", stats.size, stats.max_size);
+        assert!(stats.idle <= stats.size, "idle {} > size {}", stats.idle, stats.size);
     }
 }

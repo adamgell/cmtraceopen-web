@@ -28,6 +28,24 @@ pub struct BlobHandle {
     pub sha256: String,
 }
 
+/// Snapshot of a metadata-store connection pool's health.
+///
+/// Surfaced on the dev status page (`GET /`) so operators can spot pool
+/// starvation at a glance without having to wire up Prometheus. Fields mirror
+/// the three sqlx `Pool` getters we care about — total current connections,
+/// idle connections, and the configured ceiling. Backends without a real
+/// pool (e.g. a future in-memory mock) can return zeros via the trait's
+/// default impl.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoolStats {
+    /// Connections currently held by the pool (idle + in-use).
+    pub size: u32,
+    /// Connections currently idle and available for checkout.
+    pub idle: u32,
+    /// Configured upper bound on `size`.
+    pub max_size: u32,
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("i/o error: {0}")]
@@ -253,6 +271,16 @@ pub trait BlobStore: Send + Sync + 'static {
 /// against an in-memory SQLite or a future mock without mocking HTTP.
 #[async_trait]
 pub trait MetadataStore: Send + Sync + 'static {
+    /// Snapshot of the underlying connection pool's health.
+    ///
+    /// Used by the dev status page (`GET /`) to render pool utilization
+    /// without the route handler reaching into a backend-specific pool type.
+    /// The default impl returns all zeros so non-pooled backends (mocks,
+    /// future in-memory stores) don't have to care.
+    fn pool_stats(&self) -> PoolStats {
+        PoolStats::default()
+    }
+
     // ----- devices -----
 
     /// Upsert a device row: inserts on first-seen; updates `last_seen_utc`

@@ -20,6 +20,7 @@ use axum::{
 };
 
 use crate::state::AppState;
+use crate::storage::PoolStats;
 
 /// Axum middleware that bumps the global request counter on every request.
 ///
@@ -38,8 +39,11 @@ pub async fn request_counter_middleware(
 async fn status_page(State(state): State<Arc<AppState>>) -> Response {
     let uptime = state.started_at.elapsed();
     let count = state.request_count.load(Ordering::Relaxed);
+    // Snapshot the metadata pool via the trait method so this handler stays
+    // backend-agnostic (see `MetadataStore::pool_stats`).
+    let pool = state.meta.pool_stats();
 
-    let body = render_html(&state, uptime, count);
+    let body = render_html(&state, uptime, count, pool);
 
     let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
@@ -83,7 +87,7 @@ fn humanize(uptime: Duration) -> String {
     parts.join(" ")
 }
 
-fn render_html(state: &AppState, uptime: Duration, count: u64) -> String {
+fn render_html(state: &AppState, uptime: Duration, count: u64, pool: PoolStats) -> String {
     let service = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
     // Rust version captured at build time (see build.rs).
@@ -168,6 +172,14 @@ fn render_html(state: &AppState, uptime: Duration, count: u64) -> String {
   </section>
 
   <section class="card">
+    <h2>Storage</h2>
+    <dl>
+      <dt>SQLite pool</dt>
+      <dd>size: {pool_size} / idle: {pool_idle} / max_size: {pool_max}</dd>
+    </dl>
+  </section>
+
+  <section class="card">
     <h2>Endpoints</h2>
     <ul class="links">
       <li><a href="/healthz">/healthz</a></li>
@@ -196,6 +208,9 @@ fn render_html(state: &AppState, uptime: Duration, count: u64) -> String {
         host = state.hostname,
         host_only = hostname_for_link(&state.hostname),
         rustc = rustc,
+        pool_size = pool.size,
+        pool_idle = pool.idle,
+        pool_max = pool.max_size,
     )
 }
 
@@ -292,7 +307,8 @@ mod tests {
     #[tokio::test]
     async fn render_html_contains_expected_fields() {
         let state = fake_state("0.0.0.0:8080").await;
-        let html = render_html(&state, Duration::from_secs(65), 42);
+        let pool = PoolStats { size: 3, idle: 2, max_size: 8 };
+        let html = render_html(&state, Duration::from_secs(65), 42, pool);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("api-server"));
         assert!(html.contains("1m 5s"));
@@ -300,5 +316,9 @@ mod tests {
         assert!(html.contains("0.0.0.0:8080"));
         assert!(html.contains("/healthz"));
         assert!(html.contains(":8082"));
+        // Storage section populated with the supplied PoolStats.
+        assert!(html.contains("Storage"));
+        assert!(html.contains("SQLite pool"));
+        assert!(html.contains("size: 3 / idle: 2 / max_size: 8"));
     }
 }
