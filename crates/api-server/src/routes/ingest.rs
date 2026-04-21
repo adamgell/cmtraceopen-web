@@ -17,7 +17,7 @@ use axum::{Json, Router};
 use bytes::Bytes;
 use chrono::Utc;
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
 use common_wire::ingest::{
@@ -68,6 +68,15 @@ fn validate_content_kind(k: &str) -> Result<(), AppError> {
     }
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        device_id = %device_id,
+        bundle_id = %req.bundle_id,
+        size_bytes = req.size_bytes,
+        content_kind = %req.content_kind,
+    ),
+)]
 async fn init(
     State(state): State<Arc<AppState>>,
     DeviceId(device_id): DeviceId,
@@ -96,6 +105,10 @@ async fn init(
         .find_session_by_bundle(&device_id, req.bundle_id)
         .await?
     {
+        info!(
+            session_id = %existing.session_id,
+            "init short-circuited: bundle already finalized",
+        );
         return Ok((
             StatusCode::OK,
             Json(BundleInitResponse {
@@ -143,6 +156,11 @@ async fn init(
                 req.bundle_id, prior.content_kind, req.content_kind
             )));
         }
+        info!(
+            upload_id = %prior.upload_id,
+            resume_offset = prior.offset_bytes,
+            "resuming interrupted upload",
+        );
         return Ok((
             StatusCode::OK,
             Json(BundleInitResponse {
@@ -207,6 +225,15 @@ struct ChunkResponse {
     next_offset: u64,
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        device_id = %device_id,
+        upload_id = %upload_id,
+        offset = q.offset,
+        chunk_len = body.len(),
+    ),
+)]
 async fn put_chunk(
     State(state): State<Arc<AppState>>,
     DeviceId(device_id): DeviceId,
@@ -287,9 +314,17 @@ async fn put_chunk(
         return Err(AppError::from(e));
     }
 
+    info!(next_offset = new_offset, "chunk accepted");
     Ok(Json(ChunkResponse { next_offset: new_offset }))
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        device_id = %device_id,
+        upload_id = %upload_id,
+    ),
+)]
 async fn finalize(
     State(state): State<Arc<AppState>>,
     DeviceId(device_id): DeviceId,
