@@ -102,16 +102,29 @@ impl AgentConfig {
             cfg.api_endpoint = v;
         }
         if let Ok(v) = std::env::var("CMTRACE_REQUEST_TIMEOUT_SECS") {
-            if let Ok(parsed) = v.parse::<u64>() {
-                cfg.request_timeout_secs = parsed;
+            match v.parse::<u64>() {
+                Ok(parsed) => cfg.request_timeout_secs = parsed,
+                // NOTE: `eprintln!` rather than `tracing::warn!` because this
+                // runs BEFORE `tracing-subscriber` is installed in `main.rs`.
+                // A tracing call here would be silently dropped; stderr is
+                // guaranteed visible and keeps this function dependency-free.
+                Err(e) => eprintln!(
+                    "warning: CMTRACE_REQUEST_TIMEOUT_SECS={v:?} failed to parse ({e}); falling back to default {}",
+                    cfg.request_timeout_secs
+                ),
             }
         }
         if let Ok(v) = std::env::var("CMTRACE_EVIDENCE_SCHEDULE") {
             cfg.evidence_schedule = v;
         }
         if let Ok(v) = std::env::var("CMTRACE_QUEUE_MAX_BUNDLES") {
-            if let Ok(parsed) = v.parse::<usize>() {
-                cfg.queue_max_bundles = parsed;
+            match v.parse::<usize>() {
+                Ok(parsed) => cfg.queue_max_bundles = parsed,
+                // See note above re: `eprintln!` vs `tracing::warn!`.
+                Err(e) => eprintln!(
+                    "warning: CMTRACE_QUEUE_MAX_BUNDLES={v:?} failed to parse ({e}); falling back to default {}",
+                    cfg.queue_max_bundles
+                ),
             }
         }
         if let Ok(v) = std::env::var("CMTRACE_LOG_LEVEL") {
@@ -162,7 +175,10 @@ queue_max_bundles = 7
     fn from_file_surfaces_missing_path() {
         let err = AgentConfig::from_file(Path::new("/definitely/not/here.toml"))
             .expect_err("missing file should error");
-        matches!(err, ConfigError::Io { .. });
+        assert!(
+            matches!(err, ConfigError::Io { .. }),
+            "expected ConfigError::Io, got {err:?}"
+        );
     }
 
     /// Minimal ad-hoc temp dir; avoids pulling `tempfile` into deps just for

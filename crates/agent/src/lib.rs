@@ -10,7 +10,12 @@
 // alongside it as the agent work actually starts — see the TODO block in
 // `main.rs` for the ordered list.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid`: the Windows service dispatcher work (landing
+// next) needs `windows_service::define_windows_service!` plus FFI shims that
+// wrap unsafe blocks, and `forbid` has no local `#[allow]` escape hatch. We
+// still want the default-off posture, just with an opt-in for the handful of
+// modules that genuinely need it.
+#![deny(unsafe_code)]
 
 pub mod config;
 
