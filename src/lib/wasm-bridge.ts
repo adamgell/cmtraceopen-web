@@ -6,6 +6,7 @@
 // gitignored; a dev sets them up with `pnpm install && pnpm wasm:build`.
 
 import init, { ping, parseContent } from "../../pkg/cmtrace_wasm";
+import type { ParseResult } from "./log-types";
 
 let readyPromise: Promise<void> | null = null;
 
@@ -28,10 +29,12 @@ export async function wasmPing(): Promise<string> {
  * `entries`, `formatDetected`, `parserSelection`, `totalLines`, `parseErrors`,
  * `filePath`, `fileSize`, `byteOffset`.
  *
- * Typed as `unknown` until we introduce a shared TS types package mirroring
- * the parser crate's serde shapes — callers should narrow at the use site.
+ * The wasm-pack binding returns `any` — we assert to `ParseResult` here so
+ * callers get a typed view without sprinkling casts at use sites. The shape
+ * is guaranteed by the Rust `#[serde(rename_all = "camelCase")]` contract
+ * and mirrored in `src/lib/log-types.ts`.
  */
-export async function parse(content: string, filePath: string): Promise<unknown> {
+export async function parse(content: string, filePath: string): Promise<ParseResult> {
   await initWasm();
-  return parseContent(content, filePath, content.length);
+  return parseContent(content, filePath, content.length) as ParseResult;
 }
