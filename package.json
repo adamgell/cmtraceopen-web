@@ -7,12 +7,15 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "wasm:build": "wasm-pack build cmtrace-wasm --target web --out-dir ../pkg",
+    "wasm:build:node": "wasm-pack build cmtrace-wasm --target nodejs --out-dir ../pkg-node",
+    "wasm:smoke": "node scripts/wasm-smoke.mjs",
     "dev": "pnpm wasm:build && vite",
     "build": "pnpm wasm:build && tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "pnpm wasm:build && tsc --noEmit"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.13.24",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

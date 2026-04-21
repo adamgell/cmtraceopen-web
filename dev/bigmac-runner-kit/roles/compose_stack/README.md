@@ -30,6 +30,7 @@ Idempotent git-clone + `docker compose up -d --build` on a macOS host. Assumes [
 |---|---|---|
 | `compose_stack_compose_file` | `docker-compose.yml` | Relative to `dest`. |
 | `compose_stack_pull_if_exists` | `true` | If a `.git` dir already exists at `dest`, fast-forward before deploying. Set `false` on hosts where you manage branches by hand. |
+| `compose_stack_git_recursive` | `true` | Clone/update with `--recurse-submodules` so gitlink entries (e.g. the `cmtraceopen` parser crate vendored into `cmtraceopen-web`) are populated. Pinned to the recorded submodule pointer — no `track_submodules`. |
 | `compose_stack_brew_prefix` | `/opt/homebrew` | Override to `/usr/local` on Intel. |
 | `compose_stack_docker_host` | `unix://$HOME/.colima/default/docker.sock` | Must match whatever Docker daemon is running (Colima by default). |
 

@@ -29,6 +29,8 @@
     dest: "{{ compose_stack_dest }}"
     version: "{{ compose_stack_branch }}"
     update: false
+    recursive: "{{ compose_stack_git_recursive | bool }}"
+    track_submodules: false
   when: not _repo_git_dir.stat.exists
   tags: [compose_stack]
 
@@ -43,6 +45,8 @@
     version: "{{ compose_stack_branch }}"
     update: true
     force: false
+    recursive: "{{ compose_stack_git_recursive | bool }}"
+    track_submodules: false
   when:
     - _repo_git_dir.stat.exists
     - compose_stack_pull_if_exists | bool
