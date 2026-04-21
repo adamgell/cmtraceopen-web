@@ -2,8 +2,16 @@
 //!
 //! Holds the two storage traits as trait objects so handlers don't care
 //! whether the backend is local-fs + SQLite (MVP) or S3 + Postgres (later).
+//!
+//! Also carries a handful of process-wide fields surfaced on the dev status
+//! page (`GET /`): monotonic start time, a request counter bumped by the
+//! counter middleware, the listen address, and the host name. These are
+//! intentionally parked on the same struct so every handler sees a single
+//! unified state type rather than juggling multiple `State<T>` extractors.
 
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::storage::{BlobStore, MetadataStore};
 
@@ -24,10 +32,41 @@ pub const MAX_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 pub struct AppState {
     pub meta: Arc<dyn MetadataStore>,
     pub blobs: Arc<dyn BlobStore>,
+    /// Monotonic start time; used by the status page for uptime math.
+    pub started_at: Instant,
+    /// Total HTTP requests served since process start, all routes + methods.
+    /// Incremented once per request by the request-counter middleware.
+    pub request_count: AtomicU64,
+    /// Listen address copied from Config at startup — cheap to stringify.
+    pub listen_addr: String,
+    /// Hostname reported by the kernel at startup (best-effort; falls back to
+    /// `"unknown"` if the OS lookup fails).
+    pub hostname: String,
 }
 
 impl AppState {
-    pub fn new(meta: Arc<dyn MetadataStore>, blobs: Arc<dyn BlobStore>) -> Arc<Self> {
-        Arc::new(Self { meta, blobs })
+    /// Build the full shared state. `listen_addr` is the stringified bind
+    /// address used purely for display on the status page.
+    pub fn new(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            meta,
+            blobs,
+            started_at: Instant::now(),
+            request_count: AtomicU64::new(0),
+            listen_addr,
+            hostname: detect_hostname(),
+        })
     }
+}
+
+/// Best-effort hostname lookup. Uses `HOSTNAME` / `COMPUTERNAME` env vars to
+/// avoid pulling in a platform-specific crate for a debug-only field.
+fn detect_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
 }

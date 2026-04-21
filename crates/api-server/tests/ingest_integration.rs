@@ -40,7 +40,7 @@ async fn start_server() -> TestServer {
             .await
             .expect("sqlite"),
     );
-    let state = AppState::new(meta, blobs);
+    let state = AppState::new(meta, blobs, "127.0.0.1:0".to_string());
     let app = router(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

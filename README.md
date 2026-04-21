@@ -48,6 +48,20 @@ cmtraceopen-web/
         └── wasm-bridge.ts  lazy WASM init + typed parse() wrapper
 ```
 
+## Dev status pages
+
+When the full stack is running via `docker compose up`, two debugging UIs are exposed on the host:
+
+- <http://localhost:8080/> — api-server status page: uptime, request counter, build metadata, links to `/healthz` + `/readyz`.
+- <http://localhost:8081/> — [Adminer](https://www.adminer.org/) web UI for Postgres. Log in with:
+  - System: `PostgreSQL`
+  - Server: `postgres`
+  - Username: `cmtrace`
+  - Password: `cmtrace`
+  - Database: `cmtrace`
+
+Both are **dev-only** — no auth, not production-safe. Firewall them off (or drop them from the compose file) before deploying anywhere real.
+
 ## License
 
 MIT (matches cmtraceopen).

@@ -47,7 +47,11 @@ async fn main() -> ExitCode {
         }
     };
 
-    let state = AppState::new(meta, blobs);
+    // AppState is constructed here so `started_at` reflects the real
+    // process start (before we block in `bind`). Cloned by reference into
+    // the router and the request-counter middleware.
+    let state = AppState::new(meta, blobs, config.listen_addr.to_string());
+
     let app = router(state).layer(TraceLayer::new_for_http());
 
     let listener = match TcpListener::bind(config.listen_addr).await {

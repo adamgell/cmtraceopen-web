@@ -35,6 +35,24 @@ services:
     # and /readyz directly when the server is deployed for real.
     restart: unless-stopped
 
+  # Adminer — web UI for poking at the Postgres dev DB. Connect via
+  # http://localhost:8081 and enter:
+  #   System:   PostgreSQL
+  #   Server:   postgres
+  #   Username: cmtrace
+  #   Password: cmtrace
+  #   Database: cmtrace
+  # Not production-safe (no auth, wide-open SQL console). Firewall off or
+  # drop from the compose file before shipping anywhere real.
+  adminer:
+    image: adminer:latest
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:

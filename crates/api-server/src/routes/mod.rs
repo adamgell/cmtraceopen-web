@@ -2,6 +2,7 @@ pub mod devices;
 pub mod health;
 pub mod ingest;
 pub mod sessions;
+pub mod status;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
