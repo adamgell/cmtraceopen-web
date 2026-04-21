@@ -1,6 +1,9 @@
 import { useCallback, useState } from "react";
 import type { ParseResult } from "../lib/log-types";
 import { LocalMode } from "./LocalMode";
+import { ApiMode } from "./ApiMode";
+
+type Mode = "local" | "api";
 
 interface LoadedSummary {
   fileName: string;
@@ -8,17 +11,32 @@ interface LoadedSummary {
 }
 
 /**
- * Top-level viewer shell. Renders the app chrome (title bar + file
- * summary) and delegates the actual drop/parse/list flow to `LocalMode`.
+ * Top-level viewer shell.
  *
- * Kept intentionally thin so a sibling fetch-from-API flow can plug in
- * next to `LocalMode` without the shell owning parse state.
+ * Since the `api-fetch` feature landed, the shell is little more than a
+ * chrome (title bar, mode toggle) that routes to one of two children:
+ *
+ *   - `LocalMode` — the original drag-and-drop + WASM parse flow.
+ *   - `ApiMode`   — fetch device → session → entries from the api-server.
+ *
+ * The shell itself no longer tracks parse state; each mode owns its own
+ * lifecycle. The only cross-cutting concern the shell still handles is
+ * the "loaded file" summary in the top bar, and even that is just a prop
+ * callback the local flow writes into — API mode doesn't use it.
  */
 export function ViewerShell() {
+  const [mode, setMode] = useState<Mode>("local");
   const [loaded, setLoaded] = useState<LoadedSummary | null>(null);
 
   const handleLoaded = useCallback((info: LoadedSummary | null) => {
     setLoaded(info);
+  }, []);
+
+  // Clear any lingering local-mode summary when switching away so the top
+  // bar doesn't advertise a file that's no longer on screen.
+  const handleModeChange = useCallback((next: Mode) => {
+    setMode(next);
+    if (next !== "local") setLoaded(null);
   }, []);
 
   return (
@@ -31,7 +49,12 @@ export function ViewerShell() {
         color: "#222",
       }}
     >
-      <TopBar loaded={loaded} onClose={() => setLoaded(null)} />
+      <TopBar
+        mode={mode}
+        onModeChange={handleModeChange}
+        loaded={mode === "local" ? loaded : null}
+        onClose={() => setLoaded(null)}
+      />
       <main
         style={{
           flex: 1,
@@ -42,16 +65,20 @@ export function ViewerShell() {
           gap: 12,
         }}
       >
-        <LocalMode onLoaded={handleLoaded} />
+        {mode === "local" ? <LocalMode onLoaded={handleLoaded} /> : <ApiMode />}
       </main>
     </div>
   );
 }
 
 function TopBar({
+  mode,
+  onModeChange,
   loaded,
   onClose,
 }: {
+  mode: Mode;
+  onModeChange: (m: Mode) => void;
   loaded: LoadedSummary | null;
   onClose: () => void;
 }) {
@@ -67,6 +94,7 @@ function TopBar({
       }}
     >
       <div style={{ fontWeight: 600 }}>CMTrace Open — Web</div>
+      <ModeToggle mode={mode} onChange={onModeChange} />
       {loaded && (
         <>
           <div style={{ color: "#555", fontSize: 13 }}>
@@ -105,5 +133,53 @@ function TopBar({
         </>
       )}
     </header>
+  );
+}
+
+function ModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: Mode;
+  onChange: (m: Mode) => void;
+}) {
+  const base: React.CSSProperties = {
+    padding: "4px 10px",
+    fontSize: 12,
+    border: "1px solid #ccc",
+    background: "white",
+    cursor: "pointer",
+  };
+  const active: React.CSSProperties = {
+    ...base,
+    background: "#111",
+    borderColor: "#111",
+    color: "white",
+  };
+  return (
+    <div
+      role="tablist"
+      aria-label="Viewer mode"
+      style={{ display: "inline-flex", borderRadius: 4, overflow: "hidden" }}
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "local"}
+        onClick={() => onChange("local")}
+        style={mode === "local" ? active : { ...base, borderRight: "none" }}
+      >
+        Local
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "api"}
+        onClick={() => onChange("api")}
+        style={mode === "api" ? active : base}
+      >
+        API
+      </button>
+    </div>
   );
 }
