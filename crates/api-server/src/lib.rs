@@ -7,14 +7,28 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod error;
+pub mod extract;
 pub mod routes;
+pub mod state;
+pub mod storage;
+
+use std::sync::Arc;
 
 use axum::Router;
 
+use crate::state::AppState;
+
 /// Build the Axum router with all routes attached.
 ///
-/// This is the composition root — future modules (ingest, devices, sessions,
-/// auth middleware, CORS, tracing layers) plug in here.
-pub fn router() -> Router {
-    Router::new().merge(routes::health::router())
+/// This is the composition root — future modules (auth middleware, CORS,
+/// tracing layers) plug in here. Takes a prebuilt [`AppState`] so integration
+/// tests can inject a tempdir + in-memory SQLite while `main.rs` builds the
+/// real one from env.
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .merge(routes::health::router())
+        .merge(routes::ingest::router(state.clone()))
+        .merge(routes::devices::router(state.clone()))
+        .merge(routes::sessions::router(state))
 }
