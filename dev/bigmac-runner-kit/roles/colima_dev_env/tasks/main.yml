@@ -1,0 +1,112 @@
+---
+# colima_dev_env — idempotent bootstrap of Colima + Docker CLI tooling on macOS.
+
+- name: Gather minimum facts (in case playbook disabled gather_facts)
+  ansible.builtin.setup:
+    gather_subset: min
+  when: ansible_system is not defined
+  tags: [colima_dev_env, always]
+
+- name: Assert macOS host
+  ansible.builtin.assert:
+    that:
+      - ansible_system == 'Darwin'
+    fail_msg: "colima_dev_env targets macOS only (got ansible_system={{ ansible_system }})."
+  tags: [colima_dev_env, always]
+
+- name: Check Homebrew is present
+  ansible.builtin.stat:
+    path: "{{ colima_dev_env_brew_bin }}"
+  register: _brew_bin
+  tags: [colima_dev_env]
+
+- name: Fail if Homebrew missing
+  ansible.builtin.fail:
+    msg: >-
+      Homebrew not found at {{ colima_dev_env_brew_bin }}. Install Homebrew
+      first: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  when: not _brew_bin.stat.exists
+  tags: [colima_dev_env]
+
+- name: List currently-installed brew formulas
+  ansible.builtin.command:
+    cmd: "{{ colima_dev_env_brew_bin }} list --formula"
+  register: _brew_list
+  changed_when: false
+  tags: [colima_dev_env]
+
+- name: Install missing brew formulas
+  ansible.builtin.command:
+    cmd: "{{ colima_dev_env_brew_bin }} install {{ item }}"
+  loop: "{{ colima_dev_env_brew_packages }}"
+  when: item not in _brew_list.stdout_lines
+  register: _brew_install
+  changed_when: _brew_install.rc == 0
+  tags: [colima_dev_env]
+
+- name: Ensure ~/.docker directory exists
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.docker"
+    state: directory
+    mode: "0755"
+  tags: [colima_dev_env, docker_config]
+
+- name: Read existing ~/.docker/config.json (if present)
+  ansible.builtin.slurp:
+    src: "{{ ansible_env.HOME }}/.docker/config.json"
+  register: _existing_docker_config
+  failed_when: false
+  changed_when: false
+  tags: [colima_dev_env, docker_config]
+
+- name: Compute desired docker config
+  # Start from existing config (or empty dict), drop any stale credsStore
+  # (common leftover from an uninstalled Docker Desktop), then ensure
+  # cliPluginsExtraDirs points at the brew plugin dir.
+  ansible.builtin.set_fact:
+    _desired_docker_config: >-
+      {{ ((_existing_docker_config.content | b64decode | from_json)
+           if (_existing_docker_config.content is defined and _existing_docker_config.content | length > 0)
+           else {})
+         | dict2items | rejectattr('key', 'eq', 'credsStore') | items2dict
+         | combine({'cliPluginsExtraDirs': [colima_dev_env_docker_plugins_dir]}) }}
+  tags: [colima_dev_env, docker_config]
+
+- name: Write ~/.docker/config.json
+  ansible.builtin.copy:
+    dest: "{{ ansible_env.HOME }}/.docker/config.json"
+    content: "{{ _desired_docker_config | to_nice_json }}\n"
+    mode: "0600"
+  tags: [colima_dev_env, docker_config]
+
+- name: Check Colima status
+  ansible.builtin.command:
+    cmd: "{{ colima_dev_env_brew_prefix }}/bin/colima status"
+  register: _colima_status
+  changed_when: false
+  failed_when: false
+  tags: [colima_dev_env, colima]
+
+- name: Start Colima
+  ansible.builtin.command:
+    cmd: >-
+      {{ colima_dev_env_brew_prefix }}/bin/colima start
+      --cpu {{ colima_dev_env_cpu }}
+      --memory {{ colima_dev_env_memory }}
+      --disk {{ colima_dev_env_disk }}
+  when: _colima_status.rc != 0
+  register: _colima_start
+  changed_when: _colima_start.rc == 0
+  tags: [colima_dev_env, colima]
+
+- name: Verify Docker daemon reachable via Colima socket
+  ansible.builtin.command:
+    cmd: "{{ colima_dev_env_brew_prefix }}/bin/docker info"
+  environment:
+    DOCKER_HOST: "{{ colima_dev_env_docker_host }}"
+  register: _docker_info
+  changed_when: false
+  retries: 5
+  delay: 2
+  until: _docker_info.rc == 0
+  tags: [colima_dev_env, colima]

@@ -1,0 +1,27 @@
+---
+# compose_stack role — clone (or refresh) a git repo on a macOS host and run
+# `docker compose up -d --build` against it. Assumes Colima + Docker CLI are
+# already in place (use the `colima_dev_env` role as a prereq).
+#
+# Required vars:
+#   compose_stack_repo_url       git URL to clone (HTTPS for public repos,
+#                                 SSH for private — auth is the caller's
+#                                 responsibility)
+#   compose_stack_dest           absolute path on target for the checkout
+#   compose_stack_branch         git branch to check out
+#
+# Optional vars (defaults below):
+#   compose_stack_compose_file   path to compose file, relative to dest
+#   compose_stack_pull_if_exists if the dest already has a .git dir, pull
+#                                 before deploying. Set false if you want the
+#                                 playbook to NEVER auto-pull (e.g. on a host
+#                                 where you manage branches manually).
+
+compose_stack_compose_file: docker-compose.yml
+compose_stack_pull_if_exists: true
+
+# Homebrew paths — Apple Silicon default. Override for Intel.
+compose_stack_brew_prefix: /opt/homebrew
+
+# Docker socket. Should match colima_dev_env_docker_host.
+compose_stack_docker_host: "unix://{{ ansible_env.HOME }}/.colima/default/docker.sock"
