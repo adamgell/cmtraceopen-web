@@ -35,8 +35,9 @@ dev/bigmac-runner-kit/scripts/redeploy.sh --branch main
 
 ### What it does
 
-1. SSHes to `Adam.Gell@192.168.2.50` using the key at
-   `dev/bigmac-runner-kit/id_ed25519`.
+1. SSHes to `Adam.Gell@192.168.2.50` using `~/.ssh/id_ed25519` on the control
+   machine by default. Override with `-i PATH` or the `CMTRACE_SSH_KEY` env
+   var (e.g. to use the kit-bundled `dev/bigmac-runner-kit/id_ed25519`).
 2. On the remote, in `~/repo/cmtraceopen-web`: `git fetch`, checkout the
    target branch, `git pull --ff-only`, refresh submodules, and capture the
    old -> new short SHAs.
@@ -54,8 +55,10 @@ PATH under the non-interactive SSH session.
 
 ### Prerequisites
 
-- SSH private key at `dev/bigmac-runner-kit/id_ed25519` (matching pubkey
-  already in `~/.ssh/authorized_keys` on BigMac26).
+- SSH private key at `~/.ssh/id_ed25519` on the control machine (matching
+  pubkey already in `~/.ssh/authorized_keys` on BigMac26). Use
+  `-i PATH` / `CMTRACE_SSH_KEY` to point at the kit-bundled key or any
+  other location.
 - BigMac26 reachable at `192.168.2.50` from the control machine.
 - colima already running on BigMac26 (the deploy path assumes the Docker
   socket at `~/.colima/default/docker.sock` exists — this script does not
@@ -83,4 +86,4 @@ existing stack.
 - Status page:    <http://192.168.2.50:8080/>
 - Health probe:   <http://192.168.2.50:8080/healthz>
 - Readiness:      <http://192.168.2.50:8080/readyz>
-- Adminer:        <http://192.168.2.50:8081/>
+- Adminer:        <http://192.168.2.50:8082/>
