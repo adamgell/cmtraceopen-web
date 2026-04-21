@@ -25,11 +25,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 common-wire = { path = "../common-wire" }
-# Storage: SQLite via sqlx with explicit rustls (avoid native-tls / OpenSSL
-# on Windows dev boxes) plus chrono + uuid type adapters.
-# Use runtime-tokio without TLS: SQLite is a local file, and pulling in
-# rustls/ring forces a C toolchain (clang) on aarch64-windows dev boxes.
-# When we move to Postgres (M2+), pick tls-rustls-aws-lc-rs explicitly.
+# Storage: SQLite via sqlx. Use runtime-tokio + tls-none — SQLite is a
+# local file so no TLS is needed, and avoiding rustls/ring keeps a C
+# toolchain (clang) off the build path on aarch64-windows dev boxes.
+# When we add Postgres (M2+), pick tls-rustls-aws-lc-rs explicitly.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "chrono", "uuid", "macros", "migrate"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 chrono = { version = "0.4", features = ["serde"] }
