@@ -37,6 +37,15 @@ hex = "0.4"
 bytes = "1"
 async-trait = "0.1"
 base64 = "0.22"
+# Parse-on-ingest pipeline. Path-dep on the sibling cmtraceopen submodule;
+# the submodule pointer is managed at the repo root (.gitmodules). The
+# crate is pure Rust (no filesystem I/O, no tokio) and compiles to
+# native + wasm32, so pulling it into the server is cheap.
+cmtraceopen-parser = { path = "../../cmtraceopen/crates/cmtraceopen-parser" }
+# Evidence-zip bundles are unzipped in-memory by the parse worker. We use
+# default features only (deflate) so no ring/openssl drift into the
+# transitive tree; the integration build verifies this.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 # Integration tests talk to a local loopback server — no TLS needed, and
