@@ -9,12 +9,25 @@
 pub mod config;
 pub mod routes;
 
-use axum::Router;
+use std::sync::Arc;
+
+use axum::{middleware, Router};
+
+pub use routes::status::AppState;
 
 /// Build the Axum router with all routes attached.
 ///
-/// This is the composition root — future modules (ingest, devices, sessions,
-/// auth middleware, CORS, tracing layers) plug in here.
-pub fn router() -> Router {
-    Router::new().merge(routes::health::router())
+/// The shared [`AppState`] is threaded into both the `/` status page (for
+/// read-out) and the request-counter middleware (for bumping on each hit).
+/// Future modules (ingest, devices, sessions, auth middleware, CORS, tracing
+/// layers) plug in here — keep per-route state localized via `with_state`
+/// so this composition root stays small.
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .merge(routes::health::router())
+        .merge(routes::status::router(state.clone()))
+        .layer(middleware::from_fn_with_state(
+            state,
+            routes::status::request_counter_middleware,
+        ))
 }

@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use api_server::{config::Config, router};
+use api_server::{config::Config, router, AppState};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -25,7 +25,12 @@ async fn main() -> ExitCode {
         "starting cmtraceopen-api"
     );
 
-    let app = router().layer(TraceLayer::new_for_http());
+    // AppState is constructed here so `started_at` reflects the real
+    // process start (before we block in `bind`). Cloned by reference into
+    // the router and the request-counter middleware.
+    let state = AppState::new(config.listen_addr.to_string());
+
+    let app = router(state).layer(TraceLayer::new_for_http());
 
     let listener = match TcpListener::bind(config.listen_addr).await {
         Ok(l) => l,
