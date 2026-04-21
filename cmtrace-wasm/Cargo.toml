@@ -1,3 +1,8 @@
+# Self-hosting workspace — see ../Cargo.toml's `exclude` list for why.
+# Lets `wasm-pack build cmtrace-wasm` resolve without dragging the
+# cross-repo path dep into the root workspace's Docker build context.
+[workspace]
+
 [package]
 name = "cmtrace-wasm"
 version = "0.1.0"

@@ -1,3 +1,19 @@
 [workspace]
-members = ["cmtrace-wasm"]
+# Root workspace: the platform crates (api-server + common-wire) that are
+# fully self-contained in this repo. Both build cleanly without the sibling
+# cmtraceopen checkout.
+members = [
+    "crates/api-server",
+    "crates/common-wire",
+]
+
+# cmtrace-wasm is excluded from this workspace because it path-depends on
+# ../../cmtraceopen/crates/cmtraceopen-parser (the desktop app's parser
+# crate). That cross-repo dep doesn't exist inside the api-server Docker
+# build context, so keeping cmtrace-wasm in a separate self-hosting
+# workspace lets `cargo build -p api-server` work from a fresh container.
+# wasm-pack still cd's into cmtrace-wasm/ and treats it as its own
+# workspace root.
+exclude = ["cmtrace-wasm"]
+
 resolver = "2"
