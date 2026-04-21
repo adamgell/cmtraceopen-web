@@ -181,6 +181,35 @@ pub struct Paginated<T> {
     pub next_cursor: Option<String>,
 }
 
+/// Response body for `GET /healthz` and `GET /readyz`.
+///
+/// Shallow liveness payload. `service` + `version` come from the server's
+/// `CARGO_PKG_NAME` / `CARGO_PKG_VERSION` at compile time; `status` is
+/// `"ok"` for a healthy process. Typed so downstream clients (the agent's
+/// health probe, the web viewer, ops tooling) can deserialize without
+/// dropping to `serde_json::Value`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthResponse {
+    pub status: String,
+    pub service: String,
+    pub version: String,
+}
+
+/// JSON body emitted by the api-server's `AppError::into_response`.
+///
+/// `error` is a stable, snake_case code (`bad_request`, `not_found`,
+/// `offset_mismatch`, ...) — clients branch on this. `message` is a
+/// human-readable explanation built from the error's `Display` impl and is
+/// intentionally not part of any machine contract (it may change wording
+/// between versions).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorBody {
+    pub error: String,
+    pub message: String,
+}
+
 // Re-exports so downstream crates can use the flat path if they prefer.
 pub use ingest::{
     BundleFinalizeRequest, BundleFinalizeResponse, BundleInitRequest, BundleInitResponse,
@@ -188,6 +217,7 @@ pub use ingest::{
 };
 pub use query::{FileSummary, LogEntryDto};
 pub use registry::{DeviceSummary, SessionSummary};
+// `HealthResponse` + `ErrorBody` live at the crate root; no alias needed.
 
 #[cfg(test)]
 mod tests {
@@ -252,6 +282,39 @@ mod tests {
         assert!(v.get("lineNumber").is_some());
         assert!(v.get("tsMs").is_some());
         assert_eq!(v.get("extras").unwrap().get("httpMethod").unwrap(), "GET");
+    }
+
+    #[test]
+    fn health_response_round_trips() {
+        let h = HealthResponse {
+            status: "ok".into(),
+            service: "cmtraceopen-api".into(),
+            version: "0.1.0".into(),
+        };
+        let s = serde_json::to_string(&h).unwrap();
+        // All three fields happen to be single-word, so camelCase == snake_case
+        // here; the test exists to lock the shape against accidental rename.
+        assert!(s.contains("\"status\":\"ok\""));
+        assert!(s.contains("\"service\":\"cmtraceopen-api\""));
+        assert!(s.contains("\"version\":\"0.1.0\""));
+        let back: HealthResponse = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.status, "ok");
+        assert_eq!(back.service, "cmtraceopen-api");
+        assert_eq!(back.version, "0.1.0");
+    }
+
+    #[test]
+    fn error_body_round_trips() {
+        let e = ErrorBody {
+            error: "bad_request".into(),
+            message: "missing X-Device-Id header".into(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains("\"error\":\"bad_request\""));
+        assert!(s.contains("\"message\":\"missing X-Device-Id header\""));
+        let back: ErrorBody = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.error, "bad_request");
+        assert_eq!(back.message, "missing X-Device-Id header");
     }
 
     #[test]
