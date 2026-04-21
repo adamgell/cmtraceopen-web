@@ -18,23 +18,14 @@ jobs:
     name: Check & Test
     runs-on: ubuntu-latest
     steps:
-      # --- Checkouts -----------------------------------------------------
-      # cmtrace-wasm path-depends on ../../cmtraceopen/crates/cmtraceopen-parser,
-      # so we need both repos as siblings under $GITHUB_WORKSPACE.
-      - name: Checkout cmtraceopen-web
+      # --- Checkout ------------------------------------------------------
+      # cmtraceopen is a git submodule at ./cmtraceopen; cmtrace-wasm path-
+      # depends on `../cmtraceopen/crates/cmtraceopen-parser`. `submodules:
+      # recursive` pins to the commit recorded in .gitmodules — hermetic.
+      - name: Checkout (with submodules)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          path: cmtraceopen-web
-
-      - name: Checkout sibling cmtraceopen (parser crate source)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: adamgell/cmtraceopen
-          path: cmtraceopen
-          # TODO(phase-1-merge): flip back to `main` once adamgell/cmtraceopen#155
-          # (parser crate extraction) merges. Until then, `main` has no
-          # crates/cmtraceopen-parser/ yet, and cmtrace-wasm's path dep fails.
-          ref: feat/platform-split
+          submodules: recursive
 
       # --- Rust toolchain ------------------------------------------------
       - name: Setup Rust
@@ -52,34 +43,31 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            cmtraceopen-web/target/
-            cmtraceopen-web/cmtrace-wasm/target/
+            target/
+            cmtrace-wasm/target/
           key: >-
             ${{ runner.os }}-cargo-${{
-              hashFiles('cmtraceopen-web/Cargo.lock', 'cmtraceopen-web/cmtrace-wasm/Cargo.lock')
+              hashFiles('Cargo.lock', 'cmtrace-wasm/Cargo.lock')
             }}
           restore-keys: ${{ runner.os }}-cargo-
 
       # --- Rust: root workspace (api-server + common-wire) --------------
       - name: cargo check (workspace)
-        working-directory: cmtraceopen-web
         run: cargo check --workspace
 
       - name: cargo test (workspace)
-        working-directory: cmtraceopen-web
         run: cargo test --workspace
 
       - name: cargo clippy (workspace)
-        working-directory: cmtraceopen-web
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       # --- Rust: cmtrace-wasm (self-hosting workspace, wasm target) ----
       - name: cargo check (cmtrace-wasm, wasm32)
-        working-directory: cmtraceopen-web/cmtrace-wasm
+        working-directory: cmtrace-wasm
         run: cargo check --target wasm32-unknown-unknown
 
       - name: cargo clippy (cmtrace-wasm, wasm32)
-        working-directory: cmtraceopen-web/cmtrace-wasm
+        working-directory: cmtrace-wasm
         run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
 
       # --- wasm-pack (pre-built release binary, not cargo install) ------
@@ -97,7 +85,6 @@ jobs:
           node-version: "20"
 
       - name: Enable pnpm via corepack
-        working-directory: cmtraceopen-web
         run: |
           corepack enable
           corepack prepare --activate
@@ -107,29 +94,25 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.local/share/pnpm/store
-          key: ${{ runner.os }}-pnpm-${{ hashFiles('cmtraceopen-web/pnpm-lock.yaml') }}
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
           restore-keys: ${{ runner.os }}-pnpm-
 
       - name: pnpm install
-        working-directory: cmtraceopen-web
         run: pnpm install --frozen-lockfile
 
       # --- Full build (wasm:build + tsc --noEmit + vite build) ---------
       - name: pnpm build
-        working-directory: cmtraceopen-web
         run: pnpm build
 
       # --- Docker image build (sanity; no push) -------------------------
-      # Ensures the Dockerfile stays buildable on every PR. Uses buildx
-      # (available in GitHub Actions runners by default) so --mount=type=cache
-      # in the Dockerfile works. linux/amd64 only here; ARM64 images are
-      # produced locally on Colima (Apple Silicon) and on-demand via
-      # `docker buildx build --platform linux/arm64,linux/amd64`.
+      # Ensures the Dockerfile stays buildable on every PR. Uses buildx so
+      # --mount=type=cache in the Dockerfile works. linux/amd64 only here;
+      # ARM64 images are produced locally on Colima (Apple Silicon) and on-
+      # demand via `docker buildx build --platform linux/arm64,linux/amd64`.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Build api-server image (no push)
-        working-directory: cmtraceopen-web
         run: |
           docker buildx build \
             --file crates/api-server/Dockerfile \

@@ -15,8 +15,11 @@ license = "MIT"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Relative path dep: requires cmtraceopen to be checked out as a sibling directory.
-cmtraceopen-parser = { path = "../../cmtraceopen/crates/cmtraceopen-parser" }
+# Path dep on the cmtraceopen submodule. The submodule pointer is managed at
+# the cmtraceopen-web repo root (.gitmodules); bump it with a deliberate
+# `git submodule update --remote` + commit when you want to pick up upstream
+# parser changes. Reproducible + reviewable.
+cmtraceopen-parser = { path = "../cmtraceopen/crates/cmtraceopen-parser" }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
