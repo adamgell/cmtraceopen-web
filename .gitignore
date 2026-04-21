@@ -22,6 +22,12 @@ Thumbs.db
 .env.local
 !.env.example
 
+# SSH keys — never commit private material from the bigmac-runner-kit.
+dev/bigmac-runner-kit/id_ed25519
+dev/bigmac-runner-kit/id_ed25519.pub
+**/id_ed25519
+**/id_rsa
+
 # Claude Code local
 .claude/settings.local.json
 .claude/worktrees/
