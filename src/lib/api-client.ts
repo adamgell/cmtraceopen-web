@@ -116,6 +116,34 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+async function postJson<T>(path: string, body?: unknown): Promise<T> {
+  const full = url(path);
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const token = await getAccessToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+  const res = await fetch(full, {
+    method: "POST",
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const text = await res.text();
+      if (text) detail = ` — ${text.slice(0, 200)}`;
+    } catch {
+      // ignore
+    }
+    throw new Error(`POST ${full} failed: ${res.status} ${res.statusText}${detail}`);
+  }
+  return (await res.json()) as T;
+}
+
 export interface ListEntriesOptions {
   /** Max entries to return. Server clamps; client default matches the v1 UI. */
   limit?: number;
@@ -162,4 +190,31 @@ export function listEntries(
     `/v1/sessions/${encodeURIComponent(sessionId)}/entries?${params.toString()}`,
     opts.signal,
   );
+}
+
+/**
+ * Paginated device list — supports keyset cursor from the previous page.
+ * `cursor` is the `nextCursor` from the prior `Paginated<DeviceSummary>`
+ * response; omit or pass `null` to start at the first page.
+ */
+export function listDevicesPage(
+  limit = 50,
+  cursor?: string | null,
+): Promise<Paginated<DeviceSummary>> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (cursor) params.set("cursor", cursor);
+  return getJson<Paginated<DeviceSummary>>(`/v1/devices?${params.toString()}`);
+}
+
+/**
+ * Disable a registered device. Requires the caller's token to carry the
+ * `CmtraceOpen.Admin` app role — the api-server enforces this and returns
+ * 403 for operator-only tokens.
+ *
+ * Returns the raw JSON response body (shape TBD by server; currently 501
+ * while the MDM-side workflow is being wired up).
+ */
+export function disableDevice(deviceId: string): Promise<unknown> {
+  return postJson<unknown>(`/v1/admin/devices/${encodeURIComponent(deviceId)}/disable`);
 }

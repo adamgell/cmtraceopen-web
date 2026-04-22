@@ -2,9 +2,10 @@ import { useCallback, useState } from "react";
 import type { ParseResult } from "../lib/log-types";
 import { LocalMode } from "./LocalMode";
 import { ApiMode } from "./ApiMode";
+import { DevicesPanel } from "./DevicesPanel";
 import { AuthSettings } from "./AuthSettings";
 
-type Mode = "local" | "api";
+type Mode = "local" | "api" | "devices";
 
 interface LoadedSummary {
   fileName: string;
@@ -66,7 +67,7 @@ export function ViewerShell() {
           gap: 12,
         }}
       >
-        {mode === "local" ? <LocalMode onLoaded={handleLoaded} /> : <ApiMode />}
+        {mode === "local" ? <LocalMode onLoaded={handleLoaded} /> : mode === "devices" ? <DevicesPanel /> : <ApiMode />}
       </main>
     </div>
   );
@@ -178,9 +179,18 @@ function ModeToggle({
         role="tab"
         aria-selected={mode === "api"}
         onClick={() => onChange("api")}
-        style={mode === "api" ? active : base}
+        style={mode === "api" ? active : { ...base, borderRight: "none" }}
       >
         API
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "devices"}
+        onClick={() => onChange("devices")}
+        style={mode === "devices" ? active : base}
+      >
+        Devices
       </button>
     </div>
   );

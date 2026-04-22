@@ -103,3 +103,30 @@ export function getMsalInstance(): PublicClientApplication | null {
 export function getApiScope(): string | null {
   return entraConfig.status === "configured" ? entraConfig.apiScope : null;
 }
+
+/**
+ * The Entra app role value granting admin privileges. Mirrors `ROLE_ADMIN`
+ * in `crates/api-server/src/auth/mod.rs`.
+ */
+export const ROLE_ADMIN = "CmtraceOpen.Admin";
+
+/**
+ * Returns `true` when the currently signed-in MSAL account holds the
+ * `CmtraceOpen.Admin` app role in its ID token claims.
+ *
+ * The `roles` claim is populated by Entra when the user has been assigned
+ * to the Admin app role on the Enterprise Application. In anonymous mode
+ * (no MSAL) this always returns `false` so `RoleGate` renders disabled
+ * controls rather than no controls at all.
+ */
+export function isAdmin(): boolean {
+  const instance = getMsalInstance();
+  if (!instance) return false;
+  const account = instance.getActiveAccount() ?? instance.getAllAccounts()[0] ?? null;
+  if (!account) return false;
+  const claims = account.idTokenClaims as Record<string, unknown> | undefined;
+  if (!claims) return false;
+  const roles = claims["roles"];
+  if (!Array.isArray(roles)) return false;
+  return (roles as unknown[]).includes(ROLE_ADMIN);
+}
