@@ -8,7 +8,9 @@ use api_server::auth::CrlCache;
 use api_server::config::Config;
 use api_server::pipeline::retention;
 use api_server::router;
-use api_server::state::{install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig};
+use api_server::state::{
+    install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig, RateLimitState,
+};
 use api_server::storage::{build_blob_store, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -236,6 +238,49 @@ async fn main() -> ExitCode {
         trusted_proxy_cidr: config.tls.trusted_proxy_cidr,
         trusted_ca_ders,
     };
+    let rate_limit = std::sync::Arc::new(RateLimitState::from_config(&config.rate_limit));
+    info!(
+        ingest_per_device_hour = config.rate_limit.ingest_per_device_hour,
+        ingest_per_ip_minute = config.rate_limit.ingest_per_ip_minute,
+        query_per_ip_minute = config.rate_limit.query_per_ip_minute,
+        trusted_proxy_cidrs = ?config.rate_limit.trusted_proxy_cidrs,
+        "rate limiting configured (0 = disabled)",
+    );
+
+    // Spawn a background GC task that sweeps expired entries from every
+    // active rate-limiter once per minute. This bounds the DashMap footprint
+    // to the number of distinct keys seen in a single window rather than
+    // growing indefinitely as new device IDs / IPs arrive over the life of
+    // the process.
+    {
+        let rl = Arc::clone(&rate_limit);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                let mut total_purged: usize = 0;
+                if let Some(l) = &rl.device_ingest {
+                    let before = l.len();
+                    l.purge_expired();
+                    total_purged += before.saturating_sub(l.len());
+                }
+                if let Some(l) = &rl.ip_ingest {
+                    let before = l.len();
+                    l.purge_expired();
+                    total_purged += before.saturating_sub(l.len());
+                }
+                if let Some(l) = &rl.ip_query {
+                    let before = l.len();
+                    l.purge_expired();
+                    total_purged += before.saturating_sub(l.len());
+                }
+                if total_purged > 0 {
+                    tracing::debug!(purged = total_purged, "rate-limit GC: evicted expired entries");
+                }
+            }
+        });
+    }
 
     // Build the CRL cache (if the `crl` feature is on) and prime it with
     // an initial fetch before the listener binds. Refresh task continues
@@ -276,6 +321,7 @@ async fn main() -> ExitCode {
         cors,
         mtls,
         crl_cache,
+        rate_limit,
         audit,
     );
     #[cfg(not(feature = "crl"))]
@@ -286,6 +332,7 @@ async fn main() -> ExitCode {
         auth_state,
         cors,
         mtls,
+        rate_limit,
         audit,
     );
 
@@ -318,6 +365,9 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Use `into_make_service_with_connect_info` so the rate-limit middleware
+    // can read the real TCP peer address (`ConnectInfo<SocketAddr>`) and
+    // bypass forwarded-header spoofing when the caller is not a trusted proxy.
     let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -408,6 +458,10 @@ fn describe_metrics() {
          accepted), header_invalid (AppGW cert header rejected — decode \
          failure or chain validation failure), tls (in-process mTLS), or \
          none (no cert / identity unavailable)."
+    );
+    describe_counter!(
+        "cmtrace_rate_limit_rejected_total",
+        "Requests rejected by the rate limiter, labeled by scope (device|ip) and route."
     );
 }
 

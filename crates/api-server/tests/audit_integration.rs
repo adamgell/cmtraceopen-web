@@ -66,6 +66,7 @@ async fn start_server() -> AuditTestServer {
         },
         api_server::state::CorsConfig::default(),
         api_server::state::MtlsRuntimeConfig::default(),
+        Arc::new(api_server::state::RateLimitState::disabled()),
         audit,
     );
 
