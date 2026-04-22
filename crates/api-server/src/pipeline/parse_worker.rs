@@ -3,9 +3,10 @@
 //! Spawned from the ingest finalize handler with the freshly-committed
 //! session, this worker:
 //!
-//!   1. Reads the staged blob off disk (already content-addressed at this
-//!      point — the blob_uri returned by [`crate::storage::BlobStore::finalize`]
-//!      is a `file://` path).
+//!   1. Reads the finalized blob through the [`crate::storage::BlobStore`]
+//!      trait (`head_blob` for the size cap, `read_blob` for the bytes).
+//!      Backend-agnostic: local-FS in dev, Azure Blob in cloud, S3 / GCS
+//!      when those land — the worker doesn't care.
 //!   2. For `evidence-zip` content kind, walks every file in the archive,
 //!      filters to text logs, runs each through `cmtraceopen_parser`, and
 //!      bulk-inserts the parsed entries.
@@ -51,9 +52,11 @@ pub struct ParseDeps {
 /// Run a parse for the freshly-finalized session and update `parse_state`
 /// when finished.
 ///
-/// `blob_uri` is the `file://` URI returned by `BlobStore::finalize` — for
-/// the local-fs store this round-trips to a real path. `content_kind` is the
-/// agent-declared bundle kind from the ingest wire protocol.
+/// `blob_uri` is the opaque URI returned by `BlobStore::finalize` (e.g.
+/// `file://...` for local-FS, `azure://...` for Azure). The worker passes
+/// it back through the trait rather than parsing the scheme itself, so
+/// adding a new backend doesn't require touching this file. `content_kind`
+/// is the agent-declared bundle kind from the ingest wire protocol.
 ///
 /// Failures are surfaced through `tracing::error!` and a final
 /// `parse_state = failed` write. The function never returns a Result so the
@@ -134,23 +137,27 @@ async fn parse_evidence_zip(
     blob_uri: &str,
     deps: &ParseDeps,
 ) -> Result<ParseOutcome, String> {
-    let path = file_uri_to_path(blob_uri)
-        .ok_or_else(|| format!("blob_uri is not a file:// URI: {blob_uri}"))?;
-
-    let metadata = tokio::fs::metadata(&path)
+    // Cap-then-fetch: ask the blob store for the size first so cloud
+    // backends (Azure / S3) don't end up streaming a multi-GB bundle just
+    // to find out it's over the in-memory unzip limit. For local-FS this
+    // is a single stat call; same cost as the old direct `tokio::fs::metadata`.
+    let size = deps
+        .blobs
+        .head_blob(blob_uri)
         .await
-        .map_err(|e| format!("stat {}: {e}", path.display()))?;
-    if metadata.len() > MAX_EVIDENCE_ZIP_BYTES {
+        .map_err(|e| format!("head {blob_uri}: {e}"))?;
+    if size > MAX_EVIDENCE_ZIP_BYTES {
         return Err(format!(
-            "bundle is {} bytes, exceeds in-memory cap of {} bytes",
-            metadata.len(),
+            "bundle is {size} bytes, exceeds in-memory cap of {} bytes",
             MAX_EVIDENCE_ZIP_BYTES
         ));
     }
 
-    let bytes = tokio::fs::read(&path)
+    let bytes = deps
+        .blobs
+        .read_blob(blob_uri)
         .await
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+        .map_err(|e| format!("read {blob_uri}: {e}"))?;
 
     // Hand the actual zip walk + parse off to spawn_blocking so the parser
     // (CPU-heavy, fully sync) doesn't block the runtime. The DB writes
@@ -216,27 +223,6 @@ async fn parse_evidence_zip(
     } else {
         Ok(ParseOutcome::Ok)
     }
-}
-
-/// Convert a `file://` URI back to a [`std::path::PathBuf`]. Mirrors the
-/// minimal encoder in [`crate::storage::blob_fs`]. Returns None on any
-/// scheme other than `file://`.
-fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
-    let stripped = uri.strip_prefix("file://")?;
-    // The encoder writes `file://<abs unix path>` on unix and
-    // `file:///C:/…` on Windows. Strip the leading `/` only when it
-    // precedes a Windows drive letter so unix abs paths stay valid.
-    let bytes = stripped.as_bytes();
-    let trimmed = if bytes.len() >= 3
-        && bytes[0] == b'/'
-        && bytes[1].is_ascii_alphabetic()
-        && bytes[2] == b':'
-    {
-        &stripped[1..]
-    } else {
-        stripped
-    };
-    Some(std::path::PathBuf::from(trimmed))
 }
 
 /// Per-file parse output collected by the blocking task. Owned plain-data
@@ -525,16 +511,4 @@ mod tests {
         assert!(!is_log_path("photo.png"));
     }
 
-    #[test]
-    fn file_uri_round_trips_unix_path() {
-        let p = file_uri_to_path("file:///var/data/blobs/abc").unwrap();
-        assert_eq!(p.to_string_lossy(), "/var/data/blobs/abc");
-    }
-
-    #[test]
-    fn file_uri_round_trips_windows_path() {
-        let p = file_uri_to_path("file:///C:/data/blobs/abc").unwrap();
-        // Drive-letter form survives the `/C:` strip.
-        assert!(p.to_string_lossy().starts_with("C:"));
-    }
 }

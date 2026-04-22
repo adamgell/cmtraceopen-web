@@ -15,12 +15,27 @@ name = "api_server"
 path = "src/lib.rs"
 
 [features]
-# Both `mtls` and `crl` are default-on so the production binary terminates
-# TLS, validates client certs, and rejects revoked certs at the application
-# layer. Either can be turned off via `--no-default-features` (with explicit
+# `mtls`, `crl`, and `azure` are all default-on so the production binary:
+#   - terminates TLS and validates client certs (`mtls`)
+#   - polls Cloud PKI CRLs and rejects revoked certs (`crl`)
+#   - can flip `CMTRACE_BLOB_BACKEND=Azure` at runtime (`azure`)
+#
+# Any of them can be turned off via `--no-default-features` (with explicit
 # re-enables) on dev boxes that lack cmake/NASM (`mtls` brings the
-# aws-lc-sys C build) or to drop the x509-parser dep entirely (`crl`).
-default = ["mtls", "crl"]
+# aws-lc-sys C build), to drop the x509-parser dep entirely (`crl`), or to
+# skip the Azure object_store transitives (`azure`). The Local blob backend
+# (object_store::local::LocalFileSystem) ships in object_store's base build,
+# so the local-FS dev path keeps working without the Azure transitives.
+#
+# Future S3 / GCS backends slot in here as additional feature flags
+# (`s3 = ["object_store/aws"]`, `gcs = ["object_store/gcp"]`) and a matching
+# `BlobBackend` enum variant in `config.rs`.
+default = ["mtls", "crl", "azure"]
+
+# Azure Blob Storage backend for the BlobStore abstraction. Pulls in
+# `object_store/azure` so `CMTRACE_BLOB_BACKEND=Azure` actually works at
+# runtime. With the feature off, only the Local backend is available.
+azure = ["object_store/azure"]
 
 # Wave 3 mTLS termination + cert-derived DeviceIdentity. Disable to skip
 # building the rustls / aws-lc-sys C+asm dependencies. With the feature off,
@@ -105,6 +120,16 @@ cmtraceopen-parser = { path = "../../cmtraceopen/crates/cmtraceopen-parser" }
 # default features only (deflate) so no ring/openssl drift into the
 # transitive tree; the integration build verifies this.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# Object-store abstraction. Local-FS is always available (used in dev + tests
+# and as the underlying impl for `LocalFsBlobStore`). The `azure` cargo
+# feature on this crate enables `object_store/azure` so production deploys
+# can flip `CMTRACE_BLOB_BACKEND=Azure`. We intentionally pin
+# `default-features = false` so we control which transitive backends (and
+# their TLS stacks) get pulled in — the only one we want today is `azure`,
+# and that one inherits reqwest's `native-tls` path the api-server already
+# uses (no `ring`, no `openssl-sys` should appear in `cargo tree`).
+object_store = { version = "0.11", default-features = false }
+futures = "0.3"
 # --- Wave 3 mTLS termination ---------------------------------------------
 # axum-server is the TLS-terminating wrapper around hyper that gives us
 # access to the rustls `ServerConnection`'s peer-cert handle (axum's own

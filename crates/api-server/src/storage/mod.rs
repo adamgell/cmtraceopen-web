@@ -14,9 +14,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub mod blob_fs;
+pub mod blob_object_store;
 pub mod meta_sqlite;
 
 pub use blob_fs::LocalFsBlobStore;
+pub use blob_object_store::ObjectStoreBlobStore;
 pub use meta_sqlite::SqliteMetadataStore;
 
 /// Opaque handle returned by [`BlobStore::finalize`]. For the local-fs impl
@@ -74,6 +76,21 @@ pub enum StorageError {
 
     #[error("conflict: session for (device_id={device_id}, bundle_id={bundle_id}) already exists")]
     SessionConflict { device_id: String, bundle_id: Uuid },
+
+    /// `object_store` backend surfaced a non-I/O error (auth, network, 4xx
+    /// from Azure, etc). Kept as a stringified form so the trait doesn't
+    /// leak `object_store::Error` into consumers that might be compiled
+    /// without the `azure` feature and its transitive enum variants.
+    #[error("object store error: {0}")]
+    ObjectStore(String),
+
+    /// [`BlobStore::read_blob`] / [`BlobStore::head_blob`] got a URI that
+    /// doesn't match the scheme this store was configured with (e.g. an
+    /// `azure://` URI reached a local-FS-configured server after a backend
+    /// change). Callers surface this as a 500 — the row in `sessions.blob_uri`
+    /// is stale for the current deployment.
+    #[error("blob URI not recognized by current backend: {0}")]
+    BadBlobUri(String),
 }
 
 /// Row-shaped view of the `uploads` table used by the ingest handlers.
@@ -265,6 +282,22 @@ pub trait BlobStore: Send + Sync + 'static {
 
     /// Best-effort cleanup of a staging file (e.g. after a sha256 mismatch).
     async fn discard_staging(&self, upload_id: Uuid) -> Result<(), StorageError>;
+
+    /// Return the size of a finalized blob (in bytes). Used by the parse
+    /// worker to enforce its in-memory unzip cap before pulling the bytes
+    /// down — for cloud backends this saves us from streaming a multi-GB
+    /// bundle just to find out it's too big.
+    async fn head_blob(&self, uri: &str) -> Result<u64, StorageError>;
+
+    /// Read a finalized blob into memory. The parse worker calls this with
+    /// the URI returned by [`Self::finalize`]. Implementations MUST round-
+    /// trip the URIs they themselves emit; URIs produced by a different
+    /// backend should fail as [`StorageError::BadBlobUri`].
+    ///
+    /// Returns `Vec<u8>` rather than a stream because the only consumer
+    /// today is the in-memory zip walker — adding a streaming variant is
+    /// straightforward when an `ndjson-entries` parser lands.
+    async fn read_blob(&self, uri: &str) -> Result<Vec<u8>, StorageError>;
 }
 
 /// Relational metadata operations. Split out so handlers can be unit-tested
