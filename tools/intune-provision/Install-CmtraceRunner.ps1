@@ -478,12 +478,28 @@ if ($signCert) {
         } else {
             # CNG-backed keys expose a file path; ACL it directly.
             if ($rsa -is [System.Security.Cryptography.RSACng]) {
+                # UniqueName may be:
+                #   - a bare filename (Microsoft Software KSP): resolve
+                #     against Microsoft\Crypto\Keys or SystemKeys
+                #   - a full absolute path (PCP / TPM-backed keys):
+                #     use it verbatim
                 $keyName = $rsa.Key.UniqueName
-                $keyPath = Join-Path $env:ProgramData 'Microsoft\Crypto\Keys' $keyName
-                if (-not (Test-Path -LiteralPath $keyPath)) {
-                    $keyPath = Join-Path $env:ProgramData 'Microsoft\Crypto\SystemKeys' $keyName
+                $keyPath = $null
+                if ([IO.Path]::IsPathRooted($keyName)) {
+                    if (Test-Path -LiteralPath $keyName) { $keyPath = $keyName }
+                } else {
+                    $candidates = @(
+                        (Join-Path $env:ProgramData 'Microsoft\Crypto\Keys'),
+                        (Join-Path $env:ProgramData 'Microsoft\Crypto\SystemKeys'),
+                        (Join-Path $env:ProgramData 'Microsoft\Crypto\PCPKSP')
+                    )
+                    foreach ($base in $candidates) {
+                        $try = Join-Path $base $keyName
+                        if (Test-Path -LiteralPath $try) { $keyPath = $try; break }
+                        if (Test-Path -LiteralPath "$try.PCPKEY") { $keyPath = "$try.PCPKEY"; break }
+                    }
                 }
-                if (Test-Path -LiteralPath $keyPath) {
+                if ($keyPath) {
                     $acl = Get-Acl -Path $keyPath
                     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
                         $aclPrincipal, 'Read', 'Allow')
@@ -491,7 +507,7 @@ if ($signCert) {
                     Set-Acl -Path $keyPath -AclObject $acl
                     Write-Host "  Granted $aclPrincipal read on $keyPath." -ForegroundColor Green
                 } else {
-                    Write-Warning "CNG key file not found for thumbprint $($signCert.Thumbprint). Grant manually via certlm.msc."
+                    Write-Warning "CNG key file not found for thumbprint $($signCert.Thumbprint) (UniqueName '$keyName'). Grant manually via certlm.msc."
                 }
             } else {
                 Write-Warning 'Legacy CAPI key detected - use certlm.msc > Manage Private Keys to grant the service account read access.'
