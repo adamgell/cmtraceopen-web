@@ -154,6 +154,7 @@ dependencies = [
  "futures",
  "hex",
  "http",
+ "ipnet",
  "jwt-simple",
  "metrics",
  "metrics-exporter-prometheus",

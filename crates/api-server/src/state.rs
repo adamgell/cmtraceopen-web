@@ -31,6 +31,14 @@ pub struct MtlsRuntimeConfig {
     pub require_on_ingest: bool,
     /// Mirror of [`crate::config::TlsConfig::expected_san_uri_scheme`].
     pub expected_san_uri_scheme: String,
+    /// Mirror of [`crate::config::TlsConfig::peer_cert_header`].
+    /// When set, the `DeviceIdentity` extractor reads the peer cert PEM
+    /// from this header name rather than from the in-process TLS layer.
+    pub peer_cert_header: Option<String>,
+    /// Mirror of [`crate::config::TlsConfig::trusted_proxy_cidr`].
+    /// The cert header is only honoured when the request's TCP peer address
+    /// falls within this CIDR.
+    pub trusted_proxy_cidr: Option<ipnet::IpNet>,
 }
 
 impl Default for MtlsRuntimeConfig {
@@ -38,6 +46,8 @@ impl Default for MtlsRuntimeConfig {
         Self {
             require_on_ingest: false,
             expected_san_uri_scheme: "device".to_string(),
+            peer_cert_header: None,
+            trusted_proxy_cidr: None,
         }
     }
 }

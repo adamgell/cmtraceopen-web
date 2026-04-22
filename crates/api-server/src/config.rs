@@ -3,6 +3,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use ipnet::IpNet;
+
 use crate::auth::{AuthMode, EntraConfig};
 
 /// Which blob-storage backend the api-server uses for finalized bundles.
@@ -228,6 +230,22 @@ pub struct TlsConfig {
     /// `CMTRACE_SAN_URI_SCHEME`, default `device`. The full SAN URI shape
     /// is `device://{tenant-id}/{aad-device-id}` per the Intune PKCS profile.
     pub expected_san_uri_scheme: String,
+
+    /// When set, extract the client cert PEM (or base64-PEM) from this HTTP
+    /// request header instead of performing in-process TLS termination.
+    /// Env: `CMTRACE_PEER_CERT_HEADER`. Typical value: `X-ARR-ClientCert`
+    /// (Azure Application Gateway). Setting this forces `enabled = false`
+    /// even if `CMTRACE_TLS_ENABLED=true` was also provided — behind AppGW
+    /// you never want both at the same time.
+    pub peer_cert_header: Option<String>,
+
+    /// CIDR range of trusted upstream reverse proxies. Env:
+    /// `CMTRACE_TRUSTED_PROXY_CIDR`. Required (and enforced) when
+    /// `peer_cert_header` is set. Only requests whose TCP peer address falls
+    /// within this CIDR will have the cert header honoured; all others get
+    /// the header silently stripped so a malicious client cannot spoof its
+    /// identity. Example: `10.224.0.0/16` (AppGW subnet per ARM template).
+    pub trusted_proxy_cidr: Option<IpNet>,
 }
 
 impl Default for TlsConfig {
@@ -239,6 +257,8 @@ impl Default for TlsConfig {
             client_ca_bundle: None,
             require_on_ingest: false,
             expected_san_uri_scheme: "device".to_string(),
+            peer_cert_header: None,
+            trusted_proxy_cidr: None,
         }
     }
 }
@@ -311,6 +331,19 @@ pub enum ConfigError {
 
     #[error("invalid CMTRACE_RETENTION_BATCH_SIZE: {0} (expected positive integer)")]
     InvalidRetentionBatchSize(String),
+
+    #[error(
+        "invalid CMTRACE_TRUSTED_PROXY_CIDR: {0} (expected CIDR notation, \
+         e.g. 10.0.0.0/24 or 10.0.0.1/32)"
+    )]
+    InvalidTrustedProxyCidr(String),
+
+    #[error(
+        "CMTRACE_PEER_CERT_HEADER is set but CMTRACE_TRUSTED_PROXY_CIDR is not; \
+         the cert header cannot be trusted without a CIDR restriction. \
+         Set CMTRACE_TRUSTED_PROXY_CIDR to the AppGW subnet (e.g. 10.224.0.0/16)."
+    )]
+    MissingTrustedProxyCidr,
 }
 
 impl Config {
@@ -488,10 +521,38 @@ impl TlsConfig {
     /// (that happens in `main.rs` so failures show up in the startup log
     /// alongside the bind-port error path).
     pub fn from_env() -> Result<Self, ConfigError> {
-        let enabled = match env::var("CMTRACE_TLS_ENABLED") {
+        let tls_enabled_raw = match env::var("CMTRACE_TLS_ENABLED") {
             Ok(v) => parse_bool(&v).ok_or(ConfigError::InvalidTlsEnabled(v))?,
             Err(_) => false,
         };
+
+        let peer_cert_header = env::var("CMTRACE_PEER_CERT_HEADER")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+
+        let trusted_proxy_cidr = match env::var("CMTRACE_TRUSTED_PROXY_CIDR") {
+            Ok(v) => Some(
+                v.trim()
+                    .parse::<IpNet>()
+                    .map_err(|_| ConfigError::InvalidTrustedProxyCidr(v))?,
+            ),
+            Err(_) => None,
+        };
+
+        // Peer-cert-header mode and in-process TLS are mutually exclusive.
+        // When the header is configured (AppGW path), force TLS off — AppGW
+        // terminates TLS so the api-server must not also try to terminate it.
+        let enabled = if peer_cert_header.is_some() {
+            false
+        } else {
+            tls_enabled_raw
+        };
+
+        // Require a CIDR if the header mode is on — without one any client
+        // can forge the header and spoof a device identity.
+        if peer_cert_header.is_some() && trusted_proxy_cidr.is_none() {
+            return Err(ConfigError::MissingTrustedProxyCidr);
+        }
 
         let server_cert_pem = env::var("CMTRACE_TLS_CERT").ok().map(PathBuf::from);
         let server_key_pem = env::var("CMTRACE_TLS_KEY").ok().map(PathBuf::from);
@@ -532,6 +593,8 @@ impl TlsConfig {
             client_ca_bundle,
             require_on_ingest,
             expected_san_uri_scheme,
+            peer_cert_header,
+            trusted_proxy_cidr,
         })
     }
 }

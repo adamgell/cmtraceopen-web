@@ -290,3 +290,110 @@ The dominant line is AppGW until ACA replica count climbs. Consider switching to
 - Wave 4 design: `docs/wave4/01-msi-design.md`, `docs/wave4/02-code-signing.md`, `docs/wave4/03-beta-pilot-runbook.md`, `docs/wave4/04-day2-operations.md`
 - API env-var inventory: `crates/api-server/src/config.rs` + `docs/release-notes/api-v0.1.0.md`
 - TLS internals (Wave 3): `crates/api-server/src/tls.rs`, `crates/api-server/src/auth/device_identity.rs`
+
+---
+
+## Appendix A — AppGW header-mode env-var quick-reference
+
+This appendix narrows in on the api-server side of the integration: what env
+vars the binary reads when running behind AppGW, what the cert header
+auto-detection does, and what the operator should put on the AppGW configuration
+checklist.
+
+### Env-var matrix
+
+#### Networking
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CMTRACE_LISTEN_ADDR` | `0.0.0.0:8080` | Bind address (plain HTTP, VNet-internal) |
+
+#### TLS / mTLS (in-process — NOT used in AppGW mode)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CMTRACE_TLS_ENABLED` | `false` | **Must be `false` (or unset) behind AppGW** |
+| `CMTRACE_TLS_CERT` | — | Not required in AppGW mode |
+| `CMTRACE_TLS_KEY` | — | Not required in AppGW mode |
+| `CMTRACE_CLIENT_CA_BUNDLE` | — | Not required in AppGW mode |
+
+> **Note:** If `CMTRACE_PEER_CERT_HEADER` is set, `CMTRACE_TLS_ENABLED` is
+> automatically forced to `false` even if set to `true`. A startup warning is
+> emitted if both are set so operators know the override happened.
+
+#### AppGW-terminated mTLS (header path)
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CMTRACE_PEER_CERT_HEADER` | _empty_ (disabled) | Name of the header carrying the client cert PEM. Set to `X-ARR-ClientCert` for Azure AppGW. |
+| `CMTRACE_TRUSTED_PROXY_CIDR` | _required when header set_ | CIDR of trusted reverse proxies. Only requests whose TCP peer IP falls within this range have the cert header honoured. Typical value: AppGW subnet (e.g. `10.224.0.0/16`). |
+
+#### mTLS enforcement
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CMTRACE_MTLS_REQUIRE_INGEST` | mirrors `CMTRACE_TLS_ENABLED` | If `true`, ingest routes 401 when no device cert can be found via any path. |
+| `CMTRACE_SAN_URI_SCHEME` | `device` | Expected URI scheme in the client-cert SAN (e.g. `device://tenant/device-id`). |
+
+### Cert header encoding
+
+AppGW can forward the cert in two ways depending on the gateway SKU and version:
+
+| Encoding | Description | Auto-detected? |
+| --- | --- | --- |
+| **Raw PEM** | The full `-----BEGIN CERTIFICATE-----` … `-----END CERTIFICATE-----` block as a header value. | Yes |
+| **Base64(PEM)** | The PEM string base64-encoded (standard or URL-safe alphabet). | Yes |
+| **Base64(DER)** | Raw DER bytes base64-encoded (some proxy configurations). | Yes |
+
+The api-server auto-detects the encoding in this order:
+
+1. If the trimmed value starts with `-----BEGIN` → raw PEM.
+2. Base64-decode (standard, then URL-safe) → if result starts with `-----BEGIN` → base64-PEM.
+3. Otherwise treat the decoded bytes as raw DER.
+
+### Security considerations
+
+#### Trusted-proxy CIDR enforcement
+
+The cert header is only honoured when the request arrives from an IP within
+`CMTRACE_TRUSTED_PROXY_CIDR`. Any request whose TCP peer address is outside
+that range has the cert header silently ignored and is treated as if no cert
+was presented.
+
+**Important:** Set `CMTRACE_TRUSTED_PROXY_CIDR` to the exact AppGW subnet
+rather than `0.0.0.0/0`. A wide CIDR means any host that can reach the
+api-server can claim to be any device by forging the header.
+
+#### Mutual exclusivity
+
+Using both `CMTRACE_PEER_CERT_HEADER` and `CMTRACE_TLS_ENABLED=true` is a
+configuration error — behind AppGW the api-server MUST run as plain HTTP, not
+TLS, because AppGW handles TLS termination. The api-server enforces this:
+`CMTRACE_TLS_ENABLED` is overridden to `false` whenever
+`CMTRACE_PEER_CERT_HEADER` is set, and a `WARN`-level log entry is emitted at
+startup.
+
+### Observability
+
+The `cmtrace_peer_cert_source_total` metric (Prometheus counter) records how
+each request's device identity was resolved:
+
+| Label `source=` | Meaning |
+| --- | --- |
+| `header` | Cert read from the reverse-proxy header (`CMTRACE_PEER_CERT_HEADER`). |
+| `tls` | Cert from in-process mTLS session (`CMTRACE_TLS_ENABLED=true`). |
+| `none` | No cert found; request proceeded without a device identity (or was rejected). |
+
+Use this metric to confirm that requests are hitting the expected path and to
+detect unexpected `none` spikes (e.g. AppGW misconfiguration stopped forwarding
+the header).
+
+### AppGW configuration checklist
+
+- [ ] AppGW listener configured with HTTPS and client certificate authentication enabled.
+- [ ] Root + Issuing CA certificates uploaded to AppGW as trusted root certificates.
+- [ ] HTTP settings have "Override with new host name" disabled (backend speaks plain HTTP on port 8080).
+- [ ] Backend HTTP settings include the custom header `X-ARR-ClientCert` forwarding rule (enabled by default on AppGW v2 SKU with mutual authentication).
+- [ ] `CMTRACE_TRUSTED_PROXY_CIDR` set to the AppGW subnet address space from the ARM template / VNet configuration.
+- [ ] `CMTRACE_PEER_CERT_HEADER` set to `X-ARR-ClientCert`.
+- [ ] `CMTRACE_TLS_ENABLED` unset or `false`.
