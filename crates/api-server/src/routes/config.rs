@@ -3,8 +3,8 @@
 //! The agent calls this endpoint at startup, every 6 h, and after every
 //! successful upload.  The server merges the tenant-wide default override
 //! (if any) with any per-device override (per-device wins) and returns the
-//! resulting [`AgentConfigOverride`] JSON.  A 404 body means "no overrides
-//! are configured for this device; use your local config".
+//! resulting [`AgentConfigOverride`] JSON.  A `204 No Content` response means
+//! "no overrides are configured for this device; use your local config".
 //!
 //! No authentication is required on the *device* side (`GET` only returns
 //! safe overrideable fields — never `api_endpoint` or TLS paths).  The admin
