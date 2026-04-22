@@ -562,11 +562,11 @@ impl AppState {
     /// existing test call sites that already pass through
     /// [`AppState::with_cors`] / [`AppState::new`].
     ///
-    /// Eight positional args is one over clippy's `too-many-arguments`
-    /// lint threshold. Refactoring to a builder would touch every call
-    /// site (production `main.rs` + every integration test) for a
-    /// constructor that only `main.rs` actually uses; silencing the
-    /// lint locally is the lower-cost choice.
+    /// `#[allow(clippy::too_many_arguments)]`: this is a wide constructor
+    /// that mirrors the `AppState` shape (one arg per pluggable
+    /// dependency). Bundling these into a builder would add ~30 lines of
+    /// glue for one caller (`main.rs`); the long signature is the simpler
+    /// trade-off until/unless a third caller appears.
     #[cfg(feature = "crl")]
     #[allow(clippy::too_many_arguments)]
     pub fn with_cors_and_crl(
