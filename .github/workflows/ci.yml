@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+  # dorny/paths-filter needs to call the listFiles GitHub API on PRs to
+  # determine whether the docker buildx step should run.
+  pull-requests: read
 
 env:
   CARGO_TERM_COLOR: always
