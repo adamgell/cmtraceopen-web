@@ -25,6 +25,10 @@ services:
       CMTRACE_LISTEN_ADDR: 0.0.0.0:8080
       CMTRACE_DATA_DIR: /data
       RUST_LOG: ${RUST_LOG:-api_server=info,tower_http=info,axum=info,warn}
+      # Dev default: bearer auth disabled. Production / staging deploys
+      # should override with full Entra config (CMTRACE_ENTRA_TENANT_ID,
+      # CMTRACE_ENTRA_AUDIENCE, CMTRACE_ENTRA_JWKS_URI) and remove this.
+      CMTRACE_AUTH_MODE: disabled
       # Placeholder — api-server ignores this today. Wired up when the
       # metadata store lands in a follow-up commit.
       CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace
