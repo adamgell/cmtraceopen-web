@@ -18,7 +18,6 @@
 //! drawn from `[-jitter_minutes, +jitter_minutes]`. Set `jitter_minutes = 0`
 //! to disable.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Local;
@@ -40,7 +39,6 @@ pub struct CollectionScheduler {
     config: ScheduleConfig,
     orchestrator: EvidenceOrchestrator,
     queue: Queue,
-    work_root: PathBuf,
 }
 
 impl CollectionScheduler {
@@ -49,18 +47,15 @@ impl CollectionScheduler {
     /// * `config`       — schedule configuration (mode, interval, cron expr, jitter).
     /// * `orchestrator` — evidence orchestrator used to perform each collection pass.
     /// * `queue`        — persistent upload queue that receives collected bundles.
-    /// * `work_root`    — staging directory for in-progress collection passes.
     pub fn new(
         config: ScheduleConfig,
         orchestrator: EvidenceOrchestrator,
         queue: Queue,
-        work_root: PathBuf,
     ) -> Self {
         Self {
             config,
             orchestrator,
             queue,
-            work_root,
         }
     }
 
@@ -100,7 +95,7 @@ impl CollectionScheduler {
             tokio::select! {
                 _ = sleep_until(fire_at) => {
                     info!("scheduler (interval) firing collection");
-                    collect_and_enqueue(&self.orchestrator, &self.queue, &self.work_root).await;
+                    collect_and_enqueue(&self.orchestrator, &self.queue).await;
                 }
                 _ = stop.recv() => {
                     info!("scheduler (interval) received stop signal; exiting");
@@ -157,7 +152,7 @@ impl CollectionScheduler {
             tokio::select! {
                 _ = sleep_until(fire_at) => {
                     info!("scheduler (cron) firing collection");
-                    collect_and_enqueue(&self.orchestrator, &self.queue, &self.work_root).await;
+                    collect_and_enqueue(&self.orchestrator, &self.queue).await;
                 }
                 _ = stop.recv() => {
                     info!("scheduler (cron) received stop signal; exiting");
@@ -207,11 +202,7 @@ pub fn apply_jitter(base: Instant, jitter_minutes: u64) -> Instant {
 
 /// Run one collect-and-enqueue pass. Errors are logged — a transient
 /// collection failure must not tear the scheduler loop down.
-async fn collect_and_enqueue(
-    orchestrator: &EvidenceOrchestrator,
-    queue: &Queue,
-    work_root: &std::path::Path,
-) {
+async fn collect_and_enqueue(orchestrator: &EvidenceOrchestrator, queue: &Queue) {
     match orchestrator.collect_once().await {
         Ok(bundle) => {
             let bundle_id = bundle.metadata.bundle_id;
@@ -229,7 +220,6 @@ async fn collect_and_enqueue(
         }
         Err(e) => {
             warn!(error = %e, "scheduler: collection failed");
-            let _ = work_root;
         }
     }
 }

@@ -92,7 +92,7 @@ async fn interval_mode_fires_after_configured_interval() {
     let config = interval_config(1); // fire every 1 virtual hour
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
     let scheduler =
-        CollectionScheduler::new(config, orch, queue, work_dir.path().to_path_buf());
+        CollectionScheduler::new(config, orch, queue);
     let handle = tokio::spawn(scheduler.run(stop_rx));
 
     // Yield so the scheduler registers its sleep before we advance.
@@ -147,7 +147,7 @@ async fn manual_mode_never_fires() {
     };
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
     let scheduler =
-        CollectionScheduler::new(config, orch, queue, work_dir.path().to_path_buf());
+        CollectionScheduler::new(config, orch, queue);
     let handle = tokio::spawn(scheduler.run(stop_rx));
 
     // Advance a long way — manual mode should never fire.
@@ -183,7 +183,7 @@ async fn stop_signal_cancels_mid_sleep() {
     let config = interval_config(1000);
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
     let scheduler =
-        CollectionScheduler::new(config, orch, queue, work_dir.path().to_path_buf());
+        CollectionScheduler::new(config, orch, queue);
     let handle = tokio::spawn(scheduler.run(stop_rx));
 
     // Let the scheduler register its sleep.
@@ -226,7 +226,7 @@ async fn cron_mode_fires_on_next_matching_minute() {
     };
     let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
     let scheduler =
-        CollectionScheduler::new(config, orch, queue, work_dir.path().to_path_buf());
+        CollectionScheduler::new(config, orch, queue);
     let handle = tokio::spawn(scheduler.run(stop_rx));
 
     // Yield so the scheduler computes and registers its first sleep.
