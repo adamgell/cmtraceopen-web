@@ -142,6 +142,12 @@ impl CrlCache {
             })
             .collect();
 
+        // PR #46 switched workspace reqwest to rustls-tls-native-roots-no-provider;
+        // building any reqwest client now requires a rustls crypto provider to be
+        // installed first. main.rs installs aws-lc-rs eagerly at startup; tests
+        // that construct CrlCache directly bypass main, so install here too.
+        // Idempotent (rustls install_default no-ops if a provider is already set).
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http_client = reqwest::Client::builder()
             .timeout(CRL_FETCH_TIMEOUT)
             // The CDN is plain HTTP per the Cloud PKI memory doc, but we

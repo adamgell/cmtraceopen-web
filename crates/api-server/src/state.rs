@@ -193,7 +193,7 @@ impl AppState {
             meta,
             blobs,
             started_at: Instant::now(),
-            request_count: AtomicU64::new(0),
+            request_counts: Arc::new(DashMap::new()),
             listen_addr,
             hostname: detect_hostname(),
             auth,
