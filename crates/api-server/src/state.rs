@@ -658,6 +658,7 @@ impl AppState {
     pub fn new_auth_disabled_with_rate_limit(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         rate_limit: Arc<RateLimitState>,
     ) -> Arc<Self> {
@@ -671,6 +672,7 @@ impl AppState {
         Self::full(
             meta,
             blobs,
+            configs,
             listen_addr,
             auth,
             CorsConfig::default(),

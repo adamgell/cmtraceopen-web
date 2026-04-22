@@ -51,9 +51,10 @@ async fn start_server_with_rate_limit(cfg: RateLimitConfig) -> TestServer {
             .await
             .expect("sqlite"),
     );
+    let configs: Arc<dyn api_server::storage::ConfigStore> = meta.clone();
     let rate_limit = Arc::new(RateLimitState::from_config(&cfg));
     let state =
-        AppState::new_auth_disabled_with_rate_limit(meta, blobs, "127.0.0.1:0".to_string(), rate_limit);
+        AppState::new_auth_disabled_with_rate_limit(meta, blobs, configs, "127.0.0.1:0".to_string(), rate_limit);
     let app = router(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
