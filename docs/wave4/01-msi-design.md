@@ -27,8 +27,10 @@ Windows 10 / 11 device:
 3. Lays down a default `config.toml` under
    `%ProgramData%\CMTraceOpen\Agent\` that points the agent at the production
    api-server endpoint and tells it to look up its mTLS client cert in
-   `LocalMachine\My` by **issuer pattern** (default match: the `Gell - PKI
-   Issuing` CA from [`reference_cloud_pki.md`](#) — see section 5).
+   `LocalMachine\My` by **issuer pattern** (default match: the **Gell - PKI
+   Issuing CA** from the Cloud PKI hierarchy provisioned per
+   [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)
+   — see section 5).
 4. Survives major-upgrade reinstalls without trampling operator config or the
    on-disk upload queue.
 
@@ -253,7 +255,7 @@ log_paths = [
 cert_store = "LocalMachine\\My"
 
 # Match the cert by issuer Common Name. The Cloud PKI Issuing CA's CN is
-# "issuing.gell.internal.cdw.lab" — see reference_cloud_pki.md. We match on
+# "issuing.gell.internal.cdw.lab" — see docs/provisioning/03-intune-cloud-pki.md. We match on
 # CN substring rather than full DN so a future CA renewal (with the same CN
 # but a new serial) still gets picked up automatically.
 issuer_cn_pattern = "issuing.gell.internal.cdw.lab"
@@ -444,7 +446,9 @@ component removal.
 
 The Cloud PKI infrastructure is already deployed (per
 [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)
-and [`reference_cloud_pki.md`](#)); the root chain is already trusted in
+— the **Gell - PKI Root CA** + **Gell - PKI Issuing CA** chain, with
+the Issuing CA's EKU set including Code Signing, OID 1.3.6.1.5.5.7.3.3);
+the root chain is already trusted in
 `LocalMachine\Root` on every Intune-managed device. A new Cloud PKI cert
 profile with `codeSigning` EKU, assigned to a one-member group containing
 a build VM, gives us a code-signing cert without procurement, Identity
@@ -480,19 +484,35 @@ devices.
 ### What goes at the end of `agent-msi.yml`'s build job
 
 ```yaml
+- name: Locate signtool
+  id: signtool
+  shell: pwsh
+  run: |
+    # Pick the newest installed Windows 10 SDK signtool. Avoids a
+    # hard-coded SDK version string (which drifts every Windows SDK
+    # update) and avoids depending on an undefined WINDOWSSDKPATH env
+    # var. The build VM is provisioned with the Windows SDK installed
+    # under the standard path; if multiple SDK versions are present we
+    # take the highest-versioned x64 build.
+    $exe = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1).FullName
+    if (-not $exe) { throw "signtool.exe not found under Windows Kits\10\bin" }
+    "path=$exe" | Out-File -Append $env:GITHUB_OUTPUT
+
 - name: Sign MSI
   shell: pwsh
   run: |
-    & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" sign `
+    & "${{ steps.signtool.outputs.path }}" sign `
       /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
       /d "CMTraceOpen Agent" `
-      .\dist\CMTraceOpenAgent.msi
+      .\out\CMTraceOpenAgent.msi
 
 - name: Verify chain
   shell: pwsh
   run: |
-    & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" verify `
-      /pa /v /all .\dist\CMTraceOpenAgent.msi
+    & "${{ steps.signtool.outputs.path }}" verify `
+      /pa /v /all .\out\CMTraceOpenAgent.msi
 ```
 
 The `/a` flag lets signtool auto-pick the only code-signing cert in
@@ -529,15 +549,43 @@ on:
 jobs:
   build:
     runs-on: [self-hosted, windows, cmtrace-build]
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90
+      - name: Resolve version
+        id: set-version
+        shell: pwsh
+        run: |
+          # Prefer the workflow_dispatch input; fall back to the tag
+          # (refs/tags/agent-vX.Y.Z → X.Y.Z); fall back to Cargo.toml.
+          $version = '${{ github.event.inputs.version }}'
+          if (-not $version -and $env:GITHUB_REF -like 'refs/tags/agent-v*') {
+            $version = $env:GITHUB_REF -replace '^refs/tags/agent-v',''
+          }
+          if (-not $version) {
+            $version = (Select-String '^version' crates/agent/Cargo.toml | Select-Object -First 1).Line.Split('"')[1]
+          }
+          "version=$version" | Out-File -Append $env:GITHUB_OUTPUT
+      - name: Locate signtool
+        id: signtool
+        shell: pwsh
+        run: |
+          # Pick the newest installed Windows 10 SDK signtool — avoids
+          # depending on an undefined WINDOWSSDKPATH env var and avoids
+          # hard-coding an SDK version string.
+          $exe = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "signtool.exe not found under Windows Kits\10\bin" }
+          "path=$exe" | Out-File -Append $env:GITHUB_OUTPUT
       - name: Build agent (release)
         run: cargo build -p agent --release --target x86_64-pc-windows-msvc
       - name: Sign agent EXE
         shell: pwsh
         run: |
-          & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" sign `
+          & "${{ steps.signtool.outputs.path }}" sign `
             /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
             /d "CMTraceOpen Agent" `
             target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe
@@ -545,27 +593,21 @@ jobs:
         run: dotnet tool install --global wix
       - name: Build MSI
         run: |
-          $version = '${{ github.event.inputs.version }}'
-          if (-not $version) {
-            $version = (Select-String '^version' crates/agent/Cargo.toml | Select-Object -First 1).Line.Split('"')[1]
-          }
           ./crates/agent/installer/wix/build.ps1 `
             -ReleaseBinary target/x86_64-pc-windows-msvc/release/cmtraceopen-agent.exe `
-            -Version $version
+            -Version '${{ steps.set-version.outputs.version }}'
       - name: Sign MSI
         shell: pwsh
         run: |
-          & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" sign `
+          & "${{ steps.signtool.outputs.path }}" sign `
             /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
             /d "CMTraceOpen Agent" `
-            out\CMTraceOpenAgent-$env:VERSION.msi
-        env:
-          VERSION: ${{ steps.set-version.outputs.version }}
+            out\CMTraceOpenAgent-${{ steps.set-version.outputs.version }}.msi
       - name: Verify chain
         shell: pwsh
         run: |
-          & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" verify `
-            /pa /v /all out\CMTraceOpenAgent-$env:VERSION.msi
+          & "${{ steps.signtool.outputs.path }}" verify `
+            /pa /v /all out\CMTraceOpenAgent-${{ steps.set-version.outputs.version }}.msi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

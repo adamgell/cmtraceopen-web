@@ -48,11 +48,11 @@ Intune Cloud PKI is the right call for this project. Reasoning, in
 descending order of importance:
 
 - **The Cloud PKI hierarchy is already deployed.** Per
-  `docs/provisioning/03-intune-cloud-pki.md` and
-  `~/.claude/projects/F--Repo/memory/reference_cloud_pki.md`, the Gell
-  PKI Root + Issuing CAs are live in the tenant. The Issuing CA
-  already lists `codeSigning` (1.3.6.1.5.5.7.3.3) in its EKU set, so
-  it can mint a leaf with code-signing usage on demand.
+  [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md),
+  the Cloud PKI hierarchy (Gell - PKI Root CA → Gell - PKI Issuing
+  CA) is live in the tenant. The Issuing CA already lists Code
+  Signing (1.3.6.1.5.5.7.3.3) in its EKU set, so it can mint a leaf
+  with code-signing usage on demand.
 - **The root chain is already trusted in `LocalMachine\Root` on every
   Intune-managed device.** Confirmed by the operator: Cloud PKI's
   trusted-root distribution rides the same MDM channel that pushes
@@ -64,8 +64,11 @@ descending order of importance:
   3–7 day Microsoft Identity Verification. Cloud PKI is
   tenant-internal — no third-party verification, no D&B lookup,
   setup measured in hours not days.
-- **No per-signature cost.** ATS bills per signature; Cloud PKI is
-  flat. Costs in §7.
+- **No per-signature cost (assumes Intune Suite licensing already
+  paid).** ATS bills per signature on top of its base fee. Cloud PKI
+  itself isn't free — it's bundled into Intune Suite — but because
+  this tenant already pays for Intune Suite, the marginal signing
+  cost is zero. Costs in §7.
 - **Cloud PKI keys are HSM-backed and non-exportable.** Same security
   property as ATS (different HSM, same outcome). Caveat: because the
   key is non-exportable, the cert cannot be moved into Azure Key
@@ -87,7 +90,7 @@ descending order of importance:
 | ---------------------- | --------------------------------------------------------- | ---------------------------------------------------- | --------------------------------------------------- |
 | Procurement            | None — already deployed in this tenant                    | Microsoft Partner Center signup + IV                 | CA contract + token shipping                        |
 | Setup time             | ~1 day (cert profile + VM + runner)                       | 3–7 business days (Identity Verification)            | 1–7 days (CA verification + token in mail)          |
-| Cost model             | $0 (Cloud PKI is included in Intune Suite)                | ~$15/mo base + per-signature fees                    | $300–700/yr per cert + HSM token                    |
+| Cost model             | No per-signature cost (assumes Intune Suite licensing already paid; Cloud PKI is bundled) | ~$15/mo base + per-signature fees                    | $300–700/yr per cert + HSM token                    |
 | Key custody            | Cloud PKI HSM, non-exportable                             | Microsoft-managed HSM, key never exfiltrated         | EV USB token, physical custody risk                 |
 | GitHub Actions auth    | None — cert is local to the self-hosted runner            | Federated OIDC, no client secret                     | Manual: stage token on self-hosted runner or KSP    |
 | Cert rotation          | Automatic via Intune cert-profile renewal                 | Automatic — short-lived per-signature certs          | Manual; new cert every 1–3 years                    |
@@ -109,9 +112,10 @@ end-to-end is a half day plus Intune sync wait.
     - Intune admin center → *Devices → Configuration → Create*.
     - Profile type: **PKCS certificate** (Cloud PKI). Platform: Windows 10/11.
     - Name: `cmtraceopen-codesign-builder`.
-    - Certification authority: **Gell - PKI Issuing** (the issuing
-      CA already lists `codeSigning` in its EKU set per
-      `reference_cloud_pki.md`).
+    - Certification authority: **Gell - PKI Issuing CA** (the issuing
+      CA already lists `codeSigning` (1.3.6.1.5.5.7.3.3) in its EKU
+      set; see
+      [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)).
     - Key storage provider (KSP): Microsoft Software Key Storage
       Provider (or Platform if TPM-backed is desired on the VM).
     - Key algorithm: RSA-2048 (or ECDSA-P256 if your build chain
@@ -230,15 +234,32 @@ on:
 jobs:
   sign:
     runs-on: [self-hosted, windows, cmtrace-build]
+    permissions:
+      contents: read
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: ${{ inputs.artifact-name }}
           path: dist
+      - name: Locate signtool
+        id: signtool
+        shell: pwsh
+        run: |
+          # Pick the newest installed Windows 10 SDK signtool. Avoids
+          # hard-coding an SDK version (which drifts every Windows SDK
+          # update) and avoids depending on an undefined WINDOWSSDKPATH
+          # env var. The build VM is provisioned with the Windows SDK
+          # installed under the standard path; if multiple SDK versions
+          # are present we take the highest-versioned x64 build.
+          $exe = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64\signtool.exe" |
+                  Sort-Object FullName -Descending |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "signtool.exe not found under Windows Kits\10\bin" }
+          "path=$exe" | Out-File -Append $env:GITHUB_OUTPUT
       - name: Sign
         shell: pwsh
         run: |
-          & "${env:WINDOWSSDKPATH}\bin\10.0.22621.0\x64\signtool.exe" sign `
+          & "${{ steps.signtool.outputs.path }}" sign `
             /a /fd sha256 `
             /tr http://timestamp.digicert.com /td sha256 `
             /d "${{ inputs.description }}" `
@@ -246,7 +267,7 @@ jobs:
       - name: Verify chain
         shell: pwsh
         run: |
-          & "${env:WINDOWSSDKPATH}\bin\10.0.22621.0\x64\signtool.exe" verify `
+          & "${{ steps.signtool.outputs.path }}" verify `
             /pa /v /all "dist\${{ inputs.artifact-name }}"
       - uses: actions/upload-artifact@v4
         with:
@@ -274,7 +295,8 @@ material simplification vs the ATS workflow shape.
 ## 6. Verification
 
 After signing, `signtool verify` should produce a chain ending at
-the Gell PKI Root CA (per `reference_cloud_pki.md`):
+the **Gell - PKI Root CA** (the Cloud PKI hierarchy provisioned per
+[`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)):
 
 ```powershell
 signtool verify /pa /v /all CMTraceOpenAgent.msi
@@ -297,12 +319,13 @@ a silent expiry or a botched cert-profile renewal.
 
 ## 7. Signing cadence
 
-Cloud PKI signing has no per-signature cost — the bill is flat
-regardless of how many signatures we mint. That removes ATS's hard
-constraint that PR validation MUST NOT sign. We still gate on
-release tags for clarity (signed builds are the release artifact;
-PRs build unsigned for fast iteration), but the gating is policy,
-not cost-driven.
+Cloud PKI signing has no per-signature cost (assumes Intune Suite
+licensing is already paid — Cloud PKI itself is bundled into Intune
+Suite, so the marginal cost per signature is zero regardless of
+volume). That removes ATS's hard constraint that PR validation MUST
+NOT sign. We still gate on release tags for clarity (signed builds
+are the release artifact; PRs build unsigned for fast iteration),
+but the gating is policy, not cost-driven.
 
 | Trigger                        | Signs?  | Why                                                        |
 | ------------------------------ | ------- | ---------------------------------------------------------- |
@@ -313,8 +336,11 @@ not cost-driven.
 
 **Cost benefit (vs ATS):** with ATS we'd be paying ~$0.005 per
 signature plus the $15/mo base. With Cloud PKI signing every dev
-build during pilot — ~50 signatures/week — costs $0. Flag this as a
-real benefit for a project that's still in pilot iteration mode.
+build during pilot — ~50 signatures/week — incurs no per-signature
+cost (Cloud PKI is bundled into the Intune Suite licensing this
+tenant already pays for; the marginal cost of each new signature is
+zero). Flag this as a real benefit for a project that's still in
+pilot iteration mode.
 
 ## 8. Trust scope
 
