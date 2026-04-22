@@ -36,6 +36,14 @@
     Skip step 4. Useful if VS 2022 or later is already installed with
     the C++ workload.
 
+.PARAMETER SkipDotnetSdk
+    Skip the .NET SDK install. Useful if a recent LTS SDK is already
+    present (dotnet --list-sdks shows at least one 8.x entry).
+
+.PARAMETER DotnetChannel
+    dotnet-install.ps1 channel. Default 'LTS' (currently 8.x). Pass
+    'STS' or a specific version like '8.0' if you need something else.
+
 .NOTES
     Runs on Windows PowerShell 5.1 and PowerShell 7+. ASCII-only.
     Requires outbound https to github.com, aka.ms, visualstudio.com,
@@ -45,7 +53,9 @@
 [CmdletBinding()]
 param(
     [switch] $SkipGit,
-    [switch] $SkipBuildTools
+    [switch] $SkipBuildTools,
+    [switch] $SkipDotnetSdk,
+    [string] $DotnetChannel = 'LTS'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -176,7 +186,44 @@ if ($SkipBuildTools) {
 }
 
 # ------------------------------------------------------------------------
-# 3) Verify
+# 3) .NET SDK (required for `dotnet tool install wix`)
+#
+# Using dot.net's dotnet-install.ps1 -- the canonical, no-winget way to
+# get the SDK on Windows. Installing into C:\Program Files\dotnet so
+# every service account sees it via Machine PATH.
+# ------------------------------------------------------------------------
+if ($SkipDotnetSdk) {
+    Write-Host 'Skipping .NET SDK install (-SkipDotnetSdk).' -ForegroundColor DarkGray
+} else {
+    # Detect existing SDK install first.
+    $haveSdk = $false
+    $dotnetExe = Get-Command dotnet -ErrorAction SilentlyContinue
+    if ($dotnetExe) {
+        $sdkList = & $dotnetExe.Source --list-sdks 2>$null
+        if ($LASTEXITCODE -eq 0 -and $sdkList) {
+            $haveSdk = $true
+            Write-Host '.NET SDK already installed:' -ForegroundColor DarkGray
+            $sdkList | ForEach-Object { "  $_" }
+        }
+    }
+    if (-not $haveSdk) {
+        Write-Host ".NET SDK missing. Installing $DotnetChannel via dot.net/v1/dotnet-install.ps1 ..." -ForegroundColor Cyan
+        $installScript = Join-Path $env:TEMP 'dotnet-install.ps1'
+        Invoke-Download -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $installScript
+        # Install into the machine-scope location so the runner service
+        # (and every other user) inherits it via Machine PATH.
+        $installDir = 'C:\Program Files\dotnet'
+        & $installScript -Channel $DotnetChannel -InstallDir $installDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "dotnet-install.ps1 exited with code $LASTEXITCODE."
+        }
+        Remove-Item -LiteralPath $installScript -Force -ErrorAction SilentlyContinue
+        Add-ToMachinePath -Dir $installDir
+    }
+}
+
+# ------------------------------------------------------------------------
+# 4) Verify
 # ------------------------------------------------------------------------
 Write-Host ''
 Write-Host '=== Verification ===' -ForegroundColor Cyan
@@ -215,6 +262,19 @@ if ($linkExe) {
     Write-Host "  link.exe : $linkExe" -ForegroundColor Green
 } else {
     Write-Warning 'MSVC link.exe not found. Rerun without -SkipBuildTools or install manually.'
+}
+
+$dotnetExe = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($dotnetExe) {
+    $sdks = & $dotnetExe.Source --list-sdks 2>$null
+    if ($LASTEXITCODE -eq 0 -and $sdks) {
+        Write-Host "  dotnet   : $($dotnetExe.Source)" -ForegroundColor Green
+        $sdks | ForEach-Object { "           $_" }
+    } else {
+        Write-Warning 'dotnet runtime found but no SDK installed. Rerun without -SkipDotnetSdk.'
+    }
+} else {
+    Write-Warning 'dotnet not on PATH after install. May need to reboot or manually add C:\Program Files\dotnet to Machine PATH.'
 }
 
 # ------------------------------------------------------------------------
