@@ -141,8 +141,10 @@ mod tests {
     }
 
     #[test]
-    fn default_channels_nonempty() {
-        assert!(!DEFAULT_CHANNELS.is_empty());
+    fn default_channels_include_application() {
+        // Asserting `!DEFAULT_CHANNELS.is_empty()` would trip
+        // clippy::const_is_empty (the const is statically non-empty);
+        // checking for a known channel proves both shape and contents.
         assert!(DEFAULT_CHANNELS.contains(&"Application"));
     }
 }
