@@ -42,8 +42,12 @@ resource "azurerm_postgresql_flexible_server" "pg" {
   zone                          = "1"
   storage_mb                    = var.storage_mb
   sku_name                      = var.sku_name
-  backup_retention_days         = 7
-  geo_redundant_backup_enabled  = false
+  # Retain automated backups for 30 days (maximum for Flexible Server).
+  # Geo-redundant backup replicates backups to the Azure paired region,
+  # providing a recovery point even if the primary region is unavailable.
+  # See ops/postgres/RUNBOOK.md for the restore flow.
+  backup_retention_days         = 30
+  geo_redundant_backup_enabled  = true
   public_network_access_enabled = false
   tags                          = var.tags
 
@@ -127,3 +131,9 @@ resource "azurerm_key_vault_secret" "pg_connection_string" {
     azurerm_postgresql_flexible_server_database.db,
   ]
 }
+
+# Encryption at rest: Flexible Server encrypts with platform-managed
+# keys (AES-256) by default. To use a customer-managed key (CMK) instead,
+# add a `customer_managed_key { ... }` block on the server resource above
+# and supply a Key Vault key.
+# See: https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-data-encryption
