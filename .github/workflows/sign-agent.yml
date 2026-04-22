@@ -1,0 +1,139 @@
+name: "cmtraceopen-web: Sign agent artifact (reusable)"
+
+# Reusable workflow that signs a single Windows artifact (.exe or .msi)
+# with Azure Trusted Signing (ATS) using federated GitHub OIDC — no
+# client secrets, no token shuffling.
+#
+# DESIGN-STAGE STUB. Not wired up. Will be called from the future
+# `agent-msi.yml` workflow once the MSI build is implemented and the
+# ATS resource + Identity Verification have been provisioned. See:
+#   - docs/wave4/02-code-signing.md   (strategy + setup)
+#   - .github/workflows/agent-msi.yml (TBD — caller workflow)
+#
+# Why a separate reusable workflow:
+#   - ATS bills per signature; isolating sign in its own job keeps
+#     the federated-credential blast radius tight (only this job
+#     needs id-token: write + Azure tokens).
+#   - Easy backup-plan swap: if ATS Identity Verification fails (see
+#     docs/wave4/02-code-signing.md §8), only the `azure/login` +
+#     `trusted-signing-action` steps change; callers stay identical.
+#   - Single verify step (signtool) catches cert-chain regressions
+#     before the artifact ships.
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the unsigned artifact uploaded by the caller (e.g. CMTraceOpenAgent.msi)."
+        required: true
+        type: string
+      description:
+        description: "Human-readable signature comment embedded in the cert metadata (visible in Properties → Digital Signatures)."
+        required: true
+        type: string
+      file-glob:
+        description: "Glob inside the downloaded artifact dir to sign. Defaults to *.msi."
+        required: false
+        default: "*.msi"
+        type: string
+
+# DRAFT — wire up when agent-msi.yml exists.
+# Federated OIDC requires id-token: write at the workflow (or job)
+# scope. contents: read is for actions/download-artifact / checkout
+# parity with the caller. NO `packages:` or `actions:` here — keep
+# the signing job's token surface minimal.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  sign:
+    name: Sign ${{ inputs.artifact-name }}
+    # ATS works from any runner OS, but signtool verify is Windows-
+    # native. Using windows-latest avoids a second OS jump.
+    runs-on: windows-latest
+
+    steps:
+      # --- Download unsigned artifact -----------------------------------
+      # DRAFT — wire up when agent-msi.yml exists.
+      # The caller workflow uploads the unsigned MSI/EXE under
+      # `inputs.artifact-name`; we pull it into ./unsigned/.
+      - name: Download unsigned artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: unsigned
+
+      # --- Azure federated login ----------------------------------------
+      # DRAFT — wire up when agent-msi.yml exists.
+      # Requires four repository variables (see docs/wave4/02-code-signing.md §4):
+      #   AZURE_TENANT_ID, AZURE_CLIENT_ID,
+      #   AZURE_TRUSTED_SIGNING_ENDPOINT, AZURE_TRUSTED_SIGNING_ACCOUNT_NAME
+      # The federated credential on the Entra app restricts subject to
+      # `repo:adamgell/cmtraceopen-web:ref:refs/tags/agent-v*`, so this
+      # step physically fails outside of release-tag runs. That is the
+      # intended ATS-bill protection — see docs §7.
+      - name: Azure login (federated OIDC)
+        uses: azure/login@v2
+        with:
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          # No client-secret. No subscription-id (cert profile scope
+          # only — the signer SP has no subscription-level rights).
+          allow-no-subscriptions: true
+
+      # --- Sign ---------------------------------------------------------
+      # DRAFT — wire up when agent-msi.yml exists.
+      # Pin the action SHA in the real wire-up. v0.5.0 placeholder
+      # below; bump to whatever is current at agent-msi.yml landing.
+      - name: Sign with Azure Trusted Signing
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: cmtraceopen-agent
+          files-folder: unsigned
+          files-folder-filter: ${{ inputs.file-glob }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: ${{ inputs.description }}
+          description-url: https://github.com/adamgell/cmtraceopen-web
+
+      # --- Verify -------------------------------------------------------
+      # DRAFT — wire up when agent-msi.yml exists.
+      # `signtool verify /pa /v /all` walks the full cert chain using
+      # the default Windows trust store. Fails the run if the chain
+      # ever stops resolving to the ATS PCA — cheap regression catch.
+      # Expected anchor (current as of writing):
+      #   "Microsoft ID Verified Code Signing PCA 2024"
+      # Re-confirm against ATS docs each release in case Microsoft
+      # rotates the issuing PCA.
+      - name: Verify signature
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem -Path unsigned -Filter "${{ inputs.file-glob }}" -File
+          if (-not $signed) {
+            Write-Error "No signed artifact matched glob '${{ inputs.file-glob }}' in unsigned/"
+            exit 1
+          }
+          foreach ($f in $signed) {
+            Write-Host "Verifying $($f.FullName)"
+            & signtool.exe verify /pa /v /all $f.FullName
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "signtool verify failed for $($f.FullName)"
+              exit $LASTEXITCODE
+            }
+          }
+
+      # --- Re-upload signed artifact ------------------------------------
+      # DRAFT — wire up when agent-msi.yml exists.
+      # Suffix `-signed` so callers can distinguish; the caller's
+      # release-publish step pulls this name (NOT the unsigned one).
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-signed
+          path: unsigned/${{ inputs.file-glob }}
+          if-no-files-found: error
+          retention-days: 30
