@@ -287,7 +287,7 @@ continue ingesting.
 
 3. **[T+10–20 min]** Confirm the second test device (no cert) cannot ingest:
    ```bash
-   # On the uncerned device — expect TLS handshake failure
+   # On the uncertified device — expect TLS handshake failure
    curl -v https://bigmac26/v1/bundles/start 2>&1 | grep -i "alert\|error"
    ```
 
