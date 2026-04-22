@@ -44,7 +44,10 @@ struct PkiArtifacts {
     client_ca_bundle: std::path::PathBuf,
     client_cert_der: CertificateDer<'static>,
     client_key_der: PrivateKeyDer<'static>,
-    server_cert_der: CertificateDer<'static>,
+    /// Self-signed CA cert DER. Used as the TLS client trust anchor so the
+    /// test client can validate the server's certificate (which is signed by
+    /// this CA).
+    ca_cert_der: CertificateDer<'static>,
 }
 
 fn mint_pki(tenant_id: &str, device_id: &str) -> PkiArtifacts {
@@ -118,7 +121,7 @@ fn mint_pki(tenant_id: &str, device_id: &str) -> PkiArtifacts {
         client_key_der: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
             cli_key.serialize_der(),
         )),
-        server_cert_der: CertificateDer::from(srv_cert.der().to_vec()),
+        ca_cert_der: CertificateDer::from(ca_cert.der().to_vec()),
     }
 }
 
@@ -197,7 +200,7 @@ async fn mtls_handshake_yields_san_derived_device_id() {
 
     // Build an mTLS-capable rustls client trusting our self-signed CA.
     let mut roots = rustls::RootCertStore::empty();
-    roots.add(pki.server_cert_der.clone()).unwrap();
+    roots.add(pki.ca_cert_der.clone()).unwrap();
     let client_cfg = rustls::ClientConfig::builder()
         .with_root_certificates(roots)
         .with_client_auth_cert(vec![pki.client_cert_der.clone()], pki.client_key_der.clone_key())
