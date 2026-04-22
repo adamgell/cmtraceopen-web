@@ -1,5 +1,5 @@
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use api_server::auth::{AuthMode, AuthState, JwksCache};
 use api_server::config::Config;
@@ -12,9 +12,32 @@ use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+/// Guard so the rustls crypto provider is installed exactly once. `rustls`
+/// permits a single global provider per process; calling `install_default()`
+/// twice returns `Err`. Future code paths (Wave 3 mTLS termination) will
+/// also need the provider, so install it here at the top-level binary entry
+/// point and let downstream code assume it's already present.
+static CRYPTO_PROVIDER: OnceLock<()> = OnceLock::new();
+
+fn install_crypto_provider() {
+    CRYPTO_PROVIDER.get_or_init(|| {
+        // `install_default` returns Err if a provider is already set —
+        // shouldn't happen because the OnceLock gates entry, but if a future
+        // refactor adds an earlier install we'd rather log + continue than
+        // panic on `expect`.
+        if rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .is_err()
+        {
+            warn!("rustls default crypto provider was already installed; using existing");
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     init_tracing();
+    install_crypto_provider();
 
     let config = match Config::from_env() {
         Ok(cfg) => cfg,
