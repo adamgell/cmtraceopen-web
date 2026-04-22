@@ -128,7 +128,7 @@ jobs:
       #   ghcr.io/adamgell/cmtraceopen-api@<digest>
       - name: Install cosign
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
 
       - name: Sign container image
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
@@ -145,7 +145,7 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         id: sbom
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ghcr.io/adamgell/cmtraceopen-api@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
