@@ -142,19 +142,22 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       # -----------------------------------------------------------------------
-      # Guard: ring crate must not appear in the agent dep tree.
-      # CONTRIBUTING.md prohibits ring everywhere (aws-lc-rs is the mandated
-      # crypto provider). This check runs before the build so a transitive
-      # regression fails fast with a clear message rather than silently
-      # producing a binary that may fail on Windows ARM64 CI.
+      # Guard: ring crate must not appear in the agent's NORMAL dep tree.
+      # CONTRIBUTING.md prohibits ring in the shipped binary (aws-lc-rs is
+      # the mandated crypto provider); dev-dependencies (e.g. integration
+      # tests that pull in object_store's full feature set) are allowed
+      # since they don't compile into the release artifact.
+      #
+      # `--edges normal` excludes dev/build edges, so this catches real
+      # regressions while tolerating test-only transitives.
       # -----------------------------------------------------------------------
       - name: Check for ring crate (must be absent)
         shell: pwsh
         run: |
-          $ringFound = cargo tree -p agent 2>&1 | Select-String 'ring\s+v\d'
+          $ringFound = cargo tree -p agent --edges normal 2>&1 | Select-String 'ring\s+v\d'
           if ($ringFound) {
             Write-Error @"
-          ring crate detected in the agent dep tree. CONTRIBUTING.md prohibits ring.
+          ring crate detected in the agent's NORMAL dep tree. CONTRIBUTING.md prohibits ring.
           Use aws-lc-rs instead. Offending entries:
           $ringFound
           "@
