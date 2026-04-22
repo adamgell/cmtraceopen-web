@@ -131,3 +131,9 @@ resource "azurerm_key_vault_secret" "pg_connection_string" {
     azurerm_postgresql_flexible_server_database.db,
   ]
 }
+
+# Encryption at rest: Flexible Server encrypts with platform-managed
+# keys (AES-256) by default. To use a customer-managed key (CMK) instead,
+# add a `customer_managed_key { ... }` block on the server resource above
+# and supply a Key Vault key.
+# See: https://learn.microsoft.com/azure/postgresql/flexible-server/concepts-data-encryption

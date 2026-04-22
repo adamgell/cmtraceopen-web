@@ -5,6 +5,20 @@
 #   • Azure Blob Storage via azcopy sync   (BACKEND=azure)
 #   • A local / remote directory via rsync  (BACKEND=local, default)
 #
+# SAFETY MODEL — APPEND-ONLY:
+#   This script NEVER deletes destination files. Expiry is delegated to:
+#     1. The bundle TTL sweeper (ingest-side, see PR #71) for source-side
+#        cleanup of stale bundles before they are ever backed up.
+#     2. Azure Blob lifecycle policies (`infra/azure/...`) for destination
+#        retention on the cloud backend.
+#     3. The destination filesystem's own retention policy (NAS snapshots,
+#        manual prune, etc.) for the local backend.
+#   Earlier revisions of this script used `rsync --delete`, which would
+#   wipe the destination if the source directory ever returned empty
+#   (mount failure, accidental rename, partial corruption). That class of
+#   failure mode is now structurally impossible because no destination
+#   files are ever removed by this tool.
+#
 # Usage:
 #   blob-backup.sh [options]
 #
@@ -133,9 +147,12 @@ case "${BACKEND}" in
   local)
     command -v rsync >/dev/null 2>&1 || die "rsync not found on PATH"
 
+    # NOTE: --delete is intentionally OMITTED. See the SAFETY MODEL block
+    # at the top of this file. This script is APPEND-ONLY by design.
+    # Destination expiry is handled by the bundle TTL sweeper (PR #71) +
+    # Azure Blob lifecycle policy / NAS-side retention.
     RSYNC_ARGS=(
       -avz
-      --delete
       "${BLOB_SRC}/"
       "${BLOB_DST}/"
     )

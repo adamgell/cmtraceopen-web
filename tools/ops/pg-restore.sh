@@ -5,6 +5,13 @@
 # scratch database for drill / verification purposes.  It NEVER touches
 # the production database.
 #
+# SAFETY: This script expects single-database pg_dump output (the format
+# produced by pg-backup.sh after PR #96). It does NOT process pg_dumpall
+# output — pg_dumpall contains cluster globals (CREATE/ALTER ROLE, GRANT)
+# that would mutate the shared cluster on replay. If you have a legacy
+# pg_dumpall dump, restore it into a throwaway Postgres instance, not via
+# this script.
+#
 # Usage:
 #   pg-restore.sh <backup-file> [options]
 #
@@ -14,19 +21,23 @@
 # Options:
 #   -h <host>           Postgres host          (env: PG_HOST,      default: localhost)
 #   -p <port>           Postgres port          (env: PG_PORT,      default: 5432)
-#   -U <user>           Postgres superuser     (env: PG_USER,      default: postgres)
+#   -U <user>           Postgres user          (env: PG_USER,      default: postgres)
 #   -T <dbname>         Target scratch DB name (env: TARGET_DB,    default: cmtrace_restore_test)
 #   --no-drop           Skip DROP DATABASE before restore (fail if DB exists)
 #   --help              Show this help and exit
 #
-# Environment variables:
-#   PGPASSWORD          Postgres password (standard libpq variable)
+# Authentication:
+#   Prefer ~/.pgpass (chmod 600) over PGPASSWORD. Cron entries that embed
+#   PGPASSWORD inline expose the secret via crontab files and ps output.
 #
 # What it does:
-#   1. Drops the target database if it exists (unless --no-drop)
-#   2. Creates a fresh target database
-#   3. Decompresses the dump and pipes it through psql
-#   4. Runs a basic schema sanity check (lists tables)
+#   1. Drops the target scratch database if it exists (unless --no-drop)
+#   2. Creates a fresh empty target database
+#   3. Decompresses the dump and pipes it through psql, connected to the
+#      scratch DB (NOT to the postgres admin DB), so any stray cluster-
+#      global statements would error against the scratch DB rather than
+#      mutate the cluster
+#   4. Runs a basic schema sanity check (counts tables in pg_catalog)
 #   5. Prints a pass/fail summary
 #
 # Exit codes:
@@ -123,6 +134,9 @@ esac
 # ---------------------------------------------------------------------------
 # drop & recreate scratch database
 # ---------------------------------------------------------------------------
+# We always DROP + CREATE the scratch DB before restore (unless --no-drop).
+# A half-restored DB from a previous failed run would otherwise leave bad
+# state that masks errors on the next attempt.
 if [[ "${NO_DROP}" == "false" ]]; then
   log "Dropping existing '${TARGET_DB}' (if any)"
   psql_cmd -d postgres \
@@ -130,7 +144,7 @@ if [[ "${NO_DROP}" == "false" ]]; then
     >/dev/null
 fi
 
-log "Creating scratch database '${TARGET_DB}'"
+log "Creating fresh scratch database '${TARGET_DB}'"
 psql_cmd -d postgres \
   -c "CREATE DATABASE \"${TARGET_DB}\";" \
   >/dev/null
@@ -138,50 +152,39 @@ psql_cmd -d postgres \
 # ---------------------------------------------------------------------------
 # restore
 # ---------------------------------------------------------------------------
-log "Decompressing and restoring dump…"
+# pg-backup.sh produces single-DB pg_dump output (no cluster globals, no
+# \connect directives, no CREATE/ALTER ROLE statements). We connect psql
+# directly to the scratch DB and replay the dump there. Any stray cluster-
+# global statement (e.g. from a hand-edited dump) would error against a
+# non-superuser scratch session rather than mutate the live cluster.
+log "Decompressing and restoring dump into '${TARGET_DB}'…"
 
-# pg_dumpall output contains \connect directives that switch databases.
-# We force all statements into the scratch DB by stripping those lines and
-# adding our own at the top, then piping through psql.
-TMP="$(mktemp -d)"
-trap 'rm -rf "${TMP}"' EXIT
-
-CLEAN_SQL="${TMP}/restore.sql"
-
-# Strip \connect lines (they would switch to the original DB name),
-# strip CREATE/DROP DATABASE lines that reference the original cluster setup,
-# and prepend a \connect to our scratch DB.
-{
-  printf '\connect "%s"\n' "${TARGET_DB}"
-  gunzip -c "${BACKUP_FILE}" \
-    | grep -v '^\\connect ' \
-    | grep -Ev '^(CREATE|DROP) DATABASE '
-} > "${CLEAN_SQL}"
-
-if psql_cmd -d postgres -f "${CLEAN_SQL}" >/dev/null; then
+if gunzip -c "${BACKUP_FILE}" \
+     | psql_cmd -d "${TARGET_DB}" \
+         --set ON_ERROR_STOP=1 \
+         -v ON_ERROR_STOP=1 \
+         >/dev/null; then
   log "Restore completed"
 else
-  die "psql reported errors during restore"
+  die "psql reported errors during restore (exited non-zero)"
 fi
 
 # ---------------------------------------------------------------------------
-# sanity check — list tables in the restored schema
+# sanity check — count tables in the restored schema
 # ---------------------------------------------------------------------------
 log "Running schema sanity check…"
-TABLE_LIST="${TMP}/tables.txt"
-psql_cmd -d "${TARGET_DB}" \
-  -c "\dt *.*" \
-  -t \
-  > "${TABLE_LIST}" 2>&1 || true
-
-TABLE_COUNT=$(grep -c '|' "${TABLE_LIST}" || true)
+TABLE_COUNT=$(psql_cmd -d "${TARGET_DB}" -tAc \
+  "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema');" \
+  | tr -d '[:space:]')
+TABLE_COUNT="${TABLE_COUNT:-0}"
 log "  Tables found: ${TABLE_COUNT}"
 
 if [[ "${TABLE_COUNT}" -eq 0 ]]; then
   log "WARNING: No tables found in '${TARGET_DB}'. The backup may be empty or schema-only."
 else
-  log "  Table list:"
-  sed 's/^/    /' "${TABLE_LIST}"
+  psql_cmd -d "${TARGET_DB}" -tAc \
+    "SELECT '    ' || schemaname || '.' || tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema') ORDER BY 1;" \
+    || true
 fi
 
 # ---------------------------------------------------------------------------

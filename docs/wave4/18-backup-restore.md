@@ -30,10 +30,13 @@ The backup strategy follows a **two-tier** model:
 
 | Tier | What | Cadence | Tool |
 |---|---|---|---|
-| Postgres metadata | Full `pg_dumpall` compressed dump | Weekly (Sunday 02:00 UTC) | `tools/ops/pg-backup.sh` |
-| Blob store | rsync / azcopy sync to secondary storage | Daily (03:00 UTC) | `tools/ops/blob-backup.sh` |
+| Postgres metadata | Single-DB `pg_dump` compressed dump | Weekly (Sunday 02:00 UTC) | `tools/ops/pg-backup.sh` |
+| Blob store | rsync / azcopy sync (append-only) to secondary storage | Daily (03:00 UTC) | `tools/ops/blob-backup.sh` |
 
-Restore drills are performed **quarterly** (see §8).
+Restore drills are performed **quarterly**. The authoritative cadence and
+drill calendar live in [`docs/wave4/20-dr-rehearsal.md`](20-dr-rehearsal.md);
+this runbook reuses that schedule and does not redefine it. See §8 below
+for the drill procedure (which is independent of cadence).
 
 ---
 
@@ -41,9 +44,14 @@ Restore drills are performed **quarterly** (see §8).
 
 ### 2.1 Postgres
 
-- All databases on the instance (`pg_dumpall` = globals + every DB)
-- Includes roles, tablespaces, and schema
-- Output: a single `.sql.gz` file per run
+- A **single application database** (default: `cmtrace`) via `pg_dump`
+- Includes that database's schema + data only — **no cluster globals**
+  (no `CREATE ROLE`, `ALTER ROLE`, `GRANT`, `CREATE TABLESPACE`, etc.)
+- Cluster-wide objects (roles, tablespaces, role-level grants) are
+  managed by Terraform / IaC and are deliberately NOT in the backup
+  scope. This prevents a backup-restore cycle from silently overwriting
+  production role passwords or grant matrices on a shared cluster.
+- Output: a single `.sql.gz` file per run, named `cmtrace-<UTC-ts>.sql.gz`
 
 ### 2.2 Blob store
 
@@ -64,7 +72,7 @@ Restore drills are performed **quarterly** (see §8).
 | Data | Retention | Pruning |
 |---|---|---|
 | Postgres dumps (`.sql.gz`) | 30 days | `pg-backup.sh` prunes automatically on each run |
-| Blob store snapshots | 30 days | Managed by `azcopy` / rsync destination policy |
+| Blob store snapshots | 30 days | **Append-only** sync — destination expiry is handled by Azure Blob lifecycle policy (cloud) or the bundle TTL sweeper from PR #71 + NAS-side retention (self-hosted). The script never deletes files. |
 | Azure Flexible Server automated backups | 30 days | Set via `backup_retention_days = 30` in Terraform |
 | Azure geo-redundant backup | Enabled | Set via `geo_redundant_backup_enabled = true` |
 
@@ -72,19 +80,52 @@ Restore drills are performed **quarterly** (see §8).
 
 ## 4. Scheduling (cron)
 
+### 4.1 Credentials — use `~/.pgpass`, not `PGPASSWORD` in cron
+
+Embedding `PGPASSWORD=<secret>` directly in the crontab leaks the secret
+two ways:
+
+1. The crontab file itself is readable by the service account (and on
+   some distros, by other users via `/var/spool/cron/`).
+2. The expanded environment is visible in `ps -ef` for the duration of
+   each `pg_dump` invocation.
+
+Use libpq's `~/.pgpass` file instead. It must be `chmod 600` and live in
+the home directory of the user running cron.
+
+```bash
+# As the cmtrace user
+umask 077
+cat > ~/.pgpass <<'EOF'
+# hostname:port:database:username:password
+localhost:5432:cmtrace:cmtrace:REPLACE_WITH_REAL_PASSWORD
+localhost:5432:postgres:cmtrace:REPLACE_WITH_REAL_PASSWORD
+EOF
+chmod 600 ~/.pgpass
+```
+
+Verify libpq picks it up:
+
+```bash
+psql -h localhost -U cmtrace -d cmtrace -c 'SELECT 1;'   # should not prompt
+```
+
+### 4.2 Crontab entries
+
 Add to the service account crontab (`crontab -e` as user `cmtrace`):
 
 ```cron
 # --- CMTrace Open backup jobs ---
+# Credentials come from ~/.pgpass (chmod 600). Do NOT add PGPASSWORD here.
 
-# Postgres full dump — weekly on Sunday at 02:00 UTC
-0 2 * * 0  PGPASSWORD=<secret> /srv/cmtraceopen/tools/ops/pg-backup.sh \
-             -h localhost -U cmtrace \
+# Postgres single-DB dump — weekly on Sunday at 02:00 UTC
+0 2 * * 0  /srv/cmtraceopen/tools/ops/pg-backup.sh \
+             -h localhost -U cmtrace -D cmtrace \
              -d /backup/cmtraceopen \
              -r 30 \
              >> /var/log/cmtraceopen-backup.log 2>&1
 
-# Blob-store sync — daily at 03:00 UTC
+# Blob-store sync — daily at 03:00 UTC (append-only, no destination deletion)
 0 3 * * *   BLOB_DST=/mnt/nas/blob-backups \
              /srv/cmtraceopen/tools/ops/blob-backup.sh \
              >> /var/log/cmtraceopen-blob-backup.log 2>&1
@@ -117,25 +158,41 @@ ls -lh /backup/cmtraceopen/ | grep "$(date +%Y)" | tail -5
 
 ### 5.1 How it works
 
-`tools/ops/pg-backup.sh` runs `pg_dumpall` and pipes the output directly into `gzip -9`. No uncompressed intermediate file is written, reducing disk pressure.
+`tools/ops/pg-backup.sh` runs `pg_dump` against a **single application
+database** (default: `cmtrace`) and pipes the output directly into
+`gzip -9`. No uncompressed intermediate file is written, reducing disk
+pressure.
 
-Output filename format: `YYYY-MM-DDTHHMMSSZ.sql.gz`
+The script uses `--no-owner --no-privileges`, so the dump can be replayed
+into any cluster (including a fresh one) without depending on specific
+role names existing.
+
+Cluster globals (roles, tablespaces, GRANTs) are intentionally excluded —
+they are managed by Terraform and must not be overwritten by a backup
+pipeline. See §2.1 for the rationale.
+
+Output filename format: `<dbname>-YYYY-MM-DDTHHMMSSZ.sql.gz`
+(e.g. `cmtrace-2026-04-20T020000Z.sql.gz`).
 
 ### 5.2 Running manually
 
+Credentials come from `~/.pgpass` (see §4.1).
+
 ```bash
 # Self-hosted (BigMac26 / Docker Compose)
-PGPASSWORD=secret /srv/cmtraceopen/tools/ops/pg-backup.sh \
+/srv/cmtraceopen/tools/ops/pg-backup.sh \
   -h localhost \
   -U cmtrace \
+  -D cmtrace \
   -d /backup/cmtraceopen \
   -r 30
 
 # Remote Postgres
-PGPASSWORD=secret /srv/cmtraceopen/tools/ops/pg-backup.sh \
+/srv/cmtraceopen/tools/ops/pg-backup.sh \
   -h db.internal \
   -p 5432 \
   -U cmtrace \
+  -D cmtrace \
   -d /backup/cmtraceopen
 ```
 
@@ -146,7 +203,7 @@ PGPASSWORD=secret /srv/cmtraceopen/tools/ops/pg-backup.sh \
 ls -lh /backup/cmtraceopen/*.sql.gz | tail -5
 
 # Peek at the dump header without full decompression
-gunzip -c /backup/cmtraceopen/2026-04-20T020000Z.sql.gz | head -20
+gunzip -c /backup/cmtraceopen/cmtrace-2026-04-20T020000Z.sql.gz | head -20
 ```
 
 ---
@@ -206,15 +263,22 @@ BLOB_DST="https://minio.local:9000/cmtrace-backups/blobs/?<sas-or-key>" \
 
 ### 7.1 Postgres restore (drill / verification)
 
-Use `tools/ops/pg-restore.sh`. This script **always** restores into a scratch database (`cmtrace_restore_test` by default) and explicitly refuses to restore into `cmtrace`, `cmtraceopen`, or `postgres`.
+Use `tools/ops/pg-restore.sh`. This script **always** restores into a
+scratch database (`cmtrace_restore_test` by default) and explicitly
+refuses to restore into `cmtrace`, `cmtraceopen`, or `postgres`.
+
+The script expects single-DB `pg_dump` output (the format produced by
+`pg-backup.sh` from PR #96 onward). It does **not** sanitise legacy
+`pg_dumpall` dumps — restore those into a throwaway Postgres instance
+(e.g. a Docker container) instead.
 
 ```bash
-# Restore the most recent dump
+# Restore the most recent dump (credentials via ~/.pgpass)
 LATEST=$(ls -t /backup/cmtraceopen/*.sql.gz | head -1)
-PGPASSWORD=secret /srv/cmtraceopen/tools/ops/pg-restore.sh "${LATEST}"
+/srv/cmtraceopen/tools/ops/pg-restore.sh "${LATEST}"
 
 # Custom scratch DB name
-PGPASSWORD=secret /srv/cmtraceopen/tools/ops/pg-restore.sh \
+/srv/cmtraceopen/tools/ops/pg-restore.sh \
   "${LATEST}" \
   -h localhost \
   -U cmtrace \
@@ -252,7 +316,13 @@ psql -U postgres -c 'DROP DATABASE IF EXISTS cmtrace_restore_test;'
 
 ### 7.2 Postgres restore into production (disaster recovery)
 
-> ⚠️ Only perform this in a declared disaster-recovery event. Requires downtime.
+> Only perform this in a declared disaster-recovery event. Requires downtime.
+
+This procedure replays a single-DB `pg_dump` archive into a freshly
+created `cmtrace` database. It assumes:
+
+- Cluster globals (roles, tablespaces) already exist (managed by Terraform / IaC).
+- The Postgres instance is running but the cmtraceopen application stack is stopped.
 
 ```bash
 # 1. Stop the stack
@@ -260,15 +330,28 @@ cd /srv/cmtraceopen && docker compose down
 
 # 2. Identify the latest good backup
 ls -lht /backup/cmtraceopen/*.sql.gz | head -5
+BACKUP=/backup/cmtraceopen/cmtrace-YYYY-MM-DDTHHMMSSZ.sql.gz   # pick one
 
-# 3. Restore (replace <backup> with the chosen file)
-PGPASSWORD=secret gunzip -c /backup/cmtraceopen/<backup>.sql.gz \
-  | psql -h localhost -U postgres
+# 3. Drop and recreate the cmtrace database.
+#    Credentials come from ~/.pgpass for the postgres superuser.
+#    DO NOT skip this step — replaying a dump on top of an existing
+#    (possibly half-corrupt) DB can leave a worse state than starting fresh.
+psql -h localhost -U postgres -d postgres <<'SQL'
+DROP DATABASE IF EXISTS cmtrace;
+CREATE DATABASE cmtrace OWNER cmtrace;
+SQL
 
-# 4. Restart the stack
+# 4. Restore the dump into the fresh cmtrace database.
+#    --set ON_ERROR_STOP=1 makes psql exit on the first SQL error so
+#    a partial restore does not silently produce a corrupt DB.
+gunzip -c "${BACKUP}" \
+  | psql -h localhost -U cmtrace -d cmtrace \
+      --set ON_ERROR_STOP=1 -v ON_ERROR_STOP=1
+
+# 5. Restart the stack
 docker compose up -d
 
-# 5. Verify
+# 6. Verify
 curl -sf http://localhost:8080/healthz
 ```
 
@@ -291,14 +374,13 @@ azcopy sync \
 
 ### 8.1 Cadence
 
-**Quarterly** (once per calendar quarter). Suggested dates: first Monday after the end of each quarter.
-
-| Quarter | Suggested drill date |
-|---|---|
-| Q1 | First Monday of April |
-| Q2 | First Monday of July |
-| Q3 | First Monday of October |
-| Q4 | First Monday of January |
+**Quarterly** (once per calendar quarter). The authoritative drill
+calendar — including specific drill dates and the Q1–Q4 scenario
+rotation — lives in
+[`docs/wave4/20-dr-rehearsal.md`](20-dr-rehearsal.md). This runbook
+covers only the **Postgres restore drill**, which is one of the four
+quarterly scenarios; refer to the DR rehearsal doc for cadence,
+rotation, and post-mortem requirements.
 
 ### 8.2 Drill procedure
 
@@ -309,10 +391,10 @@ azcopy sync \
    echo "Testing: ${LATEST}"
    ```
 
-2. **Run the restore script** against the scratch DB:
+2. **Run the restore script** against the scratch DB (credentials via `~/.pgpass`):
 
    ```bash
-   PGPASSWORD=secret /srv/cmtraceopen/tools/ops/pg-restore.sh "${LATEST}"
+   /srv/cmtraceopen/tools/ops/pg-restore.sh "${LATEST}"
    ```
 
 3. **Validate schema** — confirm the expected tables are present:
