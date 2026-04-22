@@ -261,7 +261,9 @@ async fn happy_path_multi_chunk_and_bad_offset_rejected() {
         .unwrap();
     assert!(fin_resp.status().is_success());
 
-    // Missing X-Device-Id on a protected route is a 400.
+    // Missing X-Device-Id on a protected route is a 401 — the new
+    // `DeviceIdentity` extractor rejects requests with no identity at
+    // all (cert OR header) as unauthorized rather than the old 400.
     let no_device = client
         .post(format!("{}/v1/ingest/bundles", server.base))
         .json(&BundleInitRequest {
@@ -274,7 +276,17 @@ async fn happy_path_multi_chunk_and_bad_offset_rejected() {
         .send()
         .await
         .unwrap();
-    assert_eq!(no_device.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(no_device.status(), reqwest::StatusCode::UNAUTHORIZED);
+    // ...and the WWW-Authenticate header advertises both auth surfaces.
+    let challenge = no_device
+        .headers()
+        .get("www-authenticate")
+        .map(|v| v.to_str().unwrap_or("").to_string())
+        .unwrap_or_default();
+    assert!(
+        challenge.contains("client_cert_required"),
+        "challenge should advertise the cert path: {challenge:?}"
+    );
 }
 
 /// Must-fix #1 regression: before the body-limit fix, Axum's 2 MiB default

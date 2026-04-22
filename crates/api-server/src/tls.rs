@@ -124,6 +124,13 @@ fn install_default_crypto_provider() -> Result<(), TlsBringupError> {
     Ok(())
 }
 
+/// Test-only re-export of [`install_default_crypto_provider`]. Lets the
+/// gated `mtls_integration` test set the rustls process provider before
+/// it constructs its own `ClientConfig` (which would otherwise panic).
+pub fn install_default_crypto_provider_for_tests() {
+    let _ = install_default_crypto_provider();
+}
+
 /// Public entry point. Build a TLS-terminating server, attach our
 /// peer-cert-capturing acceptor on top of axum-server's rustls acceptor,
 /// and serve.
@@ -131,6 +138,27 @@ pub async fn serve_tls(
     addr: SocketAddr,
     app: Router,
     cfg: &TlsConfig,
+) -> Result<(), TlsBringupError> {
+    serve_tls_inner(addr, app, cfg, None).await
+}
+
+/// Same as [`serve_tls`] but lets the caller pass an axum-server
+/// [`axum_server::Handle`] in for graceful-shutdown plumbing AND to learn
+/// the bound port (handy for ephemeral-port integration tests).
+pub async fn serve_tls_with_handle(
+    addr: SocketAddr,
+    app: Router,
+    cfg: &TlsConfig,
+    handle: axum_server::Handle,
+) -> Result<(), TlsBringupError> {
+    serve_tls_inner(addr, app, cfg, Some(handle)).await
+}
+
+async fn serve_tls_inner(
+    addr: SocketAddr,
+    app: Router,
+    cfg: &TlsConfig,
+    handle: Option<axum_server::Handle>,
 ) -> Result<(), TlsBringupError> {
     install_default_crypto_provider()?;
 
@@ -178,11 +206,16 @@ pub async fn serve_tls(
         "TLS termination ready",
     );
 
-    axum_server::bind(addr)
-        .acceptor(acceptor)
-        .serve(app.into_make_service())
-        .await
-        .map_err(TlsBringupError::Server)
+    // axum-server's `Server::handle` consumes self and returns Self.
+    // Branch once on the optional handle so the surrounding async block
+    // sees a single concrete future type.
+    let server = axum_server::bind(addr).acceptor(acceptor);
+    let result = if let Some(h) = handle {
+        server.handle(h).serve(app.into_make_service()).await
+    } else {
+        server.serve(app.into_make_service()).await
+    };
+    result.map_err(TlsBringupError::Server)
 }
 
 // ---------------------------------------------------------------------------
