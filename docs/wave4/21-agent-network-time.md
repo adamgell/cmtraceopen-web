@@ -182,10 +182,8 @@ are ever required or accepted.
 | Destination | Port | Protocol | Purpose |
 |---|---|---|---|
 | `<api-server-fqdn>` (operator-configured) | 443 | TCP / HTTPS | Bundle upload, device registration, config polling |
-| `primary-cdn.pki.azure.net` | 443 | TCP / HTTPS | Cloud PKI CRL and OCSP responses for cert renewal and revocation checks |
-| `<tenant-id>.pki.azure.net` | 443 | TCP / HTTPS | Tenant-specific Cloud PKI subdomain (same CDN, tenant-scoped path) |
-| `primary-cdn.pki.azure.net` | 80 | TCP / HTTP | Cloud PKI CRL distribution point (HTTP CDP in the cert) — some PKI stacks use HTTP CDPs |
-| `<tenant-id>.pki.azure.net` | 80 | TCP / HTTP | Same, tenant-scoped HTTP CDP |
+| `*.manage.microsoft.com` + `manage.microsoft.com` | 80, 443 | TCP / HTTPS | Intune service endpoints — used by the Intune client for SCEP enrollment, MDM check-in, and (per Microsoft) for Cloud PKI service traffic. Already required for Intune itself |
+| Cloud PKI CDP/OCSP host (per-tenant — extract from an issued cert) | 80 | TCP / HTTP | CRL distribution + OCSP for cert revocation checks. The exact hostname is embedded in the cert's CDP/AIA extensions and is tenant-specific; see "Verifying the actual CDP/OCSP" below |
 | `time.windows.com` | 123 | UDP | NTP — used by w32time when the device is not domain-joined or domain NTP is unreachable |
 
 > **`<api-server-fqdn>`** is set in the agent's `config.toml`
@@ -193,25 +191,55 @@ are ever required or accepted.
 > configuration policy. Operators must add their specific FQDN to the
 > allowlist. There is no shared/default FQDN.
 
-> **Cloud PKI CDN FQDNs** are documented by Microsoft at
-> [Cloud PKI for Microsoft Intune — network requirements](https://learn.microsoft.com/mem/intune/protect/certificate-authority-add-scep-overview).
-> The two FQDNs above are correct as of April 2026; verify against
-> Microsoft's current documentation when authoring new firewall rules.
+> **Cloud PKI traffic rides the standard Intune endpoints.** Per
+> [Network endpoints for Microsoft Intune](https://learn.microsoft.com/intune/intune-service/fundamentals/intune-endpoints)
+> — the canonical Microsoft Learn article — Cloud PKI is part of the
+> Intune service surface (endpoint set 163, "Intune client and host
+> service"), reached via `*.manage.microsoft.com`. There is no
+> separate `*.pki.azure.net` family in Microsoft's published endpoint
+> list as of April 2026; if you have an older firewall rule that
+> targets `*.pki.azure.net` based on legacy guidance, replace it
+> with the `*.manage.microsoft.com` rule + the cert-extracted
+> CDP/OCSP host below.
+
+> **Verifying the actual CDP/OCSP host for *your* tenant.** The CDP
+> and AIA extensions in an issued cert tell you the exact hostname
+> that needs reachability for revocation checks. Extract them from a
+> freshly-issued device cert:
+>
+> ```powershell
+> # Windows
+> certutil -dump <path-to-cert.cer> | Select-String -Pattern "URL=http"
+> ```
+>
+> ```bash
+> # Linux / WSL with OpenSSL
+> openssl x509 -text -noout -in <cert.pem> \
+>   | grep -E "CRL Distribution Points|Authority Information Access" -A 5
+> ```
+>
+> Add whatever host appears in `URL=http://...` to the firewall
+> allowlist. This is the only source of truth for your tenant's
+> CDP/OCSP host.
 
 > **NTP (UDP 123):** Only required if the device is not domain-joined
 > or if domain-controller NTP is unreachable. Most Intune-managed
 > devices will not hit `time.windows.com` directly; include it as a
-> safety net.
+> safety net. (Also referenced in the Intune endpoints article as
+> entry 165 — "Windows Autopilot — NTP Sync".)
 
-#### Summary: CIDR / FQDN allowlist for a corporate firewall
+#### Summary: FQDN allowlist for a corporate firewall
 
 ```
 # api-server (operator-specific — replace with your FQDN)
 <api-server-fqdn>                   TCP 443 outbound
 
-# Microsoft Cloud PKI CDN (CRL + OCSP)
-primary-cdn.pki.azure.net           TCP 80, 443 outbound
-<tenant-id>.pki.azure.net           TCP 80, 443 outbound
+# Microsoft Intune service (also serves Cloud PKI)
+*.manage.microsoft.com              TCP 80, 443 outbound
+manage.microsoft.com                TCP 80, 443 outbound
+
+# Tenant-specific CDP/OCSP — extract from an issued cert (see note above)
+<your-tenant-cdp-host>              TCP 80 outbound
 
 # Windows Time Service (NTP fallback)
 time.windows.com                    UDP 123 outbound
@@ -224,10 +252,13 @@ are required.
 
 ### 2.3 DNS requirements
 
-Standard enterprise DNS is sufficient. The agent resolves:
+Standard enterprise DNS is sufficient. The agent (and the Intune client
+on the device) resolves:
 
 - The api-server FQDN (set in config).
-- `*.pki.azure.net` (Cloud PKI CDN).
+- `*.manage.microsoft.com` (Intune service surface; also serves Cloud PKI).
+- The tenant's CDP/OCSP host as embedded in issued certs (see §2.1 for
+  how to extract it via `certutil -dump`).
 - `time.windows.com` (NTP fallback).
 
 Split-DNS / split-tunnel VPN environments must ensure these names
@@ -270,15 +301,20 @@ New-NetFirewallRule `
   -Program "C:\Program Files\CMTraceOpen\Agent\agent.exe" `
   -Profile Any
 
-# NTP fallback (w32time — different process)
+# NTP fallback (w32time — different process).
+# Intentionally NO -RemoteAddress: w32time itself handles DNS resolution
+# of the configured time source (time.windows.com or domain NTP), and
+# Windows Defender Firewall's -RemoteAddress accepts only IPs/CIDR, not
+# FQDNs — see the note below. A generic outbound UDP 123 allow scoped to
+# the w32time service host process is the correct shape.
 New-NetFirewallRule `
   -DisplayName "CMTraceOpen — w32time NTP fallback" `
   -Direction Outbound `
   -Action Allow `
   -Protocol UDP `
   -RemotePort 123 `
-  -RemoteAddress "time.windows.com" `
   -Program "%SystemRoot%\System32\svchost.exe" `
+  -Service "w32time" `
   -Profile Any
 ```
 
@@ -289,6 +325,11 @@ New-NetFirewallRule `
 > Windows 11 22H2+ devices. See
 > [Windows Defender Firewall FQDN tagging](https://learn.microsoft.com/windows/security/threat-protection/windows-firewall/create-an-outbound-program-or-service-rule)
 > for details.
+>
+> If you need to lock the NTP rule down to specific addresses, resolve
+> `time.windows.com` and pin the resulting IPs (with the caveat that
+> Microsoft uses DNS round-robin and the IPs change). For most
+> environments the program/service-scoped rule above is sufficient.
 
 **Deploy via Intune:** Endpoint security → Firewall → Create policy →
 Windows Firewall rules. Encode each rule as a custom OMA-URI or use the
@@ -337,22 +378,43 @@ network indicators:
 #### 2.4.4 Diagnosing blocked traffic
 
 If you suspect a firewall is dropping traffic, capture with `netsh
-trace` on the device:
+trace` on the device. Wrap the capture in `try/finally` so the trace
+always stops cleanly even if you Ctrl-C, the reproduction step throws,
+or the PowerShell session crashes — otherwise the ETL grows
+unbounded:
 
 ```powershell
-# Start capture (ring-buffer, 500 MB)
-netsh trace start capture=yes tracefile=C:\Temp\agent-net.etl maxsize=500
+# Always-stops capture pattern
+$trace = "C:\Temp\agent-net.etl"
+try {
+    netsh trace start capture=yes tracefile=$trace maxsize=500
 
-# Reproduce the failure (e.g. start the agent service)
-sc.exe start CMTraceOpenAgent
-Start-Sleep -Seconds 60
-
-# Stop capture
-netsh trace stop
+    # Reproduce the failure (e.g. start the agent service)
+    sc.exe start CMTraceOpenAgent
+    Start-Sleep -Seconds 60
+}
+finally {
+    netsh trace stop
+}
 
 # Convert to pcapng for Wireshark (optional)
 # Use Microsoft Message Analyzer or etl2pcapng:
 # https://github.com/microsoft/etl2pcapng
+```
+
+For a fire-and-forget time-boxed capture (auto-stops after N seconds
+even if you walk away), kick off the stop in a background job before
+starting the trace:
+
+```powershell
+$trace = "C:\Temp\agent-net.etl"
+$durationSec = 60
+$stopJob = Start-Job -ScriptBlock {
+    param($d) Start-Sleep -Seconds $d; netsh trace stop
+} -ArgumentList $durationSec
+netsh trace start capture=yes tracefile=$trace maxsize=500
+sc.exe start CMTraceOpenAgent
+Wait-Job $stopJob | Receive-Job
 ```
 
 Look for RST packets, ICMP port-unreachable, or TCP SYN with no SYN-ACK
@@ -370,6 +432,8 @@ show a TCP three-way handshake followed by TLS `ClientHello` /
 - [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md) — Cloud PKI setup; the PKI CDN URLs in §2.1 correspond to the CRL/OCSP CDPs embedded in the cert this profile issues
 - [Windows Time Service technical reference](https://learn.microsoft.com/windows-server/networking/windows-time-service/windows-time-service-tech-ref) — Microsoft Learn
 - [w32tm command reference](https://learn.microsoft.com/windows-server/networking/windows-time-service/windows-time-service-tools-and-settings) — Microsoft Learn
-- [Cloud PKI for Microsoft Intune — overview](https://learn.microsoft.com/mem/intune/protect/microsoft-cloud-pki-overview) — Microsoft Learn
+- [Cloud PKI for Microsoft Intune — overview](https://learn.microsoft.com/intune/cloud-pki/) — Microsoft Learn
+- [Network endpoints for Microsoft Intune](https://learn.microsoft.com/intune/intune-service/fundamentals/intune-endpoints) — Microsoft Learn (the canonical source for Cloud PKI's network endpoints — see endpoint set 163, "Intune client and host service")
+- [Microsoft Intune cloud PKI fundamentals](https://learn.microsoft.com/intune/cloud-pki/fundamentals) — Microsoft Learn (chain validation, CDP/AIA mechanics)
 - [Create indicators for IPs and URLs/domains (MDE)](https://learn.microsoft.com/microsoft-365/security/defender-endpoint/indicator-ip-domain) — Microsoft Learn
 - [Windows Defender Firewall — create an outbound rule](https://learn.microsoft.com/windows/security/threat-protection/windows-firewall/create-an-outbound-program-or-service-rule) — Microsoft Learn
