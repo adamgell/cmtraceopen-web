@@ -1,9 +1,9 @@
 //! Storage abstractions for the api-server.
 //!
-//! The two traits ([`BlobStore`] + [`MetadataStore`]) let route handlers stay
-//! agnostic of where bytes and rows live. MVP ships with a local-filesystem
-//! blob store and a SQLite metadata store. Later milestones swap in S3 /
-//! Postgres without touching handler code.
+//! The three traits ([`BlobStore`] + [`MetadataStore`] + [`AuditStore`]) let
+//! route handlers stay agnostic of where bytes and rows live. MVP ships with a
+//! local-filesystem blob store and a SQLite metadata/audit store. Later
+//! milestones swap in S3 / Postgres without touching handler code.
 //!
 //! Error strategy: each trait returns its own [`StorageError`]. Route handlers
 //! convert to `AppError` for HTTP responses.
@@ -18,10 +18,12 @@ pub mod blob_object_store;
 #[cfg(feature = "azure")]
 pub mod blob_azure;
 pub mod meta_sqlite;
+pub mod audit_sqlite;
 
 pub use blob_fs::LocalFsBlobStore;
 pub use blob_object_store::ObjectStoreBlobStore;
 pub use meta_sqlite::SqliteMetadataStore;
+pub use audit_sqlite::AuditSqliteStore;
 
 use std::sync::Arc;
 
@@ -703,4 +705,96 @@ pub trait MetadataStore: Send + Sync + 'static {
     /// sessions return `Ok(0)` rather than an error — same idempotency
     /// rationale as `BlobStore::delete_blob`.
     async fn delete_session(&self, session_id: Uuid) -> Result<u64, StorageError>;
+}
+
+// ===========================================================================
+// Audit log
+// ===========================================================================
+
+/// A row in the `audit_log` table, as returned by [`AuditStore::list_audit_rows`].
+#[derive(Debug, Clone)]
+pub struct AuditRow {
+    pub id: Uuid,
+    pub ts_utc: DateTime<Utc>,
+    pub principal_kind: String,
+    pub principal_id: String,
+    pub principal_display: Option<String>,
+    pub action: String,
+    pub target_kind: Option<String>,
+    pub target_id: Option<String>,
+    pub result: String,
+    pub details_json: Option<String>,
+    pub request_id: Option<Uuid>,
+}
+
+/// Parameters for inserting a new audit row.
+#[derive(Debug, Clone)]
+pub struct NewAuditRow {
+    pub id: Uuid,
+    pub ts_utc: DateTime<Utc>,
+    pub principal_kind: String,
+    pub principal_id: String,
+    pub principal_display: Option<String>,
+    pub action: String,
+    pub target_kind: Option<String>,
+    pub target_id: Option<String>,
+    pub result: String,
+    pub details_json: Option<String>,
+    pub request_id: Option<Uuid>,
+}
+
+/// Optional filters for [`AuditStore::list_audit_rows`].
+///
+/// All fields default to `None`, meaning "no filter applied".
+#[derive(Debug, Clone, Default)]
+pub struct AuditFilters {
+    /// Include only rows with `ts_utc > after_ts` (exclusive lower bound).
+    pub after_ts: Option<DateTime<Utc>>,
+    /// Include only rows whose `principal_id` equals this value.
+    pub principal: Option<String>,
+    /// Include only rows whose `action` equals this value.
+    pub action: Option<String>,
+}
+
+/// Append-only audit log. Implementations MUST never update or delete rows —
+/// the table is a tamper-evident record of admin/operator actions.
+#[async_trait]
+pub trait AuditStore: Send + Sync + 'static {
+    /// Append one audit row. Called by the audit middleware after every
+    /// auditable admin request (both successful and failed).
+    async fn insert_audit_row(&self, row: NewAuditRow) -> Result<(), StorageError>;
+
+    /// Page through the audit log in reverse-chronological order.
+    ///
+    /// Results are ordered `ts_utc DESC`. `limit` is clamped to a
+    /// backend-defined maximum (typically 1000). Callers apply
+    /// [`AuditFilters`] to narrow the result set.
+    async fn list_audit_rows(
+        &self,
+        filters: &AuditFilters,
+        limit: u32,
+    ) -> Result<Vec<AuditRow>, StorageError>;
+}
+
+/// No-op [`AuditStore`] used in tests that don't exercise the audit surface.
+///
+/// `insert_audit_row` silently succeeds; `list_audit_rows` always returns an
+/// empty list. This lets existing `AppState` constructors compile unchanged —
+/// callers that care about audit (the integration tests, production `main.rs`)
+/// swap in a real backend via [`AppState::full`] / [`AppState::with_cors_and_crl`].
+pub struct NoopAuditStore;
+
+#[async_trait]
+impl AuditStore for NoopAuditStore {
+    async fn insert_audit_row(&self, _row: NewAuditRow) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn list_audit_rows(
+        &self,
+        _filters: &AuditFilters,
+        _limit: u32,
+    ) -> Result<Vec<AuditRow>, StorageError> {
+        Ok(vec![])
+    }
 }

@@ -92,6 +92,16 @@ impl SqliteMetadataStore {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    /// Build an [`AuditSqliteStore`] that shares this store's connection
+    /// pool.  Cloning the pool handle is a cheap Arc bump — no new database
+    /// connection is opened.
+    ///
+    /// Intended to be called once at startup in `main.rs` so both stores
+    /// write to the same SQLite file under the same WAL-mode pool.
+    pub fn audit_store(&self) -> super::audit_sqlite::AuditSqliteStore {
+        super::audit_sqlite::AuditSqliteStore::from_pool(self.pool.clone())
+    }
 }
 
 fn parse_uuid(s: &str) -> Result<Uuid, StorageError> {
