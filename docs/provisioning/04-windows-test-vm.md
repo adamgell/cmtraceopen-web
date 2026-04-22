@@ -624,3 +624,7 @@ teardown** when you want to repurpose the VM or free the disk.
   <https://learn.microsoft.com/windows-server/administration/windows-commands/sc-create>
 - Project: agent crate scaffold + config schema —
   `crates/agent/README.md`, `crates/agent/src/config.rs`.
+- Time sync and network policy requirements for the agent —
+  [`docs/wave4/21-agent-network-time.md`](../wave4/21-agent-network-time.md).
+  VMs paused/restored often have skewed clocks; run `w32tm /resync /force`
+  after restoring a snapshot and verify with `w32tm /query /status`.
