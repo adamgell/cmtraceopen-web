@@ -15,6 +15,12 @@ P1.1.
 
 ---
 
+> **Storage-type design call**: see ADR
+> [`docs/adr/0001-postgres-storage-types.md`](../adr/0001-postgres-storage-types.md)
+> for the recorded TEXT-now / TIMESTAMPTZ-+-JSONB-as-follow-up decision.
+> Cross-linked from PR #79 (audit log) so the future migration covers all
+> tables consistently.
+
 ## Design Decisions
 
 ### 1. Separate Migration Directories (not a single portable schema)

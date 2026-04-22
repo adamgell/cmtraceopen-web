@@ -764,21 +764,49 @@ impl MetadataStore for PgMetadataStore {
 mod tests {
     use super::*;
 
-    /// These tests only run when `CMTRACE_DATABASE_URL` is set to a
-    /// `postgres://` URL. They are deliberately skipped in CI unless a
-    /// Postgres instance is available.
-    fn pg_url() -> Option<String> {
-        std::env::var("CMTRACE_DATABASE_URL")
-            .ok()
-            .filter(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"))
+    /// Read `CMTRACE_DATABASE_URL` and require it to be a `postgres://` URL.
+    ///
+    /// These tests run only when explicitly requested via
+    /// `cargo test ... -- --ignored` AND a reachable Postgres URL is in
+    /// the env. The `#[ignore]` annotation on each test means they show
+    /// up as `ignored` in the standard test runner output (rather than
+    /// silently passing when no PG is reachable, which the previous
+    /// `eprintln!` + early-return path did — that pattern hid the lack
+    /// of CI coverage).
+    ///
+    /// To run locally with a containerised Postgres:
+    /// ```bash
+    /// docker run --rm -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:16
+    /// CMTRACE_DATABASE_URL='postgres://postgres:pw@127.0.0.1:5432/postgres' \
+    ///   cargo test -p api-server --features postgres meta_postgres -- --ignored
+    /// ```
+    ///
+    /// Panics with a clear message if the env var is set but doesn't have
+    /// a `postgres://` scheme — that indicates an operator typo
+    /// (e.g. `sqlite://...` left over from a previous run) rather than
+    /// "no PG configured", and we'd rather fail loud than silently green.
+    fn pg_url_or_skip() -> String {
+        let raw = match std::env::var("CMTRACE_DATABASE_URL") {
+            Ok(v) if !v.trim().is_empty() => v,
+            _ => panic!(
+                "CMTRACE_DATABASE_URL not set; this test is gated by #[ignore] — \
+                 run with `cargo test ... -- --ignored` after exporting the env var."
+            ),
+        };
+        if !(raw.starts_with("postgres://") || raw.starts_with("postgresql://")) {
+            panic!(
+                "CMTRACE_DATABASE_URL is set but is not a postgres:// URL: {raw:?}. \
+                 Did you mean to point at a Postgres instance? \
+                 (sqlite paths cannot exercise the PG-specific code path.)"
+            );
+        }
+        raw
     }
 
     #[tokio::test]
+    #[ignore = "set CMTRACE_DATABASE_URL=postgres://... and run with --ignored"]
     async fn migrations_apply_and_upsert_device_works() {
-        let Some(url) = pg_url() else {
-            eprintln!("CMTRACE_DATABASE_URL not set to a postgres URL — skipping PG test");
-            return;
-        };
+        let url = pg_url_or_skip();
         let store = PgMetadataStore::connect(&url).await.unwrap();
         let now = Utc::now();
         store.upsert_device("WIN-PG-01", Some("pglab01"), now).await.unwrap();
@@ -790,11 +818,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "set CMTRACE_DATABASE_URL=postgres://... and run with --ignored"]
     async fn pool_stats_reports_sane_values() {
-        let Some(url) = pg_url() else {
-            eprintln!("CMTRACE_DATABASE_URL not set to a postgres URL — skipping PG test");
-            return;
-        };
+        let url = pg_url_or_skip();
         let store = PgMetadataStore::connect(&url).await.unwrap();
         let stats = store.pool_stats();
         assert_eq!(stats.max_size, POOL_MAX_CONNECTIONS);
