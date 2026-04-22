@@ -120,6 +120,63 @@ impl MetadataStore for PgMetadataStore {
         )
     }
 
+    async fn sessions_older_than(
+        &self,
+        ttl_days: u32,
+        batch_size: u32,
+    ) -> Result<Vec<(Uuid, String)>, StorageError> {
+        // Postgres native: `now() - interval 'N days'` cuts off in-DB,
+        // mirroring meta_sqlite's `datetime('now', '-N days')`.
+        let cutoff_interval = format!("{} days", ttl_days);
+        let rows = sqlx::query_as::<_, (Uuid, String)>(
+            r#"
+            SELECT session_id, blob_uri
+              FROM sessions
+             WHERE ingested_utc < (now() - $1::interval)
+             ORDER BY ingested_utc ASC
+             LIMIT $2
+            "#,
+        )
+        .bind(&cutoff_interval)
+        .bind(i64::from(batch_size))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(rows)
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<u64, StorageError> {
+        // FK ordering matches meta_sqlite: entries → files → sessions.
+        // ON DELETE CASCADE isn't declared on the schema, so cascade
+        // manually inside one transaction so a half-delete doesn't leave
+        // dangling rows on partial failure.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        let entries_deleted = sqlx::query("DELETE FROM entries WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?
+            .rows_affected();
+        sqlx::query("DELETE FROM files WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        sqlx::query("DELETE FROM sessions WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok(entries_deleted)
+    }
+
     async fn upsert_device(
         &self,
         device_id: &str,
