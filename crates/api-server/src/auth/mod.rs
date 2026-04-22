@@ -58,6 +58,12 @@ pub use device_identity::{
     DeviceIdentity, DeviceIdentitySource, ParsedSanUri, SanUriError,
 };
 
+#[cfg(feature = "crl")]
+pub mod crl;
+
+#[cfg(feature = "crl")]
+pub use crl::{CrlCache, CrlError};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};

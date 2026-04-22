@@ -14,6 +14,42 @@ path = "src/main.rs"
 name = "api_server"
 path = "src/lib.rs"
 
+[features]
+# Both `mtls` and `crl` are default-on so the production binary terminates
+# TLS, validates client certs, and rejects revoked certs at the application
+# layer. Either can be turned off via `--no-default-features` (with explicit
+# re-enables) on dev boxes that lack cmake/NASM (`mtls` brings the
+# aws-lc-sys C build) or to drop the x509-parser dep entirely (`crl`).
+default = ["mtls", "crl"]
+
+# Wave 3 mTLS termination + cert-derived DeviceIdentity. Disable to skip
+# building the rustls / aws-lc-sys C+asm dependencies. With the feature off,
+# `Config::tls_enabled` is forced to `false` and the only device-identity
+# surface is the legacy `X-Device-Id` header.
+mtls = [
+    "dep:axum-server",
+    "dep:rustls-pemfile",
+    "dep:rustls-webpki",
+    "dep:x509-parser",
+    "dep:http",
+    "dep:rustls-pki-types",
+    "dep:tokio-rustls",
+]
+
+# CRL polling for client-cert revocation. Hourly fetch + DER parse of the
+# Cloud PKI Root + Issuing CRLs; the resulting `is_revoked(&[u8])` API
+# is consulted by the WebPkiClientVerifier wired up under `mtls`. Drops
+# x509-parser when disabled.
+crl = ["dep:x509-parser"]
+
+# Optional integration tests that mint a self-signed CA + leaf with `rcgen`,
+# spin up the TLS-terminating server, and drive a real mTLS client through
+# the ingest flow. Gated behind a feature so the default
+# `cargo test --workspace` pass doesn't require any extra setup; CI flips
+# `--features test-mtls` on the api-server crate explicitly. Implies `mtls`
+# since the test needs the TLS server bring-up code.
+test-mtls = ["mtls", "dep:rcgen", "dep:tokio-rustls"]
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "fs", "io-util", "sync"] }
@@ -94,9 +130,12 @@ rustls-pemfile = { version = "2", optional = true }
 # `webpki` is pulled transitively by `rustls`, but we depend on it
 # explicitly so the `WebPkiClientVerifier` builder path is available.
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"], optional = true }
-# rustls' parsed ClientCertVerified surface doesn't expose SAN extensions
-# directly — we re-parse the leaf DER with x509-parser to pull the URI
-# from the SAN.
+# Shared by both `mtls` (re-parses leaf DER for SAN URI extraction) and
+# `crl` (parses the DER-encoded CRL list from Cloud PKI distribution
+# points). The optional `verify` feature on x509-parser pulls `ring`,
+# which is banned workspace-wide (see top-of-file Cargo.toml note on
+# jwt-simple) — leave it off and rely on the rustls-webpki trust path
+# for signature checks.
 x509-parser = { version = "0.16", optional = true }
 # tls.rs imports these directly. They're transitively pulled by axum +
 # rustls + axum-server, but Rust requires explicit deps for direct `use`
@@ -105,30 +144,6 @@ x509-parser = { version = "0.16", optional = true }
 # (shared between `mtls` and `test-mtls` feature gates).
 http = { version = "1", optional = true }
 rustls-pki-types = { version = "1", optional = true }
-
-[features]
-default = ["mtls"]
-# When enabled, the api-server can terminate TLS + perform mTLS client-cert
-# verification. Disable to skip building the rustls / aws-lc-sys C+asm
-# dependencies (useful on dev boxes that lack cmake/NASM). With the
-# feature off, `Config::tls_enabled` is forced to `false` and the only
-# device-identity surface is the legacy `X-Device-Id` header.
-mtls = [
-    "dep:axum-server",
-    "dep:rustls-pemfile",
-    "dep:rustls-webpki",
-    "dep:x509-parser",
-    "dep:http",
-    "dep:rustls-pki-types",
-    "dep:tokio-rustls",
-]
-# Optional integration tests that mint a self-signed CA + leaf with
-# `rcgen`, spin up the TLS-terminating server, and drive a real mTLS
-# client through the ingest flow. Gated behind a feature so the default
-# `cargo test --workspace` pass doesn't require any extra setup; CI flips
-# `--features test-mtls` on the api-server crate explicitly. Implies
-# `mtls` since the test needs the TLS server bring-up code.
-test-mtls = ["mtls", "dep:rcgen", "dep:tokio-rustls"]
 
 [dependencies.rcgen]
 version = "0.13"
