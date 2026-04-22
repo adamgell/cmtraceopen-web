@@ -1,0 +1,62 @@
+# CMTrace Open Agent — default configuration.
+# Lives at %ProgramData%\CMTraceOpen\Agent\config.toml.
+# Edits here survive MSI upgrade. To revert to defaults, delete the file
+# and re-run the MSI repair (`msiexec /fa CMTraceOpenAgent.msi`).
+
+# Base URL of the api-server. No trailing slash.
+# Override per-device with the CMTRACE_API_ENDPOINT env var if you want to
+# point one specific device at a non-prod endpoint without touching this file.
+api_endpoint = "https://cmtraceopen.corp.example.com"
+
+# HTTP request timeout in seconds. Applies to chunked uploads + control plane
+# calls. Bump this if you have slow-link sites; 60 is fine for typical office
+# WAN links.
+request_timeout_secs = 60
+
+# Cron-like schedule for the evidence collector. Runs once a day at 03:00
+# local time by default. Format: standard 5-field cron (min hour dom mon dow).
+evidence_schedule = "0 3 * * *"
+
+# Maximum bundles the on-disk upload queue will hold before it starts
+# dropping the oldest. Each bundle is roughly 5-50 MB depending on log
+# volume; 50 = 250MB-2.5GB worst-case. Tune for your endpoints.
+queue_max_bundles = 50
+
+# tracing filter directive. "info" is the right answer for production;
+# "debug" is useful for break-glass troubleshooting (expect ~10x log volume).
+log_level = "info"
+
+# Device identity. Empty string means "derive from the machine SID at
+# runtime" - the agent reads HKLM\SECURITY\SAM\Domains\Account "V" key (or
+# falls back to the COMPUTERNAME env var; see resolved_device_id in
+# crates/agent/src/config.rs). Set explicitly only if you have a reason to
+# pin a specific device_id, e.g. when reprovisioning hardware that should
+# inherit the previous device's session history.
+device_id = ""
+
+# Log paths the `logs` collector walks for .log / .txt files. Defaults
+# cover the ConfigMgr + Intune + DSRegCmd trees. Add custom paths here if
+# you want to ship a vendor agent's logs alongside the Microsoft set.
+log_paths = [
+  "C:\\Windows\\CCM\\Logs\\**\\*.log",
+  "C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\\**\\*.log",
+  "C:\\Windows\\Logs\\DSRegCmd\\**\\*.log",
+]
+
+# --- Wave 3 mTLS knobs (used once mTLS lands in the agent) ---
+
+[mtls]
+# Cert store to search. Always LocalMachine\My for production; agents run as
+# LocalSystem and Cloud PKI delivers per-device certs to LocalMachine\My.
+cert_store = "LocalMachine\\My"
+
+# Match the cert by issuer Common Name. The Cloud PKI Issuing CA's CN is
+# "issuing.gell.internal.cdw.lab" - see docs/provisioning/03-intune-cloud-pki.md.
+# We match on CN substring rather than full DN so a future CA renewal (with the same CN
+# but a new serial) still gets picked up automatically.
+issuer_cn_pattern = "issuing.gell.internal.cdw.lab"
+
+# Optional EKU filter. Defaults to clientAuth (1.3.6.1.5.5.7.3.2). Reject any
+# cert that doesn't declare clientAuth, even if the issuer matches - defense
+# in depth against a code-signing cert from the same CA being used by mistake.
+required_eku = "1.3.6.1.5.5.7.3.2"

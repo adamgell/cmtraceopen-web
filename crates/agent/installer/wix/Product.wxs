@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Product.wxs — Top-level WiX v4 Package element for CMTraceOpenAgent.msi.
+
+  Owns:
+  - Package declaration (Manufacturer, Version, UpgradeCode)
+  - MajorUpgrade element (upgrade chain policy)
+  - MediaTemplate (cab embedding)
+  - Property declarations (KEEP_USER_DATA, WIXUI_INSTALLDIR)
+  - Minimum OS launch condition
+  - Top-level Feature graph referencing ComponentGroups from other .wxs files
+  - CertCheck custom action scheduling (SetProperty + WixQuietExec64)
+
+  All component/directory definitions live in Files.wxs, Service.wxs, and
+  Config.wxs. This file wires them together into the Feature graph and the
+  install execute sequence.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <?include Variables.wxi ?>
+
+  <Package
+      Name="CMTrace Open Agent"
+      Manufacturer="CMTrace Open"
+      Version="$(var.Version)"
+      UpgradeCode="{$(var.UpgradeCode)}"
+      Language="1033"
+      Codepage="1252"
+      Scope="perMachine">
+
+    <!--
+      Embed all cab files into the MSI. Single-file deployment; no external
+      cab needed for Intune Win32 LOB or manual installs.
+    -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      MajorUpgrade policy — see design §7.
+
+      Schedule="afterInstallExecute": lay down the new files first, then remove
+      the old version. Avoids a service-down gap during in-place upgrades and
+      lets MSI skip unchanged files.
+
+      AllowSameVersionUpgrades="yes": re-running the same MSI version does a
+      repair-style reinstall rather than erroring. Useful for CI smoke tests
+      and operator "repair" workflows.
+
+      AllowDowngrades="no": refuse to install an older version over a newer
+      one. Operators who need to roll back should uninstall first.
+    -->
+    <MajorUpgrade
+        Schedule="afterInstallExecute"
+        AllowSameVersionUpgrades="yes"
+        AllowDowngrades="no"
+        DowngradeErrorMessage="A newer version of CMTrace Open Agent is already installed. Uninstall the current version before installing an older one." />
+
+    <!--
+      KEEP_USER_DATA — default 1 (keep %ProgramData% on uninstall).
+      Set to 0 at install time to purge config.toml, Queue/, and logs/ on
+      uninstall:
+        msiexec /x CMTraceOpenAgent.msi KEEP_USER_DATA=0 /qn
+      The actual removal is handled by the PurgeDataComponent in Config.wxs,
+      which reads the CMTRACE_PROGRAMDATA property set below.
+    -->
+    <Property Id="KEEP_USER_DATA" Value="1" />
+
+    <!--
+      CMTRACE_PROGRAMDATA — holds the path to the agent's ProgramData directory
+      so that util:RemoveFolderEx in Config.wxs knows what to delete when
+      KEEP_USER_DATA=0 is passed on uninstall.
+      Default is empty so RemoveFolderEx does nothing; set conditionally below.
+    -->
+    <Property Id="CMTRACE_PROGRAMDATA" Value="" />
+
+    <!--
+      Minimum OS: Windows 10 or later (VersionNT >= 1000 in the MSI property
+      table, where 1000 maps to version 10.0 / build 10240+).
+      The agent uses Windows APIs that don't exist on earlier versions.
+      Attempting to install on an unsupported OS produces a friendly error
+      rather than a runtime crash.
+    -->
+    <Launch
+        Condition="VersionNT &gt;= 1000"
+        Message="CMTrace Open Agent requires Windows 10 or later." />
+
+    <!--
+      CertCheck custom action — see design §6.
+
+      CertCheck.ps1 is installed to AgentInstallDir by Files.wxs (CertCheckComponent).
+      We use the WiX v4 util extension's WixQuietExec64 to run PowerShell
+      non-interactively with -ExecutionPolicy Bypass so the script runs even
+      if the machine policy is Restricted.
+
+      WiX v4 convention: WixQuietExec64 reads its command line from the
+      property `WixQuietExec64CmdLine` (NOT from a property named after the
+      CA — that was the v3 QtExec convention). The SetProperty below
+      populates WixQuietExec64CmdLine before the immediate CA runs.
+
+      Execute="immediate" — the CA runs during the InstallExecuteSequence at
+      our scheduled slot (After="InstallFiles"). We don't need "deferred" +
+      Impersonate="no" because we're only invoking a read-only cert lookup,
+      not mutating the system, and the immediate context lets us use the
+      property-reference command line directly.
+
+      Always Return="ignore" — a missing cert is a warning, not a failure.
+      See design §6 for the rationale.
+    -->
+    <SetProperty
+        Id="WixQuietExec64CmdLine"
+        Value='"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NonInteractive -NoProfile -ExecutionPolicy Bypass -File "[AgentInstallDir]CertCheck.ps1"'
+        Before="WixQuietExec64"
+        Sequence="execute" />
+
+    <CustomAction
+        Id="WixQuietExec64"
+        BinaryRef="Wix4UtilCA_X64"
+        DllEntry="WixQuietExec64"
+        Execute="immediate"
+        Return="ignore" />
+
+    <!--
+      Set CMTRACE_PROGRAMDATA only when a full purge is requested on uninstall.
+      When set, util:RemoveFolderEx in Config.wxs (PurgeDataComponent) will
+      recursively delete %ProgramData%\CMTraceOpen\Agent\ on uninstall.
+      When KEEP_USER_DATA=1 (the default), this property stays empty and
+      RemoveFolderEx does nothing, preserving operator config and the queue.
+    -->
+    <SetProperty
+        Id="CMTRACE_PROGRAMDATA"
+        Value="[CommonAppDataFolder]$(var.ProgramDataDir)"
+        Before="WixRemoveFoldersEx"
+        Sequence="execute">
+      KEEP_USER_DATA = "0" AND REMOVE = "ALL"
+    </SetProperty>
+
+    <InstallExecuteSequence>
+      <!-- Run the cert check after files are laid down, before services start. -->
+      <Custom Action="WixQuietExec64" After="InstallFiles" />
+    </InstallExecuteSequence>
+
+    <!--
+      Feature graph — single top-level feature. WiX requires at least one
+      Feature; we don't need a multi-feature tree for this single-purpose MSI.
+    -->
+    <Feature Id="ProductFeature" Title="CMTrace Open Agent" Level="1">
+      <ComponentGroupRef Id="AgentBinaries" />
+      <ComponentGroupRef Id="AgentService" />
+      <ComponentGroupRef Id="AgentConfig" />
+    </Feature>
+
+  </Package>
+
+</Wix>
+

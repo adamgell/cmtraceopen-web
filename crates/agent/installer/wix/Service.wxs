@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Service.wxs — Windows service registration for CMTraceOpenAgent.
+
+  Owns:
+  - ServiceInstall element (registers CMTraceOpenAgent with the SCM)
+  - ServiceConfig (delayed auto-start)
+  - util:ServiceConfig (failure/recovery actions: restart 3×, then give up)
+  - ServiceControl (start on install, stop on install+uninstall, remove on uninstall)
+
+  KeyPath for this component is the agent EXE. MSI uses the KeyPath file's
+  presence to decide whether the component needs to be installed or repaired.
+  The EXE file itself is also tracked by AgentExeComponent in Files.wxs, but
+  WiX allows the same physical file to be referenced multiple times across
+  components; the service component owns the SCM registration lifecycle and
+  must have the EXE as its KeyPath so the service record and file stay in sync.
+
+  Recovery policy (design §3):
+    First, second, and third failure → restart the service after 5 minutes.
+    Reset the failure counter after 1 day.
+    This covers transient boot-time races (network not ready, API endpoint not
+    reachable) without running the service in a tight crash loop forever.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <?include Variables.wxi ?>
+
+  <Fragment>
+
+    <!--
+      AgentService ComponentGroup — referenced from Product.wxs Feature graph.
+      Directory is AgentInstallDir (defined in Files.wxs).
+    -->
+    <ComponentGroup Id="AgentService" Directory="AgentInstallDir">
+
+      <Component Id="AgentServiceInstall" Guid="E6D7F5A4-B8C9-7D0E-1F2A-3B4C5D6E7F8A">
+        <!--
+          KeyPath: the agent EXE. MSI pins the service component to the
+          binary's presence; if the EXE is missing, repair re-installs it and
+          re-registers the service.
+        -->
+        <File
+            Id="AgentServiceExe"
+            Source="$(var.ReleaseBinary)"
+            Name="cmtraceopen-agent.exe"
+            KeyPath="yes" />
+
+        <ServiceInstall
+            Id="CMTraceOpenAgentSvc"
+            Name="$(var.ServiceName)"
+            DisplayName="CMTrace Open Agent"
+            Description="Collects ConfigMgr/Intune/Entra logs and uploads them to the CMTrace Open api-server."
+            Type="ownProcess"
+            Start="auto"
+            ErrorControl="normal"
+            Account="LocalSystem"
+            Vital="yes">
+
+          <!--
+            Delayed auto-start — the service starts automatically at boot but
+            waits until the SCM has dispatched all immediate auto-start services.
+            Reduces I/O contention at boot; acceptable latency for a
+            log-collection daemon that runs on a cron-like schedule anyway.
+          -->
+          <ServiceConfig
+              DelayedAutoStart="yes"
+              OnInstall="yes"
+              OnReinstall="yes" />
+
+          <!--
+            Recovery actions using the WiX util extension.
+            Restart 3 times (each time waiting 5 minutes before the restart),
+            then take no further action. Reset the failure counter after 1 day.
+
+            Rationale: a Rust panic or an unhandled error at startup that the
+            service dispatcher surfaces as a non-zero exit triggers the SCM
+            recovery path. Three restarts give transient problems time to clear
+            (network flap, API server reboot) without hammering the machine
+            indefinitely. After the third failure the service stays stopped
+            until an admin or a subsequent MSI repair restarts it.
+          -->
+          <util:ServiceConfig
+              FirstFailureActionType="restart"
+              SecondFailureActionType="restart"
+              ThirdFailureActionType="restart"
+              RestartServiceDelayInSeconds="300"
+              ResetPeriodInDays="1" />
+
+        </ServiceInstall>
+
+        <!--
+          ServiceControl — drives the SCM state machine around the MSI action.
+
+          Start="install"  — start the service when this component is first
+                             installed. Does not re-start on upgrade (the old
+                             version is already running; MajorUpgrade's
+                             afterInstallExecute schedule handles the restart).
+
+          Stop="both"      — stop the service on both install (so we can
+                             replace the locked EXE) and uninstall.
+
+          Remove="uninstall" — remove the SCM entry on uninstall only.
+                               Not on upgrade (MajorUpgrade removes the old
+                               version's record as part of the upgrade chain).
+
+          Wait="yes"       — block until the SCM confirms the state transition
+                             so failures surface in the MSI log rather than
+                             silently leaving a half-stopped service.
+        -->
+        <ServiceControl
+            Id="CMTraceOpenAgentCtl"
+            Name="$(var.ServiceName)"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+
+      </Component>
+
+    </ComponentGroup>
+
+  </Fragment>
+
+</Wix>

@@ -1,68 +1,104 @@
-# cmtraceopen-agent — WiX MSI installer (scaffold)
+# cmtraceopen-agent — WiX MSI installer
 
-This directory will hold the WiX v4 source for `CMTraceOpenAgent.msi`. **No
-WiX source has been committed yet** — the design lives at
-[`docs/wave4/01-msi-design.md`](../../../../docs/wave4/01-msi-design.md). The
-implementation lands in a follow-up PR once the open questions in section 12
-of that doc are answered.
+WiX v4 source for `CMTraceOpenAgent.msi`. The full design spec lives at
+[`docs/wave4/01-msi-design.md`](../../../../docs/wave4/01-msi-design.md).
 
-This README documents the planned directory layout so the next contributor
-knows where each file goes.
-
-## Planned layout
+## Directory layout
 
 ```
 crates/agent/installer/wix/
-├── README.md                  # this file (the only file present today)
-├── Variables.wxi              # version, UpgradeCode, package GUID, install paths
-├── Product.wxs                # WiX v4 — Package + MajorUpgrade + Feature graph
+├── README.md                  # this file
+├── Variables.wxi              # version, UpgradeCode, install paths (preprocessor defines)
+├── Product.wxs                # WiX v4 Package + MajorUpgrade + Feature graph
 ├── Files.wxs                  # binary, LICENSE.txt, README.txt
 ├── Service.wxs                # ServiceInstall + ServiceControl + recovery actions
 ├── Config.wxs                 # default config.toml, Queue/ + logs/ dirs + ACLs
 ├── CustomActions/
-│   ├── CertCheck.ps1          # OR
-│   └── CertCheck/             #   C# DTF project — pick one (see design §6, §12)
+│   └── CertCheck.ps1          # Cloud PKI cert presence check (soft-warn, always exits 0)
 └── build.ps1                  # wix.exe wrapper: -ReleaseBinary, -Version
 ```
 
 ## File-by-file purpose
 
-| File / dir              | What it owns                                                                                                                  |
-| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `Variables.wxi`         | Preprocessor `<?define ?>` block — `Version`, `UpgradeCode`, install dirs, source paths.                                      |
-| `Product.wxs`           | Top-level `<Package>` element. Includes `MajorUpgrade`, `MediaTemplate`, top-level `Feature` graph, and references the other `.wxs`. |
-| `Files.wxs`             | The `cmtraceopen-agent.exe` `<File>`, `LICENSE.txt`, `README.txt`. Each in its own `<Component>`.                             |
-| `Service.wxs`           | `ServiceInstall` + `ServiceControl` + `util:ServiceConfig` recovery actions. KeyPath is the agent EXE.                        |
-| `Config.wxs`            | Default `config.toml` payload (with `NeverOverwrite="yes"`), `CreateFolder` for `Queue/` and `logs/`, ACL grants.             |
-| `CustomActions/`        | The Cloud PKI cert presence check. PS or DTF — see design doc §6.                                                              |
-| `build.ps1`             | Thin wrapper around `wix build` + optional `signtool sign`. Takes `-ReleaseBinary` and `-Version`.                            |
+| File / dir                  | What it owns                                                                                                                      |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `Variables.wxi`             | Preprocessor `<?define ?>` block — `Version`, `UpgradeCode`, install dirs, source paths.                                         |
+| `Product.wxs`               | Top-level `<Package>` element. `MajorUpgrade`, `MediaTemplate`, top-level `Feature` graph, custom-action scheduling.             |
+| `Files.wxs`                 | `cmtraceopen-agent.exe`, `LICENSE.txt`, `README.txt` — each in its own `<Component>`. Defines `AgentInstallDir` directory tree.  |
+| `Service.wxs`               | `ServiceInstall` + `ServiceConfig` (delayed auto-start) + `util:ServiceConfig` (3× restart recovery) + `ServiceControl`.         |
+| `Config.wxs`                | Default `config.toml` (`NeverOverwrite="yes"`, `Permanent="yes"`), `CreateFolder` for `Queue/` and `logs/`, ACL grants.          |
+| `CustomActions/CertCheck.ps1` | Runs as a deferred MSI custom action. Warns if no Cloud PKI cert is present in `LocalMachine\My`. Always exits 0.              |
+| `build.ps1`                 | Thin wrapper around `wix build` + optional `signtool sign`. Takes `-ReleaseBinary` and `-Version`.                               |
 
-## How it gets built
+## How to build
 
-**Today:** it doesn't. There's no source.
-
-**Once implemented:**
+### Prerequisites
 
 ```powershell
-# From repo root, after cargo build -p agent --release
-./crates/agent/installer/wix/build.ps1 `
-  -ReleaseBinary target/release/cmtraceopen-agent.exe `
-  -Version 0.1.0
+dotnet tool install --global wix
+wix extension add WixToolset.Util.wixext
 ```
 
-CI invokes the same `build.ps1` from `.github/workflows/agent-msi.yml` (also
-designed but not yet implemented — see section 10 of the design doc).
+### Build unsigned MSI (local dev / pilot)
+
+```powershell
+# From repo root, after: cargo build -p agent --release --target x86_64-pc-windows-msvc
+./crates/agent/installer/wix/build.ps1 `
+  -ReleaseBinary target/x86_64-pc-windows-msvc/release/cmtraceopen-agent.exe `
+  -Version 0.1.0
+# Output: crates/agent/installer/wix/out/CMTraceOpenAgent-0.1.0.msi
+```
+
+### Build + sign MSI (CI / release)
+
+```powershell
+./crates/agent/installer/wix/build.ps1 `
+  -ReleaseBinary target/x86_64-pc-windows-msvc/release/cmtraceopen-agent.exe `
+  -Version 0.1.0 `
+  -SignCertThumbprint $env:SIGN_CERT_THUMBPRINT
+```
+
+CI invokes the same `build.ps1` from `.github/workflows/agent-msi.yml`.
+
+## Install / uninstall
+
+```powershell
+# Install silently, writing a full install log:
+msiexec /i CMTraceOpenAgent-0.1.0.msi /qn /l*v install.log
+
+# Upgrade in-place (new MSI, same UpgradeCode):
+msiexec /i CMTraceOpenAgent-0.2.0.msi /qn /l*v upgrade.log
+
+# Uninstall (keep %ProgramData% — config, queue, logs survive):
+msiexec /x {ProductCode} /qn
+
+# Uninstall + full purge of %ProgramData%:
+msiexec /x {ProductCode} KEEP_USER_DATA=0 /qn
+```
+
+## Key design decisions
+
+- **UpgradeCode is fixed forever:** `463FD20A-1029-448F-AE5B-F81C818861D0`.
+  Changing it would orphan existing installs.
+- **`config.toml` is never overwritten on upgrade** (`NeverOverwrite="yes"`,
+  `Permanent="yes"`). Operator edits survive. Delete the file + run MSI
+  repair to reset to defaults.
+- **`Queue/` and `logs/` are not deleted on uninstall** by default. Pass
+  `KEEP_USER_DATA=0` for a full purge.
+- **CertCheck.ps1 always exits 0** — a missing Cloud PKI cert is a warning
+  in the MSI log, not an install failure.
 
 ## What this directory does NOT own
 
-- **The Intune Cloud PKI cert profile.** That's deployed separately by
-  Intune; see [`docs/provisioning/03-intune-cloud-pki.md`](../../../../docs/provisioning/03-intune-cloud-pki.md).
-- **The Graph automation that pushes both MSI and cert profile to a device
-  group.** Separate Wave 4 deliverable, not yet scoped.
-- **Code-signing cert procurement.** See design doc §9 — open question.
+- **The Intune Cloud PKI cert profile.** Deployed separately by Intune; see
+  [`docs/provisioning/03-intune-cloud-pki.md`](../../../../docs/provisioning/03-intune-cloud-pki.md).
+- **The Graph automation** that pushes MSI + cert profile to a device group.
+  Separate Wave 4 deliverable.
+- **Code-signing cert procurement.** See design doc §9.
 
 ## Cross-references
 
 - Design spec: [`docs/wave4/01-msi-design.md`](../../../../docs/wave4/01-msi-design.md)
 - Agent crate: [`crates/agent/`](../../)
 - Cloud PKI runbook: [`docs/provisioning/03-intune-cloud-pki.md`](../../../../docs/provisioning/03-intune-cloud-pki.md)
+- Signing design: [`docs/wave4/02a-sign-every-component.md`](../../../../docs/wave4/02a-sign-every-component.md)
