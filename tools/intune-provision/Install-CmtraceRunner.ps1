@@ -260,7 +260,16 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir 'config.cmd')) {
     if (-not $asset) { throw 'Could not find a win-x64 runner asset on the latest release.' }
     Write-Host "  Downloading $($asset.name) ..." -ForegroundColor Green
     $zipPath = Join-Path $InstallDir 'actions-runner.zip'
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+    # PS 5.1's Invoke-WebRequest progress UI is ~100x slower than raw
+    # throughput because it re-renders per buffer. Silence it for the
+    # duration of the download.
+    $savedProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+    } finally {
+        $ProgressPreference = $savedProgress
+    }
     Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
     Remove-Item $zipPath -Force
 }
