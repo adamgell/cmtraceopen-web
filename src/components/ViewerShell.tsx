@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import type { ParseResult } from "../lib/log-types";
 import { LocalMode } from "./LocalMode";
 import { ApiMode } from "./ApiMode";
+import { AuthSettings } from "./AuthSettings";
 
 type Mode = "local" | "api";
 
@@ -96,41 +97,42 @@ function TopBar({
       <div style={{ fontWeight: 600 }}>CMTrace Open — Web</div>
       <ModeToggle mode={mode} onChange={onModeChange} />
       {loaded && (
-        <>
-          <div style={{ color: "#555", fontSize: 13 }}>
-            <span style={{ fontWeight: 500 }}>{loaded.fileName}</span>
-            <span style={{ color: "#888", marginLeft: 12 }}>
-              {loaded.result.entries.length.toLocaleString()} entries
-              {" · "}
-              {loaded.result.totalLines.toLocaleString()} lines
-              {" · "}
-              <span
-                style={{
-                  color: loaded.result.parseErrors > 0 ? "#b91c1c" : "#888",
-                }}
-              >
-                {loaded.result.parseErrors} parse errors
-              </span>
-              {" · "}
-              format: {String(loaded.result.formatDetected)}
+        <div style={{ color: "#555", fontSize: 13 }}>
+          <span style={{ fontWeight: 500 }}>{loaded.fileName}</span>
+          <span style={{ color: "#888", marginLeft: 12 }}>
+            {loaded.result.entries.length.toLocaleString()} entries
+            {" · "}
+            {loaded.result.totalLines.toLocaleString()} lines
+            {" · "}
+            <span
+              style={{
+                color: loaded.result.parseErrors > 0 ? "#b91c1c" : "#888",
+              }}
+            >
+              {loaded.result.parseErrors} parse errors
             </span>
-          </div>
-          <div style={{ flex: 1 }} />
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              padding: "6px 12px",
-              fontSize: 13,
-              border: "1px solid #ccc",
-              background: "white",
-              borderRadius: 4,
-              cursor: "pointer",
-            }}
-          >
-            Close file
-          </button>
-        </>
+            {" · "}
+            format: {String(loaded.result.formatDetected)}
+          </span>
+        </div>
+      )}
+      <div style={{ flex: 1 }} />
+      <AuthSettings />
+      {loaded && (
+        <button
+          type="button"
+          onClick={onClose}
+          style={{
+            padding: "6px 12px",
+            fontSize: 13,
+            border: "1px solid #ccc",
+            background: "white",
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+        >
+          Close file
+        </button>
       )}
     </header>
   );
