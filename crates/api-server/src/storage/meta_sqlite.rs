@@ -143,6 +143,13 @@ impl MetadataStore for SqliteMetadataStore {
         }
     }
 
+    fn audit_store(&self) -> std::sync::Arc<dyn super::AuditStore> {
+        // Defer to the inherent constructor so tests that need the
+        // concrete `AuditSqliteStore` type keep compiling; the trait
+        // method just wraps it in an Arc<dyn _>.
+        std::sync::Arc::new(SqliteMetadataStore::audit_store(self))
+    }
+
     async fn upsert_device(
         &self,
         device_id: &str,

@@ -666,6 +666,17 @@ pub trait MetadataStore: Send + Sync + 'static {
         PoolStats::default()
     }
 
+    /// Build an [`AuditStore`] that shares this metadata store's connection
+    /// pool. Called once at startup in `main.rs` so the audit log writes go
+    /// through the same pool as metadata writes.
+    ///
+    /// The default impl returns a [`NoopAuditStore`] — backends that don't
+    /// have a real audit-log table (mocks, future in-memory stores) don't
+    /// need to override this. Production backends MUST override.
+    fn audit_store(&self) -> Arc<dyn AuditStore> {
+        Arc::new(NoopAuditStore)
+    }
+
     // ----- devices -----
 
     /// Upsert a device row: inserts on first-seen; updates `last_seen_utc`

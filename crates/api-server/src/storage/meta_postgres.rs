@@ -28,8 +28,8 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use super::{
-    DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile, NewUpload,
-    PoolStats, SessionRow, StorageError, UploadRow,
+    AuditStore, DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile,
+    NewUpload, PoolStats, SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the Postgres migration directory into the binary. Path is relative to
@@ -103,6 +103,21 @@ impl MetadataStore for PgMetadataStore {
             idle: u32::try_from(self.pool.num_idle()).unwrap_or(u32::MAX),
             max_size: POOL_MAX_CONNECTIONS,
         }
+    }
+
+    fn audit_store(&self) -> std::sync::Arc<dyn AuditStore> {
+        // The Postgres audit-log table isn't migrated yet — see issue #110
+        // and `migrations-pg/` (currently lacks an `audit_log` migration
+        // matching `migrations/0003_audit_log.sql`). A real PgAuditStore
+        // lands together with that migration; until then, panic loudly so
+        // an operator who selects the postgres backend without the audit
+        // table provisioned gets a clear "not yet implemented" rather than
+        // silent data loss from a NoopAuditStore.
+        unimplemented!(
+            "PgMetadataStore::audit_store: Postgres audit-log support not yet \
+             implemented (issue #110). Use the sqlite backend or wait for \
+             the audit_log migration in `migrations-pg/`."
+        )
     }
 
     async fn upsert_device(
