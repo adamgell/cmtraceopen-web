@@ -20,6 +20,7 @@
 pub mod collectors;
 pub mod config;
 pub mod queue;
+pub mod tls;
 pub mod uploader;
 
 /// Human-readable banner string, emitted at startup and handy in tests.

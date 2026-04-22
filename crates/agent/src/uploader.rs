@@ -28,6 +28,9 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::collectors::BundleMetadata;
+use crate::tls::{
+    build_client_config, install_default_crypto_provider, TlsClientOptions, TlsConfigError,
+};
 
 /// Chunk size the agent prefers. The server may override via the
 /// `chunkSize` field in `BundleInitResponse`; we honor whichever is
@@ -83,6 +86,12 @@ pub struct UploaderConfig {
     pub device_id: String,
     pub request_timeout: Duration,
     pub retry: RetryPolicy,
+    /// TLS knobs. Default = native roots, no client cert. Wave 3 mTLS
+    /// flips both `client_cert_pem` and `client_key_pem` on; today the
+    /// agent works either way (server-side mTLS isn't yet enforced).
+    /// `http://` URLs continue to work — rustls only kicks in for
+    /// `https://`.
+    pub tls: TlsClientOptions,
 }
 
 impl UploaderConfig {
@@ -92,7 +101,16 @@ impl UploaderConfig {
             device_id,
             request_timeout,
             retry: RetryPolicy::default(),
+            tls: TlsClientOptions::default(),
         }
+    }
+
+    /// Builder-style override for the TLS configuration. Folded into
+    /// `with_*` rather than a public field set so call sites read
+    /// linearly: `UploaderConfig::new(..).with_tls(opts)`.
+    pub fn with_tls(mut self, tls: TlsClientOptions) -> Self {
+        self.tls = tls;
+        self
     }
 }
 
@@ -103,10 +121,23 @@ pub struct Uploader {
 
 impl Uploader {
     pub fn new(cfg: UploaderConfig) -> Result<Self, UploaderError> {
+        // Make sure aws-lc-rs is the rustls process default. Idempotent.
+        // Doing this here (rather than in `main`) keeps tests, the
+        // integration suite, and any future embedders consistent.
+        install_default_crypto_provider();
+
+        let tls_config = build_client_config(&cfg.tls).map_err(UploaderError::Tls)?;
+
         // `reqwest::Client` is cheap to clone internally; build once and
         // reuse across bundles.
         let client = Client::builder()
             .timeout(cfg.request_timeout)
+            // Hand reqwest the pre-built rustls ClientConfig. This
+            // path is active for `https://` URLs only — `http://`
+            // endpoints still work over plaintext, so the integration
+            // test (which talks to a loopback axum server) doesn't
+            // need a TLS terminator.
+            .use_preconfigured_tls(tls_config)
             // Don't follow redirects on upload POSTs — a misconfigured
             // proxy bouncing a multi-MiB PUT is a surefire way to lose
             // bytes silently. The server handshake is direct.
@@ -322,6 +353,9 @@ pub enum UploaderError {
     #[error("reqwest client build error: {0}")]
     Client(#[source] reqwest::Error),
 
+    #[error("TLS config error: {0}")]
+    Tls(#[source] TlsConfigError),
+
     #[error("network error: {0}")]
     Network(#[source] reqwest::Error),
 
@@ -388,6 +422,7 @@ mod tests {
                     Duration::from_secs(30),
                 ],
             },
+            tls: TlsClientOptions::default(),
         };
         let u = Uploader::with_client(client, cfg);
 
@@ -419,6 +454,7 @@ mod tests {
             device_id: "WIN-TEST".into(),
             request_timeout: Duration::from_secs(1),
             retry: RetryPolicy::default(),
+            tls: TlsClientOptions::default(),
         };
         let u = Uploader::with_client(client, cfg);
 
@@ -450,6 +486,7 @@ mod tests {
             device_id: "WIN-TEST".into(),
             request_timeout: Duration::from_secs(1),
             retry: RetryPolicy::default(),
+            tls: TlsClientOptions::default(),
         };
         let u = Uploader::with_client(client, cfg);
 
@@ -487,6 +524,40 @@ mod tests {
         assert_eq!(p.delay_for(99), Duration::from_secs(30));
         // Zero-attempt is ZERO (edge-case).
         assert_eq!(p.delay_for(0), Duration::ZERO);
+    }
+
+    /// `Uploader::new` should succeed against the default TLS options
+    /// (native roots, no client cert). This also exercises the
+    /// `install_default_crypto_provider` idempotent guard — running
+    /// the test suite invokes it many times, which would panic if the
+    /// guard weren't there.
+    #[test]
+    fn new_builds_with_default_tls() {
+        let cfg = UploaderConfig::new(
+            "http://unused".into(),
+            "WIN-TEST".into(),
+            Duration::from_secs(1),
+        );
+        let _u = Uploader::new(cfg).expect("uploader builds with default TLS");
+    }
+
+    /// `Uploader::new` should surface a TLS config error (rather than
+    /// panicking) when client-cert paths are half-set.
+    #[test]
+    fn new_surfaces_tls_config_error() {
+        use std::path::PathBuf;
+        let cfg = UploaderConfig::new(
+            "http://unused".into(),
+            "WIN-TEST".into(),
+            Duration::from_secs(1),
+        )
+        .with_tls(TlsClientOptions {
+            client_cert_pem: Some(PathBuf::from("/tmp/half-set.crt")),
+            client_key_pem: None,
+            ca_bundle_pem: None,
+        });
+        let err = Uploader::new(cfg).expect_err("half-set client auth must error");
+        assert!(matches!(err, UploaderError::Tls(TlsConfigError::PartialClientAuth)));
     }
 
     #[test]
