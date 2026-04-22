@@ -825,6 +825,78 @@ impl MetadataStore for SqliteMetadataStore {
         }
         Ok(out)
     }
+
+    async fn sessions_older_than(
+        &self,
+        ttl_days: u32,
+        batch_size: u32,
+    ) -> Result<Vec<(Uuid, String)>, StorageError> {
+        // SQLite's `datetime('now', '-N days')` does the cutoff math
+        // server-side so the call site doesn't have to format an
+        // RFC-3339 timestamp. The `-N days` modifier is dialect-specific
+        // (Postgres uses `now() - interval 'N days'`); when the Postgres
+        // backend lands it'll need its own implementation but the trait
+        // shape stays the same.
+        //
+        // ORDER BY ingested_utc ASC pages oldest-first so a backlog
+        // shrinks in chronological order — operators reading the sweeper
+        // logs see the cutoff move forward rather than jumping around.
+        let modifier = format!("-{ttl_days} days");
+        let limit_i = batch_size as i64;
+        let rows = sqlx::query(
+            r#"
+            SELECT session_id, blob_uri
+            FROM sessions
+            WHERE ingested_utc < datetime('now', ?)
+            ORDER BY ingested_utc ASC
+            LIMIT ?
+            "#,
+        )
+        .bind(&modifier)
+        .bind(limit_i)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let sid = parse_uuid(&r.get::<String, _>("session_id"))?;
+            let uri = r.get::<String, _>("blob_uri");
+            out.push((sid, uri));
+        }
+        Ok(out)
+    }
+
+    async fn delete_session(&self, session_id: Uuid) -> Result<u64, StorageError> {
+        // One transaction wraps the entries + files + session deletes so a
+        // crash mid-cascade leaves the row tree consistent: either every
+        // child row is gone (and the session row with it) or nothing
+        // changed. The migration schema doesn't define ON DELETE CASCADE
+        // (FK columns omit `REFERENCES ... ON DELETE CASCADE`), so we
+        // walk the children explicitly. Children are deleted first to
+        // satisfy the FK from `entries.file_id -> files.file_id` and
+        // `files.session_id -> sessions.session_id`.
+        let session_str = session_id.to_string();
+        let mut tx = self.pool.begin().await?;
+
+        let entries_res = sqlx::query("DELETE FROM entries WHERE session_id = ?")
+            .bind(&session_str)
+            .execute(&mut *tx)
+            .await?;
+        let entries_deleted = entries_res.rows_affected();
+
+        sqlx::query("DELETE FROM files WHERE session_id = ?")
+            .bind(&session_str)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("DELETE FROM sessions WHERE session_id = ?")
+            .bind(&session_str)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(entries_deleted)
+    }
 }
 
 #[cfg(test)]

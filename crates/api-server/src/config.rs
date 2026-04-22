@@ -157,6 +157,33 @@ pub struct Config {
     /// `CMTRACE_AZURE_USE_MANAGED_IDENTITY`. Default `false`. Required-true
     /// in prod; mutually exclusive with `blob_azure_account_key`.
     pub blob_azure_use_managed_identity: bool,
+
+    /// Bundle retention window in days. Env: `CMTRACE_BUNDLE_TTL_DAYS`.
+    /// Default `90`, matching the
+    /// [Day-2 ops runbook §7](../../../docs/wave4/04-day2-operations.md)
+    /// blob retention guidance.
+    ///
+    /// Set to `0` to disable the server-side sweeper entirely (the
+    /// retention loop spawns but exits the moment it sees TTL=0). For
+    /// Azure deployments operators may prefer to keep this at the default
+    /// AND configure an Azure Blob lifecycle policy alongside it — the
+    /// sweeper handles metadata cleanup, the lifecycle policy handles
+    /// cheap cool/archive tiering.
+    pub bundle_ttl_days: u32,
+
+    /// Sweeper scan interval in seconds. Env:
+    /// `CMTRACE_RETENTION_SCAN_INTERVAL_SECS`, default `21600` (6 hours).
+    /// Tighten in tests; loosen in deployments where the row volume is
+    /// low and a 6-hour delay-to-cleanup is fine.
+    pub retention_scan_interval_secs: u64,
+
+    /// Maximum number of sessions purged per scan. Env:
+    /// `CMTRACE_RETENTION_BATCH_SIZE`, default `100`. Caps the first scan
+    /// after enabling retention on a deployment with a large backlog so
+    /// the sweep doesn't lock the sessions table for minutes — the sweep
+    /// loop just runs again on its next tick and chips away at the
+    /// backlog batch by batch.
+    pub retention_batch_size: u32,
 }
 
 /// TLS-termination + mTLS client-cert verification. Populated from
@@ -275,6 +302,15 @@ pub enum ConfigError {
          `azure` cargo feature; rebuild with `--features azure` (the default)"
     )]
     AzureFeatureMissing,
+
+    #[error("invalid CMTRACE_BUNDLE_TTL_DAYS: {0} (expected non-negative integer; 0 disables sweep)")]
+    InvalidBundleTtlDays(String),
+
+    #[error("invalid CMTRACE_RETENTION_SCAN_INTERVAL_SECS: {0} (expected positive integer)")]
+    InvalidRetentionScanInterval(String),
+
+    #[error("invalid CMTRACE_RETENTION_BATCH_SIZE: {0} (expected positive integer)")]
+    InvalidRetentionBatchSize(String),
 }
 
 impl Config {
@@ -397,6 +433,31 @@ impl Config {
             }
         }
 
+        let bundle_ttl_days = match env::var("CMTRACE_BUNDLE_TTL_DAYS") {
+            Ok(v) => v
+                .parse::<u32>()
+                .map_err(|_| ConfigError::InvalidBundleTtlDays(v))?,
+            Err(_) => 90,
+        };
+
+        let retention_scan_interval_secs = match env::var("CMTRACE_RETENTION_SCAN_INTERVAL_SECS") {
+            Ok(v) => v
+                .parse::<u64>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or(ConfigError::InvalidRetentionScanInterval(v))?,
+            Err(_) => 21_600,
+        };
+
+        let retention_batch_size = match env::var("CMTRACE_RETENTION_BATCH_SIZE") {
+            Ok(v) => v
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or(ConfigError::InvalidRetentionBatchSize(v))?,
+            Err(_) => 100,
+        };
+
         Ok(Self {
             listen_addr,
             data_dir,
@@ -414,6 +475,9 @@ impl Config {
             blob_azure_container,
             blob_azure_account_key,
             blob_azure_use_managed_identity,
+            bundle_ttl_days,
+            retention_scan_interval_secs,
+            retention_batch_size,
         })
     }
 }
