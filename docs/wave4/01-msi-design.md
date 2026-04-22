@@ -37,9 +37,10 @@ delivery is the Cloud PKI cert-profile's job; the MSI assumes it is already
 in `LocalMachine\My` (or will arrive on the next Intune sync). See section 6
 for the soft-warn-on-missing custom action.
 
-The MSI is signed with an Authenticode code-signing cert. The signed binary
-inside is also signed. See section 9 for the signing strategy and the
-known gap (no cert today).
+The MSI is signed with an Authenticode code-signing cert minted by Intune
+Cloud PKI; the EXE inside is also signed with the same cert. See section 9
+for the signing strategy and [`02-code-signing.md`](02-code-signing.md)
+for the build-VM + self-hosted runner shape.
 
 ---
 
@@ -439,45 +440,32 @@ component removal.
 
 ## 9. Code signing strategy
 
-Two artifacts need signing:
+**Path: Intune Cloud PKI + self-hosted runner.**
 
-1. The `cmtraceopen-agent.exe` binary inside the MSI.
-2. The `CMTraceOpenAgent.msi` file itself.
+The Cloud PKI infrastructure is already deployed (per
+[`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)
+and [`reference_cloud_pki.md`](#)); the root chain is already trusted in
+`LocalMachine\Root` on every Intune-managed device. A new Cloud PKI cert
+profile with `codeSigning` EKU, assigned to a one-member group containing
+a build VM, gives us a code-signing cert without procurement, Identity
+Verification wait, or per-signature cost. The build VM hosts a GitHub
+Actions self-hosted runner; `agent-msi.yml` runs there and calls
+`signtool sign /a /fd sha256 /tr <ts>` against the cert in
+`LocalMachine\My`.
 
-Both signed with the same Authenticode code-signing cert.
+Cloud PKI keys are HSM-backed and non-exportable — same security
+property as Azure Trusted Signing (different HSM, same outcome). Because
+the key cannot be moved into Azure Key Vault, signing must happen
+in-place on the machine that holds the cert; that's why the build runs
+on a self-hosted runner rather than `windows-latest`.
 
-### The gap
+See [`docs/wave4/02-code-signing.md`](02-code-signing.md) for the full
+setup (cert profile, Entra group, build VM, runner registration,
+workflow contract, verification, trust scope) and the demoted Azure
+Trusted Signing path for future broader-release outside Intune-managed
+devices.
 
-**We do not have a code-signing cert today.** The MSI design assumes one
-will be acquired before the first signed release. Until then the MSI can
-ship unsigned (Intune Win32 LOB doesn't strictly require a signed MSI), but
-operators will see SmartScreen "unrecognized publisher" warnings and the
-binary will be more likely to trip Defender heuristic detections.
-
-### Modern path — Azure Trusted Signing (recommended)
-
-- <https://learn.microsoft.com/azure/trusted-signing/>
-- Cert lives in Azure, never on a build agent's disk. Signing is a Graph /
-  REST call; signtool integrates via `Azure.CodeSigning.Dlib`.
-- ~$10/month per identity — far cheaper than EV certs from traditional CAs.
-- Reputation is shared across all Trusted Signing customers, so SmartScreen
-  trust accrues faster than for a brand-new private cert.
-- Identity validation is one-time per Microsoft Partner Center org —
-  similar to Apple Developer ID enrollment.
-
-### Legacy path — DigiCert / GlobalSign EV cert
-
-- ~$300–700/year, hardware token (USB HSM) required.
-- Faster SmartScreen trust accrual than non-EV (EV gets immediate
-  reputation), but token-on-build-agent is a CI nightmare. Workarounds
-  exist (DigiCert KeyLocker, GlobalSign Atlas) but they cost extra and
-  rebuild the Trusted-Signing model less elegantly.
-
-**Recommendation:** Trusted Signing. If procurement blocks Azure
-subscription bumps, fallback is to ship unsigned during pilot and acquire
-a DigiCert EV cert before GA.
-
-### Why sign the MSI when Intune doesn't require it
+### Why sign the MSI when Intune doesn't strictly require it
 
 - SmartScreen: a signed MSI from a trusted publisher gets immediate "open"
   in the SmartScreen prompt; unsigned gets the scary red dialog.
@@ -489,23 +477,36 @@ a DigiCert EV cert before GA.
 - Defender ASR rules sometimes block unsigned MSIs from running under
   service contexts; signing avoids the gotcha.
 
-### What goes in `build.ps1`
+### What goes at the end of `agent-msi.yml`'s build job
 
-```powershell
-# Build the MSI.
-wix build -arch x64 -out "$OutDir\CMTraceOpenAgent-$Version.msi" `
-  -d ReleaseBinary="$ReleaseBinary" -d Version="$Version" `
-  Variables.wxi Product.wxs Files.wxs Service.wxs Config.wxs
+```yaml
+- name: Sign MSI
+  shell: pwsh
+  run: |
+    & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" sign `
+      /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+      /d "CMTraceOpen Agent" `
+      .\dist\CMTraceOpenAgent.msi
 
-# Sign it (only if a thumbprint was provided).
-if ($SignCertThumbprint) {
-  & signtool sign /sha1 $SignCertThumbprint /tr http://timestamp.digicert.com `
-    /td sha256 /fd sha256 /a "$OutDir\CMTraceOpenAgent-$Version.msi"
-}
+- name: Verify chain
+  shell: pwsh
+  run: |
+    & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" verify `
+      /pa /v /all .\dist\CMTraceOpenAgent.msi
 ```
 
-(The exe inside the MSI gets signed earlier in CI, before WiX picks it up
-— see section 10.)
+The `/a` flag lets signtool auto-pick the only code-signing cert in
+`LocalMachine\My` — the strict EKU on the cert profile (Code Signing
+only, no Client Authentication) guarantees a single candidate so no
+`/n` filter is needed. The `/d` flag stamps the user-visible
+description in UAC prompts. The `/tr` server is digicert.com's free
+RFC 3161 timestamp service — needed so the signature stays valid past
+cert expiry. The verify step fails the workflow loudly if the chain
+ever breaks (botched cert renewal, expired root, etc.).
+
+The exe inside the MSI gets signed earlier in CI by the same
+self-hosted runner, before WiX picks it up — see section 10. Both the
+EXE and the MSI sign with the same Cloud PKI cert.
 
 ---
 
@@ -527,19 +528,19 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: [self-hosted, windows, cmtrace-build]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.90
       - name: Build agent (release)
         run: cargo build -p agent --release --target x86_64-pc-windows-msvc
       - name: Sign agent EXE
-        if: ${{ secrets.AZURE_TRUSTED_SIGNING_CONFIG != '' }}
+        shell: pwsh
         run: |
-          # signtool with Azure Trusted Signing dlib — see ts docs.
-          # Skipped on PR builds (secrets aren't exposed); skipped until cert exists.
-        env:
-          AZURE_CONFIG: ${{ secrets.AZURE_TRUSTED_SIGNING_CONFIG }}
+          & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" sign `
+            /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+            /d "CMTraceOpen Agent" `
+            target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe
       - name: Install WiX v4
         run: dotnet tool install --global wix
       - name: Build MSI
@@ -552,8 +553,19 @@ jobs:
             -ReleaseBinary target/x86_64-pc-windows-msvc/release/cmtraceopen-agent.exe `
             -Version $version
       - name: Sign MSI
-        if: ${{ secrets.AZURE_TRUSTED_SIGNING_CONFIG != '' }}
-        run: ./crates/agent/installer/wix/build.ps1 -SignOnly -Version $version
+        shell: pwsh
+        run: |
+          & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" sign `
+            /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
+            /d "CMTraceOpen Agent" `
+            out\CMTraceOpenAgent-$env:VERSION.msi
+        env:
+          VERSION: ${{ steps.set-version.outputs.version }}
+      - name: Verify chain
+        shell: pwsh
+        run: |
+          & "$env:WINDOWSSDKPATH\bin\10.0.22621.0\x64\signtool.exe" verify `
+            /pa /v /all out\CMTraceOpenAgent-$env:VERSION.msi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -570,9 +582,12 @@ Trigger contract: `git tag agent-v0.1.0 && git push --tags`. The
 api-server has its own release tag namespace (`api-v*`); agent uses
 `agent-v*` to keep the two trains independent.
 
-Until the signing cert is procured, the workflow runs the unsigned path
-and uploads an unsigned MSI as the release artifact. That's fine for
-internal pilot but should not ship to external operators.
+The job runs on the `cmtrace-build` self-hosted runner — the build VM
+that holds the Cloud PKI code-signing cert. Signing is a local
+syscall against `LocalMachine\My`; no Azure secrets, no OIDC. PR
+builds skip this workflow entirely (it triggers on tags), so forks
+can't reach the runner. See [`02-code-signing.md`](02-code-signing.md)
+§4 and §5 for the runner provisioning and signing-step contract.
 
 ---
 
@@ -623,10 +638,12 @@ could bump `Revision` instead of `Patch` to keep semver clean.
 
 ## 12. Open questions (decide before implementation)
 
-1. **Code-signing cert source.** Azure Trusted Signing (recommended) vs
-   DigiCert/GlobalSign EV cert vs ship unsigned for pilot? Procurement
-   path matters; Trusted Signing requires an Azure subscription bump and
-   Microsoft Partner Center identity verification.
+1. **Code-signing cert source.** *Resolved* — Intune Cloud PKI + a
+   self-hosted runner on a single Intune-enrolled build VM. See
+   [`02-code-signing.md`](02-code-signing.md) for the full path. The
+   four sub-questions still open there (build-VM hosting, runner label
+   convention, IaC for the VM, timestamp server) are §4-step-4 picks,
+   not blockers on this MSI design.
 
 2. **Custom action language.** PowerShell (`CertCheck.ps1`, easy, may
    trip AV) vs C# DTF (`CertCheck.dll`, more robust, extra build step)
@@ -661,8 +678,10 @@ could bump `Revision` instead of `Patch` to keep semver clean.
 
 Per the open questions above, the implementation PR is blocked on:
 
-- (Required) Question 1: signing strategy. Even an "unsigned for pilot"
-  decision unblocks; it's the lack of a decision that blocks.
+- (Resolved) Question 1: signing strategy is Intune Cloud PKI + a
+  self-hosted runner. Build-VM provisioning per
+  [`02-code-signing.md`](02-code-signing.md) §4 runs in parallel with
+  the WiX source work below.
 - (Required) Question 2: PS vs DTF. Either works; pick one before the WiX
   source goes in.
 - (Required) Question 5: confirm the agent's service dispatcher work
