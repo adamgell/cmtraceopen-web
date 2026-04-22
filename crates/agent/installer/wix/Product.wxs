@@ -71,7 +71,9 @@
       KEEP_USER_DATA=0 is passed on uninstall.
       Default is empty so RemoveFolderEx does nothing; set conditionally below.
     -->
-    <Property Id="CMTRACE_PROGRAMDATA" Value="" />
+    <!-- WiX v4 rejects Value="" on Property; omitting @Value yields an
+         unset/empty property, which is what we want as the default. -->
+    <Property Id="CMTRACE_PROGRAMDATA" />
 
     <!--
       Minimum OS: Windows 10 or later (VersionNT >= 1000 in the MSI property
@@ -126,13 +128,13 @@
       When KEEP_USER_DATA=1 (the default), this property stays empty and
       RemoveFolderEx does nothing, preserving operator config and the queue.
     -->
+    <!-- WiX v4 moved conditions off inner text onto the @Condition attribute. -->
     <SetProperty
         Id="CMTRACE_PROGRAMDATA"
         Value="[CommonAppDataFolder]$(var.ProgramDataDir)"
         Before="WixRemoveFoldersEx"
-        Sequence="execute">
-      KEEP_USER_DATA = "0" AND REMOVE = "ALL"
-    </SetProperty>
+        Sequence="execute"
+        Condition='KEEP_USER_DATA = "0" AND REMOVE = "ALL"' />
 
     <InstallExecuteSequence>
       <!-- Run the cert check after files are laid down, before services start. -->
