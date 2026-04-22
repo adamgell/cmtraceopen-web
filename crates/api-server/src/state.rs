@@ -262,7 +262,13 @@ impl AppState {
 
     /// Full constructor including CRL cache and an explicit [`AuditStore`].
     /// Used by `main.rs` in production.
+    ///
+    /// Eight positional args is one over clippy's `too-many-arguments`
+    /// threshold. Refactoring to a builder would touch every call site
+    /// for a constructor only `main.rs` actually uses; silencing the
+    /// lint locally is the lower-cost choice.
     #[cfg(feature = "crl")]
+    #[allow(clippy::too_many_arguments)]
     pub fn with_cors_crl_and_audit(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
