@@ -371,6 +371,10 @@ pub fn merge_override(base: &AgentConfig, over: &AgentConfigOverride) -> AgentCo
         // Redaction config is server-config but not push-overridable in v1;
         // tracked under `docs/wave4/14-redaction.md`. Take from base.
         redaction: base.redaction.clone(),
+        // Collection scheduler config (interval/cron/jitter) is not
+        // push-overridable in v1 — operators tune via local config.toml or
+        // a future scheduler-specific override path.
+        collection: base.collection.clone(),
     }
 }
 
