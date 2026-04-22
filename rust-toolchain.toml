@@ -9,3 +9,10 @@
 channel = "1.90"
 profile = "minimal"
 components = ["clippy", "rustfmt"]
+# WASM target needed for cmtrace-wasm. Listed here so rustup installs it
+# automatically when honoring this file (CI, fresh dev VMs, Docker builds).
+# Without this, CI's `cargo check --target wasm32-unknown-unknown` fails
+# even though `dtolnay/rust-toolchain` was asked to add the target —
+# that step adds it for the version it installed, but rust-toolchain.toml
+# forces a different channel that doesn't have the target.
+targets = ["wasm32-unknown-unknown"]

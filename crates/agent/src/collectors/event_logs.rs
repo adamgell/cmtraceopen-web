@@ -21,6 +21,10 @@ pub const DEFAULT_CHANNELS: &[&str] = &[
 ];
 
 pub struct EventLogsCollector {
+    // Read only by the Windows `collect()` impl below. The Linux stub
+    // ignores `self`, so without this attribute the workspace clippy job
+    // (`-D warnings`) trips on dead-code.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     channels: Vec<String>,
 }
 
@@ -137,8 +141,10 @@ mod tests {
     }
 
     #[test]
-    fn default_channels_nonempty() {
-        assert!(!DEFAULT_CHANNELS.is_empty());
+    fn default_channels_include_application() {
+        // Asserting `!DEFAULT_CHANNELS.is_empty()` would trip
+        // clippy::const_is_empty (the const is statically non-empty);
+        // checking for a known channel proves both shape and contents.
         assert!(DEFAULT_CHANNELS.contains(&"Application"));
     }
 }
