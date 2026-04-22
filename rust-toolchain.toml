@@ -1,0 +1,11 @@
+# Pin rustc across local dev VMs, CI runners, and Docker builders. When a
+# transitive dep needs a newer rustc (e.g. PR #29 pulled `jwt-simple` →
+# `aes-keywrap` → `unsigned_is_multiple_of` which stabilized in 1.90), bump
+# this single file rather than chasing version mismatches across three places.
+#
+# rustup honors this on `cargo` invocations and will auto-install the channel
+# if not present locally.
+[toolchain]
+channel = "1.90"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
