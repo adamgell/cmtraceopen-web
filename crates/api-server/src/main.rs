@@ -7,7 +7,7 @@ use api_server::auth::CrlCache;
 use api_server::config::Config;
 use api_server::router;
 use api_server::state::{install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig};
-use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
+use api_server::storage::{build_blob_store, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -61,6 +61,7 @@ async fn main() -> ExitCode {
         listen_addr = %config.listen_addr,
         data_dir = %config.data_dir.display(),
         sqlite_path = %config.sqlite_path,
+        blob_backend = ?config.blob_backend,
         cors_origins = ?config.allowed_origins,
         cors_credentials = config.allow_credentials,
         tls_enabled = config.tls.enabled,
@@ -83,10 +84,17 @@ async fn main() -> ExitCode {
         );
     }
 
-    let blobs = match LocalFsBlobStore::new(&config.data_dir).await {
-        Ok(b) => Arc::new(b),
+    // Pick the blob backend based on env. The factory hands back a
+    // trait-object Arc so this line is the only place that knows whether
+    // we're talking to local-FS, Azure, or (future) S3/GCS — adding a new
+    // backend doesn't touch main.rs.
+    let blobs = match build_blob_store(&config).await {
+        Ok(b) => b,
         Err(err) => {
-            eprintln!("fatal: failed to open blob store at {:?}: {err}", config.data_dir);
+            eprintln!(
+                "fatal: failed to initialize blob store ({:?}): {err}",
+                config.blob_backend
+            );
             return ExitCode::from(1);
         }
     };

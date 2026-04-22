@@ -1,69 +1,78 @@
-//! Local-filesystem [`BlobStore`] backed by two directories:
+//! Local-filesystem [`BlobStore`]. Backed by two directories under `<root>`:
 //!   - `<root>/staging/<upload_id>`  - in-progress uploads
 //!   - `<root>/blobs/<session_id>`   - finalized content-addressed blobs
 //!
-//! Uses tokio::fs so hot paths don't block the runtime. Hashing streams the
-//! file through sha2 to avoid loading multi-GB bundles into memory.
+//! ## Implementation note
+//!
+//! Historically this module hand-rolled `tokio::fs` calls. It now delegates
+//! to the shared [`ObjectStoreBlobStore`] adapter configured with
+//! `object_store::local::LocalFileSystem`, so the local-dev path and the
+//! cloud-backed paths share one production-tested code path. The
+//! hand-rolled layer is gone; `LocalFsBlobStore` is a thin constructor that
+//! wires the adapter up with the on-disk URI scheme (`file://<root>/blobs/…`)
+//! the rest of the server already persists in `sessions.blob_uri`.
+//!
+//! On-disk layout is preserved exactly so existing data directories migrate
+//! in-place — no schema or filesystem changes.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
+use object_store::local::LocalFileSystem;
+use object_store::ObjectStore;
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
+use super::blob_object_store::ObjectStoreBlobStore;
 use super::{BlobHandle, BlobStore, StorageError};
 
-/// Buffer size for streamed sha256 hashing over the staged file.
-const HASH_READ_BUF: usize = 1024 * 1024; // 1 MiB
-
-#[derive(Debug, Clone)]
+/// Local-filesystem blob store. Delegates to [`ObjectStoreBlobStore`] so the
+/// only real difference between `LocalFsBlobStore` and the Azure-backed
+/// constructor is which `object_store::ObjectStore` gets wrapped.
 pub struct LocalFsBlobStore {
-    root: PathBuf,
+    inner: ObjectStoreBlobStore,
 }
 
 impl LocalFsBlobStore {
     /// Build a store rooted at `root`. Creates `root/staging` and
-    /// `root/blobs` eagerly so first-request latency is predictable.
+    /// `root/blobs` eagerly so first-request latency is predictable and so
+    /// `LocalFileSystem::new_with_prefix` doesn't trip on a missing prefix.
     pub async fn new(root: impl Into<PathBuf>) -> Result<Self, StorageError> {
-        let root = root.into();
+        let root: PathBuf = root.into();
         fs::create_dir_all(root.join("staging")).await?;
         fs::create_dir_all(root.join("blobs")).await?;
-        Ok(Self { root })
-    }
 
-    fn staging_dir(&self) -> PathBuf {
-        self.root.join("staging")
-    }
+        let local = LocalFileSystem::new_with_prefix(&root)
+            .map_err(|e| StorageError::ObjectStore(e.to_string()))?;
+        let inner_store: Arc<dyn ObjectStore> = Arc::new(local);
 
-    fn blobs_dir(&self) -> PathBuf {
-        self.root.join("blobs")
-    }
+        // Emit `file://<root>/blobs/<session_id>` to stay wire-compatible
+        // with any `sessions.blob_uri` rows already committed by the
+        // pre-refactor impl. The old code wrote `file://<abs path>` on unix
+        // and `file:///<drive>:/…` on Windows; we normalize to forward
+        // slashes and strip a leading slash so the final string matches
+        // the historical format on both platforms.
+        let host = root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_string();
 
-    fn blob_path(&self, session_id: Uuid) -> PathBuf {
-        self.blobs_dir().join(session_id.to_string())
+        let inner =
+            ObjectStoreBlobStore::new(inner_store, root.join("staging"), "file", host).await?;
+        Ok(Self { inner })
     }
 }
 
 #[async_trait]
 impl BlobStore for LocalFsBlobStore {
     fn staging_path(&self, upload_id: Uuid) -> PathBuf {
-        self.staging_dir().join(upload_id.to_string())
+        self.inner.staging_path(upload_id)
     }
 
     async fn create_staging(&self, upload_id: Uuid) -> Result<(), StorageError> {
-        let path = self.staging_path(upload_id);
-        // Overwrite any stale file from a crashed prior attempt; the metadata
-        // store is the source of truth for what's in-flight.
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .await?;
-        f.flush().await?;
-        Ok(())
+        self.inner.create_staging(upload_id).await
     }
 
     async fn put_chunk(
@@ -72,17 +81,11 @@ impl BlobStore for LocalFsBlobStore {
         offset: u64,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        let path = self.staging_path(upload_id);
-        let mut f = fs::OpenOptions::new().write(true).open(&path).await?;
-        f.seek(std::io::SeekFrom::Start(offset)).await?;
-        f.write_all(bytes).await?;
-        f.flush().await?;
-        Ok(())
+        self.inner.put_chunk(upload_id, offset, bytes).await
     }
 
     async fn hash(&self, upload_id: Uuid) -> Result<String, StorageError> {
-        let path = self.staging_path(upload_id);
-        stream_sha256(&path).await
+        self.inner.hash(upload_id).await
     }
 
     async fn finalize(
@@ -90,60 +93,19 @@ impl BlobStore for LocalFsBlobStore {
         upload_id: Uuid,
         session_id: Uuid,
     ) -> Result<BlobHandle, StorageError> {
-        let src = self.staging_path(upload_id);
-        let dst = self.blob_path(session_id);
-
-        // Re-hash + size under the same FD so the reported values reflect the
-        // bytes we're about to move, not a racing writer.
-        let metadata = fs::metadata(&src).await?;
-        let size_bytes = metadata.len();
-        let sha256 = stream_sha256(&src).await?;
-
-        // tokio::fs::rename is cross-drive-unsafe on Windows; for MVP the
-        // staging + blobs dirs live under the same root so a rename is fine.
-        fs::rename(&src, &dst).await?;
-
-        let uri = path_to_file_uri(&dst);
-        Ok(BlobHandle {
-            uri,
-            size_bytes,
-            sha256,
-        })
+        self.inner.finalize(upload_id, session_id).await
     }
 
     async fn discard_staging(&self, upload_id: Uuid) -> Result<(), StorageError> {
-        let path = self.staging_path(upload_id);
-        match fs::remove_file(&path).await {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.into()),
-        }
+        self.inner.discard_staging(upload_id).await
     }
-}
 
-async fn stream_sha256(path: &Path) -> Result<String, StorageError> {
-    let mut f = fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; HASH_READ_BUF];
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
+    async fn head_blob(&self, uri: &str) -> Result<u64, StorageError> {
+        self.inner.head_blob(uri).await
     }
-    Ok(hex::encode(hasher.finalize()))
-}
 
-/// Minimal, cross-platform `file://` URI builder. Good enough for MVP:
-/// blob_uri is opaque to clients; we only need it to round-trip.
-fn path_to_file_uri(path: &Path) -> String {
-    // On Windows, tolerate backslashes; on unix it's already /-separated.
-    let s = path.to_string_lossy().replace('\\', "/");
-    if s.starts_with('/') {
-        format!("file://{s}")
-    } else {
-        format!("file:///{s}")
+    async fn read_blob(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
+        self.inner.read_blob(uri).await
     }
 }
 
@@ -173,6 +135,11 @@ mod tests {
         let handle = store.finalize(upload_id, session_id).await.unwrap();
         assert_eq!(handle.size_bytes, 11);
         assert!(handle.uri.starts_with("file://"));
+
+        // Ensure the URI we emit is readable back through the trait — this
+        // is the invariant the parse worker relies on.
+        let bytes = store.read_blob(&handle.uri).await.unwrap();
+        assert_eq!(bytes, b"hello world");
     }
 
     #[tokio::test]
