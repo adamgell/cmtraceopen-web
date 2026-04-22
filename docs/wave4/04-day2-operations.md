@@ -865,6 +865,21 @@ rebuildable on the device.
 4. Open a bug for the regression, pin the bad version out of the
    release pipeline.
 
+### 5.4 DR rehearsal cadence
+
+These procedures only work when needed if they are practiced. A
+**quarterly rehearsal programme** rotates through the above scenarios
+so every failure mode is exercised at least once per year.
+
+See [`20-dr-rehearsal.md`](20-dr-rehearsal.md) for:
+
+- Quarterly drill schedule (second Tuesday of Jan / Apr / Jul / Oct)
+- Step-by-step drill scripts for each scenario
+- Post-mortem template
+- Append-only results log: [`dr-rehearsal-history.md`](dr-rehearsal-history.md)
+
+**First scheduled drill:** 2026-01-13 — Q1 full server loss.
+
 ---
 
 ## 6. Observability stack
