@@ -29,6 +29,7 @@ use crate::collectors::evidence::EvidenceOrchestrator;
 use crate::collectors::logs::LogsCollector;
 use crate::config::AgentConfig;
 use crate::queue::{Queue, QueueState};
+use crate::redact::Redactor;
 use crate::tls::TlsClientOptions;
 use crate::uploader::{Uploader, UploaderConfig};
 
@@ -73,11 +74,18 @@ pub async fn build_components(
         .unwrap_or_else(|| PathBuf::from("./work"));
     tokio::fs::create_dir_all(&work_root).await?;
 
+    // Build the redactor; a misconfigured regex is a fatal startup error so
+    // the operator is alerted immediately rather than silently shipping PII.
+    let redactor = Redactor::from_config(config).unwrap_or_else(|e| {
+        warn!(error = %e, "redaction rule failed to compile; falling back to no-op");
+        Redactor::noop()
+    });
     let orchestrator = EvidenceOrchestrator::new(
         LogsCollector::new(config.log_paths.clone()),
         EventLogsCollector::with_defaults(),
         DsRegCmdCollector::new(),
         work_root.clone(),
+        redactor,
     );
     let uploader = Uploader::new(
         UploaderConfig::new(

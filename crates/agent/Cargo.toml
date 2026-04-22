@@ -78,6 +78,7 @@ hex = "0.4"
 uuid = { version = "1", features = ["serde", "v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 async-trait = "0.1"
+regex = "1"
 
 [dev-dependencies]
 # Drive an in-process api-server during integration tests. Match the
@@ -95,3 +96,11 @@ axum = "0.8"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_EventLog", "Win32_System_SystemInformation"] }
+
+[features]
+# Enable the agent-side redaction layer and its integration tests.
+# Without this feature the redaction config types are still present (so TOML
+# round-trips work), but the Redactor regex engine is always compiled in as
+# regex is a hard dependency. The feature flag exists so the integration test
+# suite can be clearly opted-in via `cargo test --features redaction`.
+redaction = []

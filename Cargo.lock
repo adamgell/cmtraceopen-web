@@ -75,6 +75,7 @@ dependencies = [
  "common-wire",
  "glob",
  "hex",
+ "regex",
  "reqwest",
  "rustls",
  "rustls-native-certs",

@@ -32,6 +32,7 @@ use super::{
     dsregcmd::DsRegCmdCollector, event_logs::EventLogsCollector, logs::LogsCollector, BundleMetadata,
     Collector, CollectorManifest,
 };
+use crate::redact::Redactor;
 
 /// Output of a full evidence pass. The caller (typically the main loop)
 /// enqueues `(metadata, zip_path)` on the upload queue.
@@ -53,6 +54,9 @@ pub struct EvidenceOrchestrator {
     /// will be created. Typically `%ProgramData%\CMTraceOpen\Agent\work`
     /// in production; tempdir in tests.
     work_root: PathBuf,
+    /// PII-redaction engine. Applied to every text file in the staging
+    /// directory before zipping. Binary files (.evtx) are skipped.
+    redactor: Redactor,
 }
 
 impl EvidenceOrchestrator {
@@ -61,12 +65,14 @@ impl EvidenceOrchestrator {
         event_logs: EventLogsCollector,
         dsregcmd: DsRegCmdCollector,
         work_root: PathBuf,
+        redactor: Redactor,
     ) -> Self {
         Self {
             logs,
             event_logs,
             dsregcmd,
             work_root,
+            redactor,
         }
     }
 
@@ -115,6 +121,13 @@ impl EvidenceOrchestrator {
         .expect("manifest serialization");
         tokio::fs::write(&manifest_path, &manifest_bytes).await?;
 
+        // Apply PII redaction to all text files in the staging dir before
+        // zipping. Binary collectors (.evtx, .reg) are skipped. The
+        // redactor is a no-op when `config.redaction.enabled = false`.
+        if !self.redactor.is_noop() {
+            self.redact_staging_dir(&staging).await?;
+        }
+
         // Zip the whole staging dir into a sibling file. We hand the
         // actual zip work off to a blocking task — the `zip` crate is
         // synchronous and CPU + syscall heavy, so running it on the
@@ -145,6 +158,54 @@ impl EvidenceOrchestrator {
             zip_path,
             staging_dir: staging,
         })
+    }
+
+    /// Walk every file in `dir` and apply PII redaction to text files
+    /// in-place. Files with extensions `.evtx` or `.reg` are skipped
+    /// (binary — redacting them requires a parse-extract-redact-reserialize
+    /// pipeline deferred to v2). Non-UTF-8 files are skipped with a warning.
+    async fn redact_staging_dir(&self, dir: &Path) -> Result<(), EvidenceError> {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let mut entries = tokio::fs::read_dir(&current).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let meta = entry.file_type().await?;
+                if meta.is_dir() {
+                    stack.push(path);
+                } else if meta.is_file() {
+                    let ext = path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.to_ascii_lowercase());
+                    // Skip known binary formats.
+                    if matches!(ext.as_deref(), Some("evtx") | Some("reg")) {
+                        continue;
+                    }
+                    let raw = match tokio::fs::read(&path).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            warn!(path = %path.display(), error = %e, "redact: read failed, skipping");
+                            continue;
+                        }
+                    };
+                    let text = match std::str::from_utf8(&raw) {
+                        Ok(s) => s,
+                        Err(_) => {
+                            // Binary or non-UTF-8 content — skip silently.
+                            continue;
+                        }
+                    };
+                    let redacted = self.redactor.apply(text);
+                    if let std::borrow::Cow::Owned(out) = redacted {
+                        if let Err(e) = tokio::fs::write(&path, out.as_bytes()).await {
+                            warn!(path = %path.display(), error = %e, "redact: write failed");
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -207,6 +268,7 @@ pub enum EvidenceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redact::Redactor;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -230,6 +292,7 @@ mod tests {
             EventLogsCollector::with_defaults(),
             DsRegCmdCollector::new(),
             work.path().to_path_buf(),
+            Redactor::noop(),
         );
 
         let bundle = orch.collect_once().await.expect("collect");
