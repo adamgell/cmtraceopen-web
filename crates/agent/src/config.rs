@@ -142,6 +142,8 @@ pub struct AgentConfig {
     /// **Deprecated** — use `[collection.schedule]` instead. This field is
     /// kept for backward-compatibility and is ignored when `collection` is
     /// explicitly configured.
+    #[deprecated(note = "Use `[collection.schedule]` in the config file or \
+        CMTRACE_SCHEDULE_* env vars instead.")]
     pub evidence_schedule: String,
 
     /// Collection scheduler configuration (`[collection.schedule]` table).
@@ -210,6 +212,7 @@ fn default_log_paths() -> Vec<String> {
 }
 
 impl Default for AgentConfig {
+    #[allow(deprecated)] // setting the deprecated field in its own Default impl
     fn default() -> Self {
         Self {
             api_endpoint: String::from("https://api.corp.example.com"),
@@ -288,7 +291,10 @@ impl AgentConfig {
             }
         }
         if let Ok(v) = std::env::var("CMTRACE_EVIDENCE_SCHEDULE") {
-            cfg.evidence_schedule = v;
+            #[allow(deprecated)]
+            {
+                cfg.evidence_schedule = v;
+            }
         }
         if let Ok(v) = std::env::var("CMTRACE_SCHEDULE_MODE") {
             match v.to_lowercase().as_str() {
@@ -390,6 +396,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn defaults_are_sensible() {
         let cfg = AgentConfig::default();
         assert_eq!(cfg.request_timeout_secs, 60);
@@ -411,6 +418,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn resolved_device_id_prefers_explicit() {
         let cfg = AgentConfig {
             device_id: "WIN-UNIT-01".into(),

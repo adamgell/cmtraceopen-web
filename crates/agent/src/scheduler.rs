@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use chrono::Local;
-use croner::parser::CronParser;
+use croner::parser::{CronParser, Seconds};
 use rand::Rng;
 use tokio::sync::mpsc;
 use tokio::time::{sleep_until, Instant};
@@ -30,6 +30,20 @@ use tracing::{info, warn};
 use crate::collectors::evidence::EvidenceOrchestrator;
 use crate::config::{ScheduleConfig, ScheduleMode};
 use crate::queue::Queue;
+
+// ---------------------------------------------------------------------------
+// Metric names
+// ---------------------------------------------------------------------------
+
+/// Incremented every time a collection pass completes and the bundle is
+/// successfully enqueued. Pair with [`METRIC_FAILURES`] to compute the
+/// collection success rate.
+const METRIC_SUCCESSES: &str = "cmtrace_agent_collection_successes_total";
+
+/// Incremented every time `EvidenceOrchestrator::collect_once()` returns an
+/// error. Wire an alert on `rate(cmtrace_agent_collection_failures_total[1h])
+/// > 0` to get notified of persistent collection problems.
+const METRIC_FAILURES: &str = "cmtrace_agent_collection_failures_total";
 
 /// Drives periodic evidence collection according to the configured schedule.
 ///
@@ -110,7 +124,14 @@ impl CollectionScheduler {
         let jitter_minutes = self.config.jitter_minutes;
         info!(cron_expr, jitter_minutes, "scheduler mode=cron starting");
 
-        let parser = CronParser::new();
+        // The scheduler accepts **5-field** standard cron expressions only
+        // (minute hour dom month dow). Sub-hourly schedules are explicitly
+        // out of scope for v1 log collection (see issue). `Seconds::Disallowed`
+        // causes `croner` to reject any expression that includes a seconds
+        // field, making the contract clear at parse time.
+        let parser = CronParser::builder()
+            .seconds(Seconds::Disallowed)
+            .build();
         let schedule = match parser.parse(cron_expr) {
             Ok(s) => s,
             Err(e) => {
@@ -200,15 +221,21 @@ pub fn apply_jitter(base: Instant, jitter_minutes: u64) -> Instant {
     }
 }
 
-/// Run one collect-and-enqueue pass. Errors are logged — a transient
-/// collection failure must not tear the scheduler loop down.
+/// Run one collect-and-enqueue pass. Errors are logged and counted — a
+/// transient collection failure must not tear the scheduler loop down.
 async fn collect_and_enqueue(orchestrator: &EvidenceOrchestrator, queue: &Queue) {
     match orchestrator.collect_once().await {
         Ok(bundle) => {
             let bundle_id = bundle.metadata.bundle_id;
             match queue.enqueue(bundle.metadata, &bundle.zip_path).await {
-                Ok(_) => info!(%bundle_id, "scheduler: bundle enqueued"),
-                Err(e) => warn!(%bundle_id, error = %e, "scheduler: enqueue failed"),
+                Ok(_) => {
+                    info!(%bundle_id, "scheduler: bundle enqueued");
+                    metrics::counter!(METRIC_SUCCESSES).increment(1);
+                }
+                Err(e) => {
+                    warn!(%bundle_id, error = %e, "scheduler: enqueue failed");
+                    metrics::counter!(METRIC_FAILURES).increment(1);
+                }
             }
             if let Err(e) = tokio::fs::remove_dir_all(&bundle.staging_dir).await {
                 warn!(
@@ -220,6 +247,7 @@ async fn collect_and_enqueue(orchestrator: &EvidenceOrchestrator, queue: &Queue)
         }
         Err(e) => {
             warn!(error = %e, "scheduler: collection failed");
+            metrics::counter!(METRIC_FAILURES).increment(1);
         }
     }
 }
@@ -290,6 +318,37 @@ mod tests {
         assert!(
             fire > Instant::now(),
             "next_interval_instant should be in the future"
+        );
+    }
+
+    // -----------------------------------------------------------
+    // Cron expression format tests
+    // -----------------------------------------------------------
+
+    /// Verify that a standard 5-field cron expression ("0 3 * * *") is
+    /// accepted — i.e., `Seconds::Disallowed` does not reject it.
+    #[test]
+    fn cron_five_field_expression_is_valid() {
+        let parser = CronParser::builder()
+            .seconds(Seconds::Disallowed)
+            .build();
+        assert!(
+            parser.parse("0 3 * * *").is_ok(),
+            "five-field cron expression should be valid"
+        );
+    }
+
+    /// Verify that a 6-field expression (with seconds) is *rejected* when
+    /// `Seconds::Disallowed` — preventing silently misfiring at
+    /// sub-minute resolution.
+    #[test]
+    fn cron_six_field_expression_is_rejected() {
+        let parser = CronParser::builder()
+            .seconds(Seconds::Disallowed)
+            .build();
+        assert!(
+            parser.parse("0 0 3 * * *").is_err(),
+            "six-field cron expression should be rejected when seconds are disallowed"
         );
     }
 }

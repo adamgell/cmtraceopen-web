@@ -81,6 +81,12 @@ async-trait = "0.1"
 regex = "1"
 croner = "3.0.1"
 rand = "0.9"
+# Metrics facade — same version as api-server. The agent emits lightweight
+# counters (collection successes/failures) so ops can alert on collection
+# health. The recorder backend is intentionally *not* wired up in the
+# agent binary yet (no HTTP /metrics endpoint for the edge agent); using
+# the `metrics` facade means adding a backend later is a one-liner.
+metrics = "0.24"
 
 [dev-dependencies]
 # Drive an in-process api-server during integration tests. Match the
