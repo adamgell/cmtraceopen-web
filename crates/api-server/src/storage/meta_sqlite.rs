@@ -532,6 +532,43 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(out)
     }
 
+    async fn recent_sessions(&self, limit: u32) -> Result<Vec<SessionRow>, StorageError> {
+        // Cross-device "what landed recently?" view for the dev status page.
+        // Same column list as `list_sessions_for_device` so the row mapper
+        // shape matches; no device filter and no keyset cursor — the status
+        // page only ever asks for the top-N.
+        let limit_i = limit as i64;
+        let rows = sqlx::query(
+            r#"
+            SELECT session_id, device_id, bundle_id, blob_uri, content_kind,
+                   size_bytes, sha256, collected_utc, ingested_utc, parse_state
+            FROM sessions
+            ORDER BY ingested_utc DESC, session_id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit_i)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(SessionRow {
+                session_id: parse_uuid(&r.get::<String, _>("session_id"))?,
+                device_id: r.get::<String, _>("device_id"),
+                bundle_id: parse_uuid(&r.get::<String, _>("bundle_id"))?,
+                blob_uri: r.get::<String, _>("blob_uri"),
+                content_kind: r.get::<String, _>("content_kind"),
+                size_bytes: r.get::<i64, _>("size_bytes") as u64,
+                sha256: r.get::<String, _>("sha256"),
+                collected_utc: parse_ts_opt(r.get::<Option<String>, _>("collected_utc"))?,
+                ingested_utc: parse_ts(&r.get::<String, _>("ingested_utc"))?,
+                parse_state: r.get::<String, _>("parse_state"),
+            });
+        }
+        Ok(out)
+    }
+
     async fn update_session_parse_state(
         &self,
         session_id: Uuid,
