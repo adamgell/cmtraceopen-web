@@ -228,13 +228,20 @@ jobs:
         id: cert
         if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
         shell: pwsh
+        env:
+          # Regex matched against the cert's Issuer field. Default targets
+          # the Gell lab Cloud PKI issuing CA CN; override via repo
+          # variable CMTRACE_CERT_ISSUER_REGEX for other deployments.
+          CERT_ISSUER_REGEX: ${{ vars.CMTRACE_CERT_ISSUER_REGEX || 'issuing\.gell\.internal\.cdw\.lab' }}
+          CERT_EKU_OID: '1.3.6.1.5.5.7.3.3'
         run: |
           $now = Get-Date
           $cert = Get-ChildItem Cert:\LocalMachine\My |
                   Where-Object {
                     $_.HasPrivateKey -and
-                    $_.Issuer -match 'Gell.*PKI' -and
-                    $_.NotAfter -gt $now
+                    $_.Issuer -match $env:CERT_ISSUER_REGEX -and
+                    $_.NotAfter -gt $now -and
+                    ($_.EnhancedKeyUsageList.ObjectId -contains $env:CERT_EKU_OID)
                   } |
                   Sort-Object NotBefore -Descending |
                   Select-Object -First 1
@@ -243,17 +250,19 @@ jobs:
             Write-Error @"
           No valid Cloud PKI code-signing cert found in LocalMachine\My.
 
-          Expected: a cert with Issuer matching 'Gell*PKI', HasPrivateKey=True,
+          Expected: a cert with Issuer matching '$env:CERT_ISSUER_REGEX',
+          HasPrivateKey=True, EKU 1.3.6.1.5.5.7.3.3 (Code Signing),
           and NotAfter in the future.
 
           Remediation:
             1. Open the Intune portal and confirm the codeSigning cert profile
                is assigned to this device's group.
-            2. On this machine run: Start-Process -Wait 'C:\Windows\System32\deviceenrollmentmgr.exe'
-               and wait for the next Intune sync (up to 15 min).
+            2. Force a sync: Intune admin center > Devices > <device> > Sync
+               (or on the device, Settings > Accounts > Access work or school
+               > work account > Info > Sync). Wait up to 15 min.
             3. Run: Get-ChildItem Cert:\LocalMachine\My to confirm the cert appears.
 
-          See docs/wave4/02-code-signing.md §4 for full setup instructions.
+          See docs/wave4/02-code-signing.md for full setup instructions.
           "@
             exit 1
           }
