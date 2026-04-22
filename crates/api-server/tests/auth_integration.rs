@@ -70,7 +70,7 @@ async fn start_server_auth_enabled(
         audience: TEST_AUDIENCE.to_string(),
         jwks_uri: "http://127.0.0.1:1/unused".to_string(),
     };
-    let state = AppState::new_with_auth(meta, blobs, "127.0.0.1:0".to_string(), entra, jwks);
+    let state = AppState::new_with_auth(meta.clone(), blobs, meta, "127.0.0.1:0".to_string(), entra, jwks);
     let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
@@ -93,7 +93,7 @@ async fn start_server_auth_disabled() -> TestServer {
             .await
             .expect("sqlite"),
     );
-    let state = AppState::new_auth_disabled(meta, blobs, "127.0.0.1:0".to_string());
+    let state = AppState::new_auth_disabled(meta.clone(), blobs, meta, "127.0.0.1:0".to_string());
     let app = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");

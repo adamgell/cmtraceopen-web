@@ -11,7 +11,7 @@ use api_server::router;
 use api_server::state::{
     install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig, RateLimitState,
 };
-use api_server::storage::{build_blob_store, SqliteMetadataStore};
+use api_server::storage::{build_blob_store, ConfigStore, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -123,7 +123,7 @@ async fn main() -> ExitCode {
         }
     };
 
-    let meta = match SqliteMetadataStore::connect(&config.sqlite_path).await {
+    let meta_store = match SqliteMetadataStore::connect(&config.sqlite_path).await {
         Ok(m) => Arc::new(m),
         Err(err) => {
             eprintln!("fatal: failed to open sqlite at {}: {err}", config.sqlite_path);
@@ -131,9 +131,14 @@ async fn main() -> ExitCode {
         }
     };
 
-    // The audit store shares the same SQLite pool as `meta` — calling
-    // `audit_store()` is a cheap Arc clone, not a new connection.
-    let audit = Arc::new(meta.audit_store());
+    // The audit store shares the same SQLite pool as `meta_store` — calling
+    // `audit_store()` is a cheap Arc clone, not a new connection. Must
+    // happen before the trait-object coercions below since `audit_store`
+    // lives on the concrete `SqliteMetadataStore` type.
+    let audit = Arc::new(meta_store.audit_store());
+
+    let meta: Arc<dyn api_server::storage::MetadataStore> = meta_store.clone();
+    let configs: Arc<dyn ConfigStore> = meta_store;
 
     // Build the auth state. In production the JWKS cache is pre-warmed on
     // startup so the first real request doesn't pay for the discovery-URI
@@ -316,6 +321,7 @@ async fn main() -> ExitCode {
     let state = AppState::with_cors_crl_and_audit(
         meta,
         blobs,
+        configs,
         config.listen_addr.to_string(),
         auth_state,
         cors,
@@ -328,6 +334,7 @@ async fn main() -> ExitCode {
     let state = AppState::full_with_audit(
         meta,
         blobs,
+        configs,
         config.listen_addr.to_string(),
         auth_state,
         cors,

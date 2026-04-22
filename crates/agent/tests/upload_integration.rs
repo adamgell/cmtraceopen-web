@@ -49,7 +49,7 @@ async fn start_server() -> TestServer {
     // Use the auth-disabled helper: this end-to-end test exercises the agent
     // upload path + a follow-up query, but doesn't validate the operator-bearer
     // surface (covered separately in `auth_integration.rs`).
-    let state = AppState::new_auth_disabled(meta, blobs, "127.0.0.1:0".to_string());
+    let state = AppState::new_auth_disabled(meta.clone(), blobs, meta, "127.0.0.1:0".to_string());
     let app = router(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

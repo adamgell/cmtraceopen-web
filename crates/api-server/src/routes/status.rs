@@ -449,10 +449,12 @@ mod tests {
                 .expect("sqlite"),
         );
         use crate::auth::{AuthMode, AuthState, JwksCache};
+        let configs: Arc<dyn crate::storage::ConfigStore> = meta.clone();
         AppState {
             meta,
             blobs,
             audit: Arc::new(crate::storage::NoopAuditStore),
+            configs,
             started_at: Instant::now(),
             request_counts: Arc::new(DashMap::new()),
             listen_addr: listen.to_string(),

@@ -23,14 +23,17 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
+use tokio::sync::Mutex;
+
 use crate::collectors::dsregcmd::DsRegCmdCollector;
 use crate::collectors::event_logs::EventLogsCollector;
 use crate::collectors::evidence::EvidenceOrchestrator;
 use crate::collectors::logs::LogsCollector;
 use crate::config::AgentConfig;
+use crate::config_sync::ConfigSync;
 use crate::queue::{Queue, QueueState};
 use crate::redact::Redactor;
-use crate::tls::TlsClientOptions;
+use crate::tls::{self, TlsClientOptions};
 use crate::uploader::{Uploader, UploaderConfig};
 
 /// How often to run an evidence collection pass.
@@ -55,6 +58,10 @@ pub struct AgentComponents {
     pub orchestrator: EvidenceOrchestrator,
     pub uploader: Uploader,
     pub work_root: PathBuf,
+    /// Server-pushed config overrides. Held behind a `Mutex` because
+    /// `ConfigSync::sync` / `record_*` take `&mut self` and the task loop
+    /// touches it from multiple `select!` branches.
+    pub config_sync: Mutex<ConfigSync>,
 }
 
 /// Build the queue, orchestrator, uploader, and work root from `config`.
@@ -77,8 +84,31 @@ pub async fn build_components(
     // A misconfigured regex is a fatal startup error: silently falling back to
     // a no-op redactor would leave PII unredacted without any visible signal.
     let redactor = Redactor::from_config(config)?;
+
+    let tls_opts = TlsClientOptions {
+        client_cert_pem: config.tls_client_cert_pem.clone(),
+        client_key_pem: config.tls_client_key_pem.clone(),
+        ca_bundle_pem: config.tls_ca_bundle_pem.clone(),
+    };
+
+    // Build the reqwest client once so TLS settings are applied uniformly
+    // to both the config-sync fetches and the bundle uploads.
+    let http_client = tls::build_reqwest_client(tls_opts.clone())?;
+
+    // ConfigSync: fetch remote overrides at startup and periodically. Apply
+    // any server-pushed config to the effective AgentConfig before constructing
+    // the orchestrator + uploader so they pick up the override on first run.
+    let mut config_sync = ConfigSync::new(
+        http_client,
+        config.api_endpoint.clone(),
+        config.resolved_device_id(),
+        config.clone(),
+    );
+    let effective = config_sync.sync().await;
+
+
     let orchestrator = EvidenceOrchestrator::new(
-        LogsCollector::new(config.log_paths.clone()),
+        LogsCollector::new(effective.log_paths.clone()),
         EventLogsCollector::with_defaults(),
         DsRegCmdCollector::new(),
         work_root.clone(),
@@ -86,15 +116,11 @@ pub async fn build_components(
     );
     let uploader = Uploader::new(
         UploaderConfig::new(
-            config.api_endpoint.clone(),
-            config.resolved_device_id(),
-            Duration::from_secs(config.request_timeout_secs),
+            effective.api_endpoint.clone(),
+            effective.resolved_device_id(),
+            Duration::from_secs(effective.request_timeout_secs),
         )
-        .with_tls(TlsClientOptions {
-            client_cert_pem: config.tls_client_cert_pem.clone(),
-            client_key_pem: config.tls_client_key_pem.clone(),
-            ca_bundle_pem: config.tls_ca_bundle_pem.clone(),
-        }),
+        .with_tls(tls_opts),
     )?;
 
     Ok(AgentComponents {
@@ -102,6 +128,7 @@ pub async fn build_components(
         orchestrator,
         uploader,
         work_root,
+        config_sync: Mutex::new(config_sync),
     })
 }
 
@@ -118,11 +145,20 @@ pub async fn run_task_loop(
 ) {
     let mut collect_tick = tokio::time::interval(COLLECT_INTERVAL);
     let mut drain_tick = tokio::time::interval(DRAIN_INTERVAL);
+    // Per-device-jittered fetch interval keeps the fleet from stampeding
+    // /v1/config/{id} simultaneously. Read once here so the interval is
+    // stable for the life of the loop; future config rotations on the
+    // device id would require a daemon restart anyway.
+    let config_fetch_interval = components.config_sync.lock().await.fetch_interval();
+    let mut config_tick = tokio::time::interval(config_fetch_interval);
 
     // Skip the first immediate collect tick — let the daemon finish
     // booting. Drain fires immediately so crash-survivor queue entries
-    // are uploaded quickly after a restart.
+    // are uploaded quickly after a restart. ConfigSync's initial fetch
+    // already happened in `build_components`; skip the first immediate
+    // config tick to avoid back-to-back fetches.
     collect_tick.tick().await;
+    config_tick.tick().await;
 
     info!("entering agent task loop");
 
@@ -137,6 +173,18 @@ pub async fn run_task_loop(
             }
             _ = drain_tick.tick() => {
                 drain(&components.queue, &components.uploader).await;
+                // Treat "drain happened without surfacing a panic" as a
+                // success heartbeat for ConfigSync's rollback timer.
+                // ConfigSync's own internal failure-tracking handles the
+                // detailed bookkeeping on a per-fetch basis.
+                components.config_sync.lock().await.record_success();
+            }
+            _ = config_tick.tick() => {
+                let mut cs = components.config_sync.lock().await;
+                let _ = cs.sync().await;
+                if cs.should_rollback() {
+                    cs.rollback();
+                }
             }
             result = stop_rx.changed() => {
                 if result.is_err() || *stop_rx.borrow() {

@@ -49,7 +49,7 @@ async fn start_server_with_cors(cors: CorsConfig) -> TestServer {
         jwks: Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string())),
     };
     let state =
-        AppState::with_cors(meta, blobs, "127.0.0.1:0".to_string(), auth, cors);
+        AppState::with_cors(meta.clone(), blobs, meta, "127.0.0.1:0".to_string(), auth, cors);
     let app = router(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

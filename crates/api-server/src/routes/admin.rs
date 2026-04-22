@@ -16,8 +16,11 @@
 //!
 //! ## Routes
 //!
-//!   POST /v1/admin/devices/{device_id}/disable  →  501 Not Implemented (reserved)
-//!   GET  /v1/admin/audit                        →  200 + paginated audit rows
+//!   POST   /v1/admin/devices/{device_id}/disable  →  501 Not Implemented (reserved)
+//!   PUT    /v1/admin/devices/{device_id}/config   →  200 / 400
+//!   DELETE /v1/admin/devices/{device_id}/config   →  204
+//!   PUT    /v1/admin/config/default               →  200 / 400
+//!   GET    /v1/admin/audit                        →  200 + paginated audit rows
 //!
 //! Adding more admin routes? Wire them through this same router so the
 //! `RequireRole<AdminTag>` discipline and audit middleware are uniform.
@@ -30,10 +33,10 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{middleware, Json, Router};
 use chrono::{DateTime, Utc};
-use common_wire::Paginated;
+use common_wire::{AgentConfigOverride, Paginated};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -50,6 +53,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/admin/devices/{device_id}/disable",
             post(disable_device),
         )
+        .route(
+            "/v1/admin/devices/{device_id}/config",
+            put(put_device_config).delete(delete_device_config),
+        )
+        .route("/v1/admin/config/default", put(put_default_config))
         .route("/v1/admin/audit", get(list_audit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -81,6 +89,87 @@ async fn disable_device(
         ),
     });
     (StatusCode::NOT_IMPLEMENTED, Json(body))
+}
+
+// ---------------------------------------------------------------------------
+// Config-override write endpoints (Wave 4)
+// ---------------------------------------------------------------------------
+
+/// `PUT /v1/admin/devices/{device_id}/config`
+///
+/// Upsert a per-device config override. Body must be a (partial or full)
+/// [`AgentConfigOverride`] JSON object.  Validates that numeric values are
+/// within safety bounds before persisting.
+async fn put_device_config(
+    _principal: RequireRole<AdminTag>,
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+    Json(body): Json<AgentConfigOverride>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(e) = body.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "bad_request", "message": e })),
+        );
+    }
+    match state.configs.set_device_config(&device_id, &body, Utc::now()).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "device_id": device_id,
+                "message": "config override saved"
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "internal", "message": e.to_string() })),
+        ),
+    }
+}
+
+/// `DELETE /v1/admin/devices/{device_id}/config`
+///
+/// Remove any per-device config override for `device_id`. Returns 204 even if
+/// no row existed (idempotent).
+async fn delete_device_config(
+    _principal: RequireRole<AdminTag>,
+    State(state): State<Arc<AppState>>,
+    Path(device_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.configs.delete_device_config(&device_id).await {
+        Ok(()) => (StatusCode::NO_CONTENT, Json(serde_json::json!({}))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "internal", "message": e.to_string() })),
+        ),
+    }
+}
+
+/// `PUT /v1/admin/config/default`
+///
+/// Upsert the tenant-wide default config override applied to all devices
+/// that don't have a per-device override.
+async fn put_default_config(
+    _principal: RequireRole<AdminTag>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AgentConfigOverride>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if let Err(e) = body.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "bad_request", "message": e })),
+        );
+    }
+    match state.configs.set_default_config(&body, Utc::now()).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "message": "default config override saved" })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": "internal", "message": e.to_string() })),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -80,6 +80,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(routes::files::router(state.clone()))
         .merge(routes::entries::router(state.clone()))
         .merge(routes::admin::router(state.clone()))
+        .merge(routes::config::router(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
             crate::middleware::rate_limit::ip_query_middleware,

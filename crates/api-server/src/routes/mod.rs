@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod config;
 pub mod devices;
 pub mod entries;
 pub mod files;
