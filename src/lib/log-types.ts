@@ -128,12 +128,16 @@ export interface ParseResult {
 // specialization fields. When rendering API entries through `EntryList`, the
 // client maps `LogEntryDto` → `LogEntry` (see `ApiMode.tsx`).
 
+export type DeviceStatus = "active" | "disabled" | "revoked";
+
 export type DeviceSummary = {
   deviceId: string;
   firstSeenUtc: string;
   lastSeenUtc: string;
   hostname?: string;
   sessionCount: number;
+  /** Server-reported status — absent on older api-server versions; default to "active". */
+  status?: DeviceStatus;
 };
 
 export type SessionSummary = {
