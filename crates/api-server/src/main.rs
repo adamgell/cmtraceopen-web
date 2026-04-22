@@ -12,6 +12,13 @@ use api_server::state::{
     install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig, RateLimitState,
 };
 use api_server::storage::{build_blob_store, ConfigStore, SqliteMetadataStore};
+// build_metadata_store factory is intentionally NOT wired into main.rs at the
+// moment: the Postgres backend (PR #77) ships its module + migrations but
+// main.rs still constructs a SqliteMetadataStore directly so the audit_store /
+// configs trait-object coercions stay simple. Wiring the factory up is a
+// follow-up; tracked in the PR body.
+#[allow(unused_imports)]
+use api_server::storage::build_metadata_store;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -64,7 +71,7 @@ async fn main() -> ExitCode {
     info!(
         listen_addr = %config.listen_addr,
         data_dir = %config.data_dir.display(),
-        sqlite_path = %config.sqlite_path,
+        database_url = %config.database_url,
         blob_backend = ?config.blob_backend,
         cors_origins = ?config.allowed_origins,
         cors_credentials = config.allow_credentials,
@@ -123,10 +130,18 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Direct SqliteMetadataStore construction — the Postgres factory
+    // (build_metadata_store) is available but not yet wired through main
+    // because audit + ConfigStore threading needs the concrete type.
+    // Follow-up: put audit_store + configs on the MetadataStore trait so
+    // the factory handoff works transparently.
     let meta_store = match SqliteMetadataStore::connect(&config.sqlite_path).await {
         Ok(m) => Arc::new(m),
         Err(err) => {
-            eprintln!("fatal: failed to open sqlite at {}: {err}", config.sqlite_path);
+            eprintln!(
+                "fatal: failed to open metadata store ({}): {err}",
+                config.sqlite_path
+            );
             return ExitCode::from(1);
         }
     };

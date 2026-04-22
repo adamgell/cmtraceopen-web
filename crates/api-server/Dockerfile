@@ -60,11 +60,13 @@ RUN apt-get update \
 COPY . .
 
 # Release build of just the api-server crate (and its transitive dep on
-# common-wire). cmtrace-wasm is excluded from this workspace at the root
-# Cargo.toml level, so cargo never tries to resolve its cross-repo path dep.
+# common-wire). The `postgres` feature activates the Postgres metadata
+# backend required for the docker-compose + Azure ACA deployments.
+# cmtrace-wasm is excluded from this workspace at the root Cargo.toml level,
+# so cargo never tries to resolve its cross-repo path dep.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/workspace/target \
-    cargo build --release --locked -p api-server \
+    cargo build --release --locked -p api-server --features postgres \
  && cp /workspace/target/release/cmtraceopen-api /usr/local/bin/cmtraceopen-api
 
 # ---- Data-dir prep ----------------------------------------------------------

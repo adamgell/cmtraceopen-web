@@ -34,8 +34,6 @@ services:
       CMTRACE_ENTRA_TENANT_ID: 00c171a4-0053-4cae-ab80-0bd18db2e0fc
       CMTRACE_ENTRA_AUDIENCE: api://b2990298-7cdd-4426-b311-2df0221b6eca
       CMTRACE_ENTRA_JWKS_URI: https://login.microsoftonline.com/00c171a4-0053-4cae-ab80-0bd18db2e0fc/discovery/v2.0/keys
-      # Placeholder — api-server ignores this today. Wired up when the
-      # metadata store lands in a follow-up commit.
       CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace
     volumes:
       - api-data:/data
