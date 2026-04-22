@@ -410,6 +410,7 @@ mod tests {
     /// instantaneously, so the test doesn't wait for real seconds.
     #[tokio::test(start_paused = true)]
     async fn retry_math_respects_delays_and_max_attempts() {
+        crate::tls::install_default_crypto_provider();
         let client = reqwest::Client::new();
         let cfg = UploaderConfig {
             endpoint: "http://unused".into(),
@@ -449,6 +450,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn fatal_errors_are_not_retried() {
+        crate::tls::install_default_crypto_provider();
         let client = reqwest::Client::new();
         let cfg = UploaderConfig {
             endpoint: "http://unused".into(),
@@ -481,6 +483,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn succeeds_on_third_attempt() {
+        crate::tls::install_default_crypto_provider();
         let client = reqwest::Client::new();
         let cfg = UploaderConfig {
             endpoint: "http://unused".into(),

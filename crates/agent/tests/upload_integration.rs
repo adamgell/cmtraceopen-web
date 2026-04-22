@@ -31,6 +31,13 @@ struct TestServer {
 }
 
 async fn start_server() -> TestServer {
+    // The api-server crate uses reqwest with rustls-tls-native-roots-no-provider
+    // (PR #46). Constructing its router eagerly builds a reqwest client for the
+    // JWKS cache, which panics with "No provider set" unless a rustls crypto
+    // provider is installed first. Uploader::new() also installs it, but it
+    // runs AFTER start_server() in the test body — so we install here too
+    // (idempotent via OnceLock).
+    cmtraceopen_agent::tls::install_default_crypto_provider();
     let tmp = TempDir::new().expect("tempdir");
     let blobs = Arc::new(LocalFsBlobStore::new(tmp.path()).await.expect("blob store"));
     let meta = Arc::new(
