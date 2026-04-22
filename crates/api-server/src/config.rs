@@ -61,6 +61,46 @@ pub struct Config {
     /// TLS termination + mTLS client-cert verification. See [`TlsConfig`] for
     /// the full env-var contract.
     pub tls: TlsConfig,
+
+    /// CRL distribution points to poll for client-cert revocation. Env:
+    /// `CMTRACE_CRL_URLS`, comma-separated. Default: empty (no polling, no
+    /// revocation enforcement).
+    ///
+    /// For the live Gell Cloud PKI tenant (see
+    /// `~/.claude/projects/F--Repo/memory/reference_cloud_pki.md`) both CRLs
+    /// must be polled — the Issuing CA's CRL covers the leaf certs the
+    /// agents present, while the Root CA's CRL covers the Issuing CA itself
+    /// (in case it ever has to be cross-revoked):
+    ///
+    /// - Root CA:    `http://primary-cdn.pki.azure.net/centralus/crls/9a8a2d279a7243fc96a508cbfca8f5d0/ad11b686-5970-42de-9827-91700269875b_v1/current.crl`
+    /// - Issuing CA: `http://primary-cdn.pki.azure.net/centralus/crls/9a8a2d279a7243fc96a508cbfca8f5d0/7ff044a8-9c28-4529-9d79-76bdb94df99d_v1/current.crl`
+    ///
+    /// Both URLs are public HTTP — no auth, no client cert needed to fetch.
+    pub crl_urls: Vec<String>,
+
+    /// Interval between CRL refresh polls, in seconds. Env:
+    /// `CMTRACE_CRL_REFRESH_SECS`, default `3600` (1 hour). Matches the
+    /// Cloud PKI publishing cadence; tightening below 5 minutes risks
+    /// hammering the CDN.
+    pub crl_refresh_secs: u64,
+
+    /// Behaviour when CRL fetch / parse fails and no cached CRL is available
+    /// yet. Env: `CMTRACE_CRL_FAIL_OPEN`, default `false`.
+    ///
+    /// **Trade-off**:
+    /// - `false` (fail-closed, default) — the server rejects every cert
+    ///   lookup until at least one successful CRL fetch lands. This is the
+    ///   secure default: a network outage during startup must not let
+    ///   freshly-revoked credentials slip through. The cost is that
+    ///   api-server cannot serve mTLS-gated traffic until the CRL CDN is
+    ///   reachable.
+    /// - `true` (fail-open) — the server accepts certs whose revocation
+    ///   status is unknown. Useful for air-gapped / offline lab deployments
+    ///   where reaching `primary-cdn.pki.azure.net` is infeasible, at the
+    ///   cost of letting any not-yet-expired revoked cert authenticate.
+    ///   Never flip this on without a compensating control (short-lived
+    ///   leaf cert TTL, allow-listed device IDs, etc.).
+    pub crl_fail_open: bool,
 }
 
 /// TLS-termination + mTLS client-cert verification. Populated from
@@ -146,6 +186,12 @@ pub enum ConfigError {
          server cert, key, and client-CA bundle paths"
     )]
     MissingTlsPath(&'static str),
+
+    #[error("invalid CMTRACE_CRL_REFRESH_SECS: {0} (expected positive integer)")]
+    InvalidCrlRefreshSecs(String),
+
+    #[error("invalid CMTRACE_CRL_FAIL_OPEN: {0} (expected true/false/1/0)")]
+    InvalidCrlFailOpen(String),
 }
 
 impl Config {
@@ -208,6 +254,30 @@ impl Config {
 
         let tls = TlsConfig::from_env()?;
 
+        let crl_urls = env::var("CMTRACE_CRL_URLS")
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let crl_refresh_secs = match env::var("CMTRACE_CRL_REFRESH_SECS") {
+            Ok(v) => v
+                .parse::<u64>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or(ConfigError::InvalidCrlRefreshSecs(v))?,
+            Err(_) => 3600,
+        };
+
+        let crl_fail_open = match env::var("CMTRACE_CRL_FAIL_OPEN") {
+            Ok(v) => parse_bool(&v).ok_or(ConfigError::InvalidCrlFailOpen(v))?,
+            Err(_) => false,
+        };
+
         Ok(Self {
             listen_addr,
             data_dir,
@@ -217,6 +287,9 @@ impl Config {
             allowed_origins,
             allow_credentials,
             tls,
+            crl_urls,
+            crl_refresh_secs,
+            crl_fail_open,
         })
     }
 }

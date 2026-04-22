@@ -2,6 +2,8 @@ use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
 use api_server::auth::{AuthMode, AuthState, JwksCache};
+#[cfg(feature = "crl")]
+use api_server::auth::CrlCache;
 use api_server::config::Config;
 use api_server::router;
 use api_server::state::{AppState, CorsConfig, MtlsRuntimeConfig};
@@ -128,6 +130,48 @@ async fn main() -> ExitCode {
         require_on_ingest: config.tls.require_on_ingest,
         expected_san_uri_scheme: config.tls.expected_san_uri_scheme.clone(),
     };
+
+    // Build the CRL cache (if the `crl` feature is on) and prime it with
+    // an initial fetch before the listener binds. Refresh task continues
+    // in the background for the life of the process.
+    #[cfg(feature = "crl")]
+    let crl_cache = if config.crl_urls.is_empty() {
+        info!("CMTRACE_CRL_URLS empty; skipping CRL polling");
+        None
+    } else {
+        let cache = Arc::new(CrlCache::new(
+            config.crl_urls.clone(),
+            std::time::Duration::from_secs(config.crl_refresh_secs),
+            config.crl_fail_open,
+        ));
+        info!(
+            urls = ?config.crl_urls,
+            refresh_secs = config.crl_refresh_secs,
+            fail_open = config.crl_fail_open,
+            "starting CRL refresh task",
+        );
+        Arc::clone(&cache).start_refresh_task().await;
+        if config.crl_fail_open {
+            warn!(
+                "CMTRACE_CRL_FAIL_OPEN=true — revoked certs MAY be accepted \
+                 if every CRL fetch has failed since startup. Document the \
+                 compensating control before deploying with this flag."
+            );
+        }
+        Some(cache)
+    };
+
+    #[cfg(feature = "crl")]
+    let state = AppState::with_cors_and_crl(
+        meta,
+        blobs,
+        config.listen_addr.to_string(),
+        auth_state,
+        cors,
+        mtls,
+        crl_cache,
+    );
+    #[cfg(not(feature = "crl"))]
     let state = AppState::full(
         meta,
         blobs,
