@@ -19,6 +19,7 @@ use cmtraceopen_agent::collectors::event_logs::EventLogsCollector;
 use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
 use cmtraceopen_agent::collectors::logs::LogsCollector;
 use cmtraceopen_agent::queue::{Queue, QueueState};
+use cmtraceopen_agent::tls::TlsClientOptions;
 use cmtraceopen_agent::uploader::{RetryPolicy, Uploader, UploaderConfig};
 use common_wire::{Paginated, SessionSummary};
 use tempfile::TempDir;
@@ -101,12 +102,21 @@ async fn agent_ships_bundle_to_api_server_end_to_end() {
 
     // --- upload ---
     // `RetryPolicy::immediate` keeps the test fast if there's a blip; the
-    // local loopback server shouldn't produce any.
+    // local loopback server shouldn't produce any. The default
+    // `TlsClientOptions` (native roots, no client cert) is fine for the
+    // `http://` loopback URL — rustls only kicks in for `https://`, so
+    // the integration suite is unaffected by the TLS rework.
+    //
+    // TODO(wave-3): once the api-server gains an mTLS-required mode,
+    // add a parallel integration test that boots it with mutual TLS,
+    // generates a throwaway cert/key with rcgen, and asserts the agent
+    // round-trips a bundle while presenting that cert.
     let cfg = UploaderConfig {
         endpoint: server.base.clone(),
         device_id: "WIN-E2E-01".into(),
         request_timeout: Duration::from_secs(10),
         retry: RetryPolicy::immediate(3),
+        tls: TlsClientOptions::default(),
     };
     let uploader = Uploader::new(cfg).expect("uploader");
     queue.mark_uploading(bundle_id).await.unwrap();
