@@ -439,6 +439,8 @@ mod tests {
             },
             cors: crate::state::CorsConfig::default(),
             mtls: crate::state::MtlsRuntimeConfig::default(),
+            #[cfg(feature = "crl")]
+            crl_cache: None,
         }
     }
 

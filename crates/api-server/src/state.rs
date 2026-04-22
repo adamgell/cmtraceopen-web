@@ -16,6 +16,8 @@ use std::time::Instant;
 use dashmap::DashMap;
 
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
+#[cfg(feature = "crl")]
+use crate::auth::CrlCache;
 use crate::storage::{BlobStore, MetadataStore};
 
 /// Subset of [`crate::config::TlsConfig`] the request-handling layer needs
@@ -109,6 +111,15 @@ pub struct AppState {
     /// ingest routes. Defaults to "no enforcement", which preserves the
     /// legacy `X-Device-Id` header-only behavior.
     pub mtls: MtlsRuntimeConfig,
+    /// Client-cert revocation cache. Populated + refreshed by the
+    /// background task spawned in `main.rs`. Threaded into the
+    /// `DeviceIdentity` extractor (PR #41 follow-up) so revoked certs
+    /// reject with 401. `None` means CRL polling was either compiled out
+    /// (`--no-default-features`) or not configured (no
+    /// `CMTRACE_CRL_URLS`); the extractor falls through to allow-all in
+    /// that case, matching the pre-CRL posture.
+    #[cfg(feature = "crl")]
+    pub crl_cache: Option<Arc<CrlCache>>,
 }
 
 impl AppState {
@@ -159,6 +170,36 @@ impl AppState {
             auth,
             cors,
             mtls,
+            #[cfg(feature = "crl")]
+            crl_cache: None,
+        })
+    }
+
+    /// Same as [`AppState::full`] but lets `main.rs` install a pre-built
+    /// CRL cache. Kept as a separate constructor to avoid disturbing
+    /// existing test call sites that already pass through
+    /// [`AppState::with_cors`] / [`AppState::new`].
+    #[cfg(feature = "crl")]
+    pub fn with_cors_and_crl(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        auth: AuthState,
+        cors: CorsConfig,
+        mtls: MtlsRuntimeConfig,
+        crl_cache: Option<Arc<CrlCache>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            meta,
+            blobs,
+            started_at: Instant::now(),
+            request_count: AtomicU64::new(0),
+            listen_addr,
+            hostname: detect_hostname(),
+            auth,
+            cors,
+            mtls,
+            crl_cache,
         })
     }
 
