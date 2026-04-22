@@ -12,14 +12,18 @@
 //   - Substring filter on hostname or device ID (client-side)
 //   - Empty state: "No devices have checked in yet."
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { apiBase, disableDevice, listDevicesPage } from "../lib/api-client";
 import { ROLE_ADMIN } from "../lib/auth-config";
 import type { DeviceSummary, DeviceStatus } from "../lib/log-types";
+import { useDebounce } from "../lib/use-debounce";
 import { RoleGate } from "./RoleGate";
 
 const PAGE_SIZE = 50;
 const POLL_INTERVAL_MS = 30_000;
+const FILTER_DEBOUNCE_MS = 250;
+const ROW_HEIGHT_PX = 44;
 
 type FetchState<T> =
   | { status: "idle" }
@@ -76,14 +80,18 @@ export function DevicesPanel() {
   }, [loadFirstPage]);
 
   // Polling refresh — reloads from the first page every 30 s.
+  // Paused while the confirm modal is open so the row the operator is
+  // looking at can't be swapped out from under them mid-confirmation
+  // (see review feedback: status pill flicker active → disabled → active).
   const loadFirstPageRef = useRef(loadFirstPage);
   loadFirstPageRef.current = loadFirstPage;
   useEffect(() => {
+    if (confirmDevice !== null) return undefined;
     const id = setInterval(() => {
       void loadFirstPageRef.current();
     }, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [confirmDevice]);
 
   const handleDisableClick = useCallback((device: DeviceSummary) => {
     setConfirmDevice(device);
@@ -113,15 +121,22 @@ export function DevicesPanel() {
   }, []);
 
   // Client-side filter: substring match on deviceId or hostname.
-  const filterLower = filter.toLowerCase().trim();
-  const filtered =
-    filterLower === ""
-      ? devices
-      : devices.filter(
-          (d) =>
-            d.deviceId.toLowerCase().includes(filterLower) ||
-            (d.hostname ?? "").toLowerCase().includes(filterLower),
-        );
+  // Debounced so a flurry of keystrokes only triggers one re-filter pass.
+  // 250 ms is the standard for filter UIs — fast enough to feel live, slow
+  // enough that "rapid typing" coalesces into a single evaluation.
+  const debouncedFilter = useDebounce(filter, FILTER_DEBOUNCE_MS);
+  const filterLower = debouncedFilter.toLowerCase().trim();
+  const filtered = useMemo(
+    () =>
+      filterLower === ""
+        ? devices
+        : devices.filter(
+            (d) =>
+              d.deviceId.toLowerCase().includes(filterLower) ||
+              (d.hostname ?? "").toLowerCase().includes(filterLower),
+          ),
+    [devices, filterLower],
+  );
 
   return (
     <div
@@ -154,7 +169,13 @@ export function DevicesPanel() {
         {fetchState.status === "ok" && devices.length === 0 && (
           <EmptyState />
         )}
-        {devices.length > 0 && (
+        {devices.length > 0 && filterLower !== "" && filtered.length === 0 && (
+          <CenteredText
+            text={`No devices match "${debouncedFilter.trim()}".`}
+            muted
+          />
+        )}
+        {devices.length > 0 && filtered.length > 0 && (
           <DeviceTable
             devices={filtered}
             disabledIds={disabledIds}
@@ -259,6 +280,15 @@ function PanelHeader({
   );
 }
 
+/**
+ * Virtualized device table. Uses CSS-grid rows inside a scroll container so
+ * `@tanstack/react-virtual`'s absolute-positioned rows align cleanly. Header
+ * is a sticky grid row (matching the same column template as each body row);
+ * body rows are virtualized via `useVirtualizer` keyed on `count: devices.length`.
+ *
+ * Row height is fixed (`ROW_HEIGHT_PX`) which keeps `estimateSize` exact, so
+ * scroll position stays stable as the user filters.
+ */
 function DeviceTable({
   devices,
   disabledIds,
@@ -268,35 +298,79 @@ function DeviceTable({
   disabledIds: Set<string>;
   onDisable: (d: DeviceSummary) => void;
 }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const rowVirtualizer = useVirtualizer({
+    count: devices.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ROW_HEIGHT_PX,
+    overscan: 8,
+  });
+
+  const gridTemplate = "minmax(180px, 2fr) minmax(140px, 2fr) 180px 110px 110px";
+
   return (
-    <table
+    <div
+      ref={scrollRef}
       style={{
-        width: "100%",
-        borderCollapse: "collapse",
+        height: "100%",
+        overflow: "auto",
         fontSize: 13,
+        position: "relative",
       }}
+      data-testid="device-table-scroll"
     >
-      <thead>
-        <tr style={{ background: "#fafafa", borderBottom: "1px solid #e5e5e5" }}>
-          <Th>Device ID</Th>
-          <Th>Hostname</Th>
-          <Th>Last Seen</Th>
-          <Th>Status</Th>
-          <Th>Actions</Th>
-        </tr>
-      </thead>
-      <tbody>
-        {devices.map((d) => {
-          const effectiveStatus: DeviceStatus =
-            disabledIds.has(d.deviceId)
-              ? "disabled"
-              : (d.status ?? "active");
+      {/* Sticky header row */}
+      <div
+        role="row"
+        style={{
+          display: "grid",
+          gridTemplateColumns: gridTemplate,
+          background: "#fafafa",
+          borderBottom: "1px solid #e5e5e5",
+          position: "sticky",
+          top: 0,
+          zIndex: 1,
+        }}
+      >
+        <HeaderCell>Device ID</HeaderCell>
+        <HeaderCell>Hostname</HeaderCell>
+        <HeaderCell>Last Seen</HeaderCell>
+        <HeaderCell>Status</HeaderCell>
+        <HeaderCell>Actions</HeaderCell>
+      </div>
+      {/* Virtualized body */}
+      <div
+        style={{
+          height: `${rowVirtualizer.getTotalSize()}px`,
+          width: "100%",
+          position: "relative",
+        }}
+      >
+        {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+          const d = devices[virtualRow.index];
+          if (!d) return null;
+          const effectiveStatus: DeviceStatus = disabledIds.has(d.deviceId)
+            ? "disabled"
+            : (d.status ?? "active");
           return (
-            <tr
+            <div
               key={d.deviceId}
-              style={{ borderBottom: "1px solid #f0f0f0" }}
+              role="row"
+              data-testid="device-row"
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: `${virtualRow.size}px`,
+                transform: `translateY(${virtualRow.start}px)`,
+                display: "grid",
+                gridTemplateColumns: gridTemplate,
+                borderBottom: "1px solid #f0f0f0",
+                alignItems: "center",
+              }}
             >
-              <Td>
+              <BodyCell>
                 <span
                   title={d.deviceId}
                   style={{
@@ -306,13 +380,15 @@ function DeviceTable({
                 >
                   {truncateDeviceId(d.deviceId)}
                 </span>
-              </Td>
-              <Td>{d.hostname ?? <span style={{ color: "#aaa" }}>—</span>}</Td>
-              <Td>{formatUtc(d.lastSeenUtc)}</Td>
-              <Td>
+              </BodyCell>
+              <BodyCell>
+                {d.hostname ?? <span style={{ color: "#aaa" }}>—</span>}
+              </BodyCell>
+              <BodyCell>{formatUtc(d.lastSeenUtc)}</BodyCell>
+              <BodyCell>
                 <StatusPill status={effectiveStatus} />
-              </Td>
-              <Td>
+              </BodyCell>
+              <BodyCell>
                 <RoleGate
                   role={ROLE_ADMIN}
                   fallback={
@@ -339,12 +415,48 @@ function DeviceTable({
                     Disable
                   </button>
                 </RoleGate>
-              </Td>
-            </tr>
+              </BodyCell>
+            </div>
           );
         })}
-      </tbody>
-    </table>
+      </div>
+    </div>
+  );
+}
+
+function HeaderCell({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      role="columnheader"
+      style={{
+        padding: "8px 12px",
+        textAlign: "left",
+        fontWeight: 600,
+        fontSize: 11,
+        color: "#555",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function BodyCell({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      role="cell"
+      style={{
+        padding: "7px 12px",
+        fontSize: 13,
+        color: "#222",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -444,6 +556,21 @@ function ConfirmModal({
           Disable device?
         </h3>
         <p style={{ margin: "0 0 8px", fontSize: 13, color: "#444" }}>
+          Device:{" "}
+          <code
+            style={{
+              background: "#f3f4f6",
+              padding: "1px 4px",
+              borderRadius: 3,
+              fontSize: 12,
+              wordBreak: "break-all",
+            }}
+            data-testid="confirm-device-id"
+          >
+            {device.deviceId}
+          </code>
+        </p>
+        <p style={{ margin: "0 0 8px", fontSize: 13, color: "#444" }}>
           This will post{" "}
           <code
             style={{
@@ -453,7 +580,7 @@ function ConfirmModal({
               fontSize: 12,
             }}
           >
-            {`POST /v1/admin/devices/${truncateDeviceId(device.deviceId)}/disable`}
+            {`POST /v1/admin/devices/{id}/disable`}
           </code>{" "}
           using your operator bearer token.
         </p>
@@ -543,38 +670,6 @@ function CenteredText({ text, muted }: { text: string; muted?: boolean }) {
     <div style={{ padding: 14, color: muted ? "#777" : "#222", fontSize: 13 }}>
       {text}
     </div>
-  );
-}
-
-function Th({ children }: { children: React.ReactNode }) {
-  return (
-    <th
-      style={{
-        padding: "6px 12px",
-        textAlign: "left",
-        fontWeight: 600,
-        fontSize: 11,
-        color: "#555",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </th>
-  );
-}
-
-function Td({ children }: { children: React.ReactNode }) {
-  return (
-    <td
-      style={{
-        padding: "7px 12px",
-        verticalAlign: "middle",
-        fontSize: 13,
-        color: "#222",
-      }}
-    >
-      {children}
-    </td>
   );
 }
 
