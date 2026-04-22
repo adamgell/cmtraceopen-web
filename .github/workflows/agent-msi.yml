@@ -154,7 +154,9 @@ jobs:
       - name: Check for ring crate (must be absent)
         shell: pwsh
         run: |
-          $ringFound = cargo tree -p agent --edges normal 2>&1 | Select-String 'ring\s+v\d'
+          # Word-boundary on the left so 'widestring v1.2.1' doesn't
+          # false-positive as 'ring v1.2.1'.
+          $ringFound = cargo tree -p agent --edges normal 2>&1 | Select-String '\bring\s+v\d'
           if ($ringFound) {
             Write-Error @"
           ring crate detected in the agent's NORMAL dep tree. CONTRIBUTING.md prohibits ring.
