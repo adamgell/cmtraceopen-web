@@ -355,6 +355,12 @@ pub fn merge_override(base: &AgentConfig, over: &AgentConfigOverride) -> AgentCo
         request_timeout_secs: over
             .request_timeout_secs
             .unwrap_or(base.request_timeout_secs),
+        // PR #97 deprecated `evidence_schedule` in favor of `[collection.schedule]`.
+        // Config-push still surfaces it for back-compat with operators
+        // who haven't migrated; the new collection field above carries
+        // the canonical scheduler config. Allow the deprecated read
+        // explicitly so workspace-level `-D warnings` doesn't fail CI.
+        #[allow(deprecated)]
         evidence_schedule: over
             .evidence_schedule
             .clone()
@@ -475,7 +481,10 @@ mod tests {
         assert_eq!(merged.queue_max_bundles, 5);
         // Untouched fields keep the base value.
         assert_eq!(merged.request_timeout_secs, base.request_timeout_secs);
-        assert_eq!(merged.evidence_schedule, base.evidence_schedule);
+        #[allow(deprecated)]
+        {
+            assert_eq!(merged.evidence_schedule, base.evidence_schedule);
+        }
     }
 
     #[test]
