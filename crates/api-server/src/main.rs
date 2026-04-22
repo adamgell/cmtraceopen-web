@@ -150,7 +150,11 @@ async fn main() -> ExitCode {
     // annotation (or when passed into a function whose parameter type
     // already nails the trait object).
     {
-        let meta_for_retention: Arc<dyn api_server::storage::MetadataStore> = Arc::clone(&meta);
+        // `Arc::clone(&meta)` would bind T = dyn MetadataStore from the LHS
+        // and then choke on `&meta: &Arc<SqliteMetadataStore>`. Method-call
+        // syntax binds T to the concrete type, then the let's type
+        // annotation triggers the unsizing coercion to the trait object.
+        let meta_for_retention: Arc<dyn api_server::storage::MetadataStore> = meta.clone();
         let blobs_for_retention = Arc::clone(&blobs);
         let cfg_for_retention = config.clone();
         tokio::spawn(async move {
