@@ -52,6 +52,12 @@
 //! via the `pure-rust` feature) and exposes `RS256PublicKey::from_components`
 //! for loading a JWK's `n` + `e` parameters directly.
 
+pub mod device_identity;
+
+pub use device_identity::{
+    DeviceIdentity, DeviceIdentitySource, ParsedSanUri, SanUriError,
+};
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
