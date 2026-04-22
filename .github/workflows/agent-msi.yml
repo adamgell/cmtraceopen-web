@@ -1,0 +1,404 @@
+name: "cmtraceopen-web: Build + sign agent MSI"
+
+# Builds the cmtraceopen-agent Rust binary, signs all artifacts with the
+# Cloud PKI code-signing cert installed on the self-hosted build VM, packages
+# them into a WiX MSI, and attaches the signed MSI to a GitHub Release.
+#
+# Trigger contract:
+#   - `git tag agent-v0.1.0 && git push --tags` → full sign + release.
+#   - `workflow_dispatch` → on-demand build; optionally skip signing via input.
+#
+# Prerequisites (must be met before the workflow runs):
+#   1. WiX MSI sources in crates/agent/installer/wix/ (separate issue).
+#   2. Build VM provisioned + self-hosted runner registered with labels
+#      [self-hosted, windows, cmtrace-build] (docs/wave4/07-build-vm-runbook.md).
+#   3. Cloud PKI codeSigning cert profile assigned to the build VM and synced
+#      so the cert is present in LocalMachine\My (docs/wave4/02-code-signing.md §4).
+#   4. Windows SDK installed on the build VM (signtool.exe in Windows Kits\10\bin).
+#
+# Cross-references:
+#   - docs/wave4/01-msi-design.md §10  — CI shape rationale
+#   - docs/wave4/02-code-signing.md    — signing strategy
+#   - docs/wave4/15-agent-msi-ci.md   — operator recipe + troubleshooting
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver to build (leave blank to read from crates/agent/Cargo.toml)"
+        required: false
+        type: string
+      sign:
+        description: "Sign artifacts with the Cloud PKI cert (false = unsigned dry-run)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+# `contents: write` is required for:
+#   - actions/upload-artifact (write to the run's artifact store)
+#   - softprops/action-gh-release (create/update a GitHub Release and upload assets)
+permissions:
+  contents: write
+
+jobs:
+  build-sign-publish:
+    name: Build, sign, and publish agent MSI
+    runs-on: [self-hosted, windows, cmtrace-build]
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Checkout
+      # submodules: true because the root workspace path-depends on
+      # cmtraceopen/crates/cmtraceopen-parser (same rationale as ci.yml).
+      # -----------------------------------------------------------------------
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      # -----------------------------------------------------------------------
+      # Resolve version
+      # On tag runs the tag IS the version source of truth. On manual runs the
+      # operator can override; otherwise we fall back to Cargo.toml.
+      # -----------------------------------------------------------------------
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $ver = '${{ inputs.version }}'
+
+          # On a tag push, strip the leading "agent-v" prefix.
+          if (-not $ver -and '${{ github.ref_type }}' -eq 'tag') {
+            $ver = '${{ github.ref_name }}' -replace '^agent-v', ''
+          }
+
+          # Fall back: read from crates/agent/Cargo.toml.
+          if (-not $ver) {
+            $line = Select-String '^\s*version\s*=' crates/agent/Cargo.toml |
+                    Select-Object -First 1 |
+                    ForEach-Object { $_.Line }
+            if ($line -match '"([^"]+)"') {
+              $ver = $Matches[1]
+            }
+          }
+
+          if (-not $ver) {
+            Write-Error "Cannot determine version. Pass -version input or ensure crates/agent/Cargo.toml has a version field."
+            exit 1
+          }
+
+          Write-Host "Building version: $ver"
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # -----------------------------------------------------------------------
+      # Rust toolchain
+      # Use the pinned version declared in rust-toolchain.toml (stable).
+      # The x86_64-pc-windows-msvc target is already the native default on a
+      # Windows runner — no --target flag required.
+      # -----------------------------------------------------------------------
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      # -----------------------------------------------------------------------
+      # Build the agent binary in release mode.
+      # Output: target\release\cmtraceopen-agent.exe
+      # -----------------------------------------------------------------------
+      - name: Build agent (release)
+        shell: pwsh
+        run: cargo build --release -p agent
+
+      # -----------------------------------------------------------------------
+      # Locate signtool.exe dynamically.
+      # Searches the Windows Kits install tree for the x64 signtool binary so
+      # the workflow doesn't need to hardcode a specific SDK version.
+      # Fails with a clear error if the Windows SDK is not installed on the VM.
+      # -----------------------------------------------------------------------
+      - name: Locate signtool
+        id: signtool
+        shell: pwsh
+        run: |
+          $bases = @(
+            'C:\Program Files (x86)\Windows Kits\10\bin',
+            'C:\Program Files\Windows Kits\10\bin'
+          )
+          $signtool = $null
+          foreach ($base in $bases) {
+            if (-not (Test-Path $base)) { continue }
+            $signtool = Get-ChildItem -Path $base -Recurse -Filter signtool.exe `
+                          -ErrorAction SilentlyContinue |
+                        Where-Object { $_.FullName -match '\\x64\\' } |
+                        Sort-Object FullName -Descending |
+                        Select-Object -First 1 -ExpandProperty FullName
+            if ($signtool) { break }
+          }
+          if (-not $signtool) {
+            Write-Error @"
+          signtool.exe not found in any expected Windows SDK location.
+          Install the Windows 10 SDK on the build VM and ensure the
+          'Windows SDK Signing Tools for Desktop Apps' component is selected.
+          Expected search paths:
+            C:\Program Files (x86)\Windows Kits\10\bin\**\x64\signtool.exe
+            C:\Program Files\Windows Kits\10\bin\**\x64\signtool.exe
+          "@
+            exit 1
+          }
+          Write-Host "Found signtool: $signtool"
+          "path=$signtool" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # -----------------------------------------------------------------------
+      # Locate the Cloud PKI code-signing cert in LocalMachine\My.
+      # The cert is provisioned by the Intune Cloud PKI cert profile assigned
+      # to the build VM (docs/wave4/02-code-signing.md §4).
+      # Fails with a clear diagnostic message if the cert is absent or expired.
+      # -----------------------------------------------------------------------
+      - name: Locate Cloud PKI cert
+        id: cert
+        if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
+        shell: pwsh
+        run: |
+          $now = Get-Date
+          $cert = Get-ChildItem Cert:\LocalMachine\My |
+                  Where-Object {
+                    $_.HasPrivateKey -and
+                    $_.Issuer -match 'Gell.*PKI' -and
+                    $_.NotAfter -gt $now
+                  } |
+                  Sort-Object NotBefore -Descending |
+                  Select-Object -First 1
+
+          if (-not $cert) {
+            Write-Error @"
+          No valid Cloud PKI code-signing cert found in LocalMachine\My.
+
+          Expected: a cert with Issuer matching 'Gell*PKI', HasPrivateKey=True,
+          and NotAfter in the future.
+
+          Remediation:
+            1. Open the Intune portal and confirm the codeSigning cert profile
+               is assigned to this device's group.
+            2. On this machine run: Start-Process -Wait 'C:\Windows\System32\deviceenrollmentmgr.exe'
+               and wait for the next Intune sync (up to 15 min).
+            3. Run: Get-ChildItem Cert:\LocalMachine\My to confirm the cert appears.
+
+          See docs/wave4/02-code-signing.md §4 for full setup instructions.
+          "@
+            exit 1
+          }
+
+          Write-Host "Found cert: $($cert.Subject)"
+          Write-Host "  Thumbprint : $($cert.Thumbprint)"
+          Write-Host "  Issuer     : $($cert.Issuer)"
+          Write-Host "  NotBefore  : $($cert.NotBefore)"
+          Write-Host "  NotAfter   : $($cert.NotAfter)"
+          "thumbprint=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # -----------------------------------------------------------------------
+      # Sign cmtraceopen-agent.exe
+      # The EXE must be signed before WiX packages it into the MSI so that
+      # signtool verify /all on the MSI also validates the inner binary.
+      # -----------------------------------------------------------------------
+      - name: Sign agent EXE
+        if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
+        shell: pwsh
+        run: |
+          $exe   = 'target\release\cmtraceopen-agent.exe'
+          $thumb = '${{ steps.cert.outputs.thumbprint }}'
+          & '${{ steps.signtool.outputs.path }}' sign `
+              /sha1  $thumb `
+              /tr    http://timestamp.digicert.com `
+              /td    sha256 `
+              /fd    sha256 `
+              /d     "CMTraceOpen Agent" `
+              "$exe"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool sign failed for $exe (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+          Write-Host "Signed: $exe"
+
+      # -----------------------------------------------------------------------
+      # Sign CertCheck.ps1 (custom action script)
+      # Set-AuthenticodeSignature is the PowerShell-native equivalent of
+      # signtool for script files; it embeds the SIG block at the end of the
+      # script so PowerShell can verify it before execution.
+      # Skipped if the script doesn't exist yet (WiX sources not yet merged).
+      # -----------------------------------------------------------------------
+      - name: Sign CertCheck.ps1
+        if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
+        shell: pwsh
+        run: |
+          $ps1 = 'crates\agent\installer\wix\CertCheck.ps1'
+          if (-not (Test-Path $ps1)) {
+            Write-Host "CertCheck.ps1 not found at $ps1 — skipping (WiX sources not yet present)."
+            exit 0
+          }
+
+          $thumb = '${{ steps.cert.outputs.thumbprint }}'
+          $cert  = Get-ChildItem Cert:\LocalMachine\My |
+                   Where-Object { $_.Thumbprint -eq $thumb } |
+                   Select-Object -First 1
+          if (-not $cert) {
+            Write-Error "Cert with thumbprint $thumb not found in LocalMachine\My"
+            exit 1
+          }
+
+          $result = Set-AuthenticodeSignature `
+                      -FilePath        $ps1 `
+                      -Certificate     $cert `
+                      -TimestampServer http://timestamp.digicert.com `
+                      -HashAlgorithm   SHA256
+
+          if ($result.Status -ne 'Valid') {
+            Write-Error "Set-AuthenticodeSignature failed for $ps1 (status: $($result.Status))"
+            exit 1
+          }
+          Write-Host "Signed: $ps1 (status: $($result.Status))"
+
+      # -----------------------------------------------------------------------
+      # Install WiX v4 (dotnet global tool)
+      # `dotnet tool install` is idempotent: if the tool is already installed
+      # at the same version it prints a notice and exits 0. The `|| true`
+      # equivalent (`--ignore-failed-installs` is not a flag; we redirect
+      # stderr and inspect exit code) is handled by the `2>&1` capture.
+      # -----------------------------------------------------------------------
+      - name: Install WiX v4
+        shell: pwsh
+        run: |
+          $out = dotnet tool install --global wix 2>&1 | Out-String
+          Write-Host $out
+          # dotnet tool install exits 1 if the tool is already installed at
+          # the same version — treat that as success.
+          if ($LASTEXITCODE -ne 0 -and $out -notmatch 'already installed') {
+            Write-Error "Failed to install WiX v4 (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+          # Persist the dotnet tools directory to GITHUB_PATH so wix.exe is
+          # available in all subsequent steps (GITHUB_PATH is read at step start).
+          $userTools = [System.IO.Path]::Combine($env:USERPROFILE, '.dotnet', 'tools')
+          $userTools | Out-File -FilePath $env:GITHUB_PATH -Append
+          # Verify in the current step (update local PATH first).
+          $env:PATH = "$userTools;$env:PATH"
+          wix --version
+
+      # -----------------------------------------------------------------------
+      # Build MSI
+      # build.ps1 runs `wix build` to produce the MSI. The EXE and PS1 are
+      # already signed at this point so the inner-binary signature is embedded.
+      # We intentionally do NOT pass -SignCertThumbprint here; we sign the MSI
+      # in the next step so the WiX output is canonical before signing.
+      # -----------------------------------------------------------------------
+      - name: Build MSI
+        id: build-msi
+        shell: pwsh
+        run: |
+          $ver    = '${{ steps.version.outputs.version }}'
+          $relBin = 'target\release\cmtraceopen-agent.exe'
+          $script = 'crates\agent\installer\wix\build.ps1'
+
+          if (-not (Test-Path $script)) {
+            Write-Error @"
+          build.ps1 not found at $script.
+          The WiX MSI sources have not been merged yet (separate issue).
+          This step will succeed once the WiX implementation lands.
+          "@
+            exit 1
+          }
+
+          & $script -ReleaseBinary $relBin -Version $ver
+
+          $msi = "out\CMTraceOpenAgent-$ver.msi"
+          if (-not (Test-Path $msi)) {
+            Write-Error "Expected MSI not found: $msi. Check build.ps1 output above."
+            exit 1
+          }
+          Write-Host "MSI built: $msi"
+          "msi-path=$msi"     | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "msi-name=CMTraceOpenAgent-$ver.msi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # -----------------------------------------------------------------------
+      # Sign MSI
+      # The MSI is signed after WiX builds it. Using the same cert + timestamp
+      # server as the inner EXE keeps the chain consistent.
+      # -----------------------------------------------------------------------
+      - name: Sign MSI
+        if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
+        shell: pwsh
+        run: |
+          $msi   = '${{ steps.build-msi.outputs.msi-path }}'
+          $thumb = '${{ steps.cert.outputs.thumbprint }}'
+          & '${{ steps.signtool.outputs.path }}' sign `
+              /sha1  $thumb `
+              /tr    http://timestamp.digicert.com `
+              /td    sha256 `
+              /fd    sha256 `
+              /d     "CMTraceOpen Agent Installer" `
+              "$msi"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "signtool sign failed for $msi (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+          Write-Host "Signed MSI: $msi"
+
+      # -----------------------------------------------------------------------
+      # Verify all signed artifacts
+      # `signtool verify /pa /v /all` walks the full cert chain and validates
+      # the timestamp. Fails the run loudly before upload so we never publish
+      # an artifact with a broken signature.
+      # -----------------------------------------------------------------------
+      - name: Verify signed artifacts
+        if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
+        shell: pwsh
+        run: |
+          $stool = '${{ steps.signtool.outputs.path }}'
+          $artifacts = @(
+            'target\release\cmtraceopen-agent.exe',
+            '${{ steps.build-msi.outputs.msi-path }}'
+          )
+
+          $ps1 = 'crates\agent\installer\wix\CertCheck.ps1'
+          if (Test-Path $ps1) { $artifacts += $ps1 }
+
+          foreach ($f in $artifacts) {
+            if (-not (Test-Path $f)) { continue }
+            Write-Host "Verifying: $f"
+            & $stool verify /pa /v /all $f
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "signtool verify FAILED for $f"
+              exit $LASTEXITCODE
+            }
+          }
+          Write-Host "All artifacts verified successfully."
+
+      # -----------------------------------------------------------------------
+      # Upload MSI as a workflow artifact
+      # This lets the artifact be downloaded from the GitHub Actions UI
+      # regardless of whether a Release exists (useful for workflow_dispatch
+      # dry-runs).
+      # -----------------------------------------------------------------------
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build-msi.outputs.msi-name }}
+          path: ${{ steps.build-msi.outputs.msi-path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
+      # Attach MSI to GitHub Release
+      # Only runs on `agent-v*` tag pushes. softprops/action-gh-release creates
+      # the Release if it doesn't exist (matching the tag name) and uploads
+      # the MSI as a release asset.
+      # -----------------------------------------------------------------------
+      - name: Attach MSI to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/agent-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ steps.build-msi.outputs.msi-path }}
+          fail_on_unmatched_files: true
