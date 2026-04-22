@@ -58,6 +58,14 @@ jobs:
     # outside collaborators => "Require approval for all outside collaborators".
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, cmtrace-build]
+    env:
+      # Persistent cargo target dir outside the workspace so
+      # actions/checkout's clean pass doesn't wipe it between runs.
+      # `~/.cargo/registry` + `~/.cargo/git` already persist under the
+      # cmtraceopen-runner home so the package cache survives too.
+      # First run populates the cache; subsequent runs reuse it and
+      # build in <60s instead of 5-8 min.
+      CARGO_TARGET_DIR: C:\actions-runner\_tool\cmtrace-target
 
     steps:
       # -----------------------------------------------------------------------
@@ -174,11 +182,13 @@ jobs:
       # (output path silently shifts to target\aarch64-pc-windows-msvc\release\).
       # Matches the canonical invocation documented in
       # crates/agent/installer/wix/build.ps1 (PR #87).
-      # Output: target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe
+      # Output: $CARGO_TARGET_DIR\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe
+      # --locked fails fast on Cargo.lock drift, so dependency mutation
+      # never silently slips through CI.
       # -----------------------------------------------------------------------
       - name: Build agent (release)
         shell: pwsh
-        run: cargo build --release -p agent --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked -p agent --target x86_64-pc-windows-msvc
 
       # -----------------------------------------------------------------------
       # Locate signtool.exe dynamically.
@@ -283,7 +293,7 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
         shell: pwsh
         run: |
-          $exe   = 'target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'
+          $exe   = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'
           $thumb = '${{ steps.cert.outputs.thumbprint }}'
           # /sm = search LocalMachine\My (not CurrentUser\My). The cert
           # is delivered by Intune to the machine store.
@@ -417,7 +427,7 @@ jobs:
         shell: pwsh
         run: |
           $ver    = '${{ steps.version.outputs.version }}'
-          $relBin = 'target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'
+          $relBin = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'
           $script = 'crates\agent\installer\wix\build.ps1'
 
           if (-not (Test-Path $script)) {
@@ -477,7 +487,7 @@ jobs:
         run: |
           $stool = '${{ steps.signtool.outputs.path }}'
           $artifacts = @(
-            'target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe',
+            (Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'),
             '${{ steps.build-msi.outputs.msi-path }}'
           )
 
