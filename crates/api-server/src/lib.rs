@@ -58,6 +58,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .merge(routes::status::router(state.clone()))
         .merge(routes::health::router())
+        .merge(routes::metrics::router(state.clone()))
         .merge(routes::ingest::router(state.clone()))
         .merge(routes::devices::router(state.clone()))
         .merge(routes::sessions::router(state.clone()))

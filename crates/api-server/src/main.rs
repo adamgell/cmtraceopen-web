@@ -6,7 +6,7 @@ use api_server::auth::{AuthMode, AuthState, JwksCache};
 use api_server::auth::CrlCache;
 use api_server::config::Config;
 use api_server::router;
-use api_server::state::{AppState, CorsConfig, MtlsRuntimeConfig};
+use api_server::state::{install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig};
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -40,6 +40,14 @@ fn install_crypto_provider() {
 async fn main() -> ExitCode {
     init_tracing();
     install_crypto_provider();
+
+    // Install the Prometheus recorder before any code paths that emit
+    // metrics. `install_metrics_recorder` is idempotent (wrapped in a
+    // `OnceLock`), so doing it here in addition to lazy init from
+    // `AppState::new` is harmless — it just guarantees metric describes
+    // happen before the first scrape.
+    let _metrics_handle = install_metrics_recorder();
+    describe_metrics();
 
     let config = match Config::from_env() {
         Ok(cfg) => cfg,
@@ -219,6 +227,53 @@ async fn main() -> ExitCode {
 
     info!("cmtraceopen-api stopped cleanly");
     ExitCode::SUCCESS
+}
+
+/// Register HELP / TYPE descriptions for every metric the server emits.
+///
+/// The metrics-rs facade stores these in the recorder so they show up in
+/// the `/metrics` response alongside the samples. Prometheus itself will
+/// scrape without descriptions, but Grafana's metric browser (and human
+/// operators) rely on them to explain what each counter means. Keep the
+/// list in sync with every `metrics::counter!()` / `histogram!()` /
+/// `gauge!()` call site in the crate.
+fn describe_metrics() {
+    use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
+
+    describe_counter!(
+        "cmtrace_http_requests_total",
+        "Total HTTP requests served, labeled by matched route template."
+    );
+    describe_histogram!(
+        "cmtrace_http_request_duration_seconds",
+        Unit::Seconds,
+        "End-to-end HTTP request handler duration in seconds, labeled by matched route template."
+    );
+    describe_counter!(
+        "cmtrace_ingest_bundles_initiated_total",
+        "Bundles for which an ingest /init request was accepted."
+    );
+    describe_counter!(
+        "cmtrace_ingest_bundles_finalized_total",
+        "Bundle-finalize attempts, labeled by outcome: ok | partial | failed."
+    );
+    describe_counter!(
+        "cmtrace_ingest_chunks_received_total",
+        "Chunks successfully appended to staged uploads."
+    );
+    describe_counter!(
+        "cmtrace_parse_worker_runs_total",
+        "Background parse-worker runs, labeled by result: ok | partial | failed."
+    );
+    describe_histogram!(
+        "cmtrace_parse_worker_duration_seconds",
+        Unit::Seconds,
+        "Wall-clock time spent in the background parse worker per session."
+    );
+    describe_gauge!(
+        "cmtrace_db_connections_in_use",
+        "Metadata-store pool connections currently checked out (size - idle)."
+    );
 }
 
 fn init_tracing() {

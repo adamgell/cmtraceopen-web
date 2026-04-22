@@ -10,10 +10,11 @@
 //! unified state type rather than juggling multiple `State<T>` extractors.
 
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use dashmap::DashMap;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 #[cfg(feature = "crl")]
@@ -120,6 +121,49 @@ pub struct AppState {
     /// that case, matching the pre-CRL posture.
     #[cfg(feature = "crl")]
     pub crl_cache: Option<Arc<CrlCache>>,
+    /// Handle to the process-wide Prometheus recorder, used by the
+    /// `/metrics` route to render the text-exposition snapshot. Cloned from
+    /// the global [`metrics_handle()`] so every `AppState` (real + test)
+    /// renders against the same underlying registry — counters incremented
+    /// during a test show up in that test's `/metrics` response.
+    pub metrics: PrometheusHandle,
+}
+
+/// Process-wide Prometheus recorder + handle.
+///
+/// `install_recorder()` registers a global recorder that the
+/// `metrics::counter!()` / `metrics::histogram!()` / `metrics::gauge!()`
+/// macros emit into. It can only be called **once** per process — calling it
+/// twice (e.g. across multiple integration tests in the same `cargo test`
+/// binary) returns an error. We wrap the install in a [`OnceLock`] so:
+///
+///   * `main.rs` initializes it explicitly at startup (and gets to log a
+///     warning if it ever fails);
+///   * Tests calling [`AppState::new`] / [`AppState::new_auth_disabled`] get
+///     a handle for free without having to plumb the install themselves.
+///
+/// The returned handle is `Clone` — cloning is cheap (it bumps an Arc).
+fn metrics_handle() -> PrometheusHandle {
+    static HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            // Default histogram buckets cover sub-millisecond → multi-second
+            // request paths, which fits both the cheap query routes and the
+            // chunky ingest finalize path. Tune via separate calls if a
+            // specific metric needs different bounds.
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("install_recorder failed: a Prometheus recorder was already registered")
+        })
+        .clone()
+}
+
+/// Public accessor for the global Prometheus handle. Exposed so `main.rs`
+/// can warm the recorder + log at startup; callers that just need the
+/// handle for an `AppState` field should use [`AppState::new`] which calls
+/// this internally.
+pub fn install_metrics_recorder() -> PrometheusHandle {
+    metrics_handle()
 }
 
 impl AppState {
@@ -172,6 +216,7 @@ impl AppState {
             mtls,
             #[cfg(feature = "crl")]
             crl_cache: None,
+            metrics: metrics_handle(),
         })
     }
 
@@ -200,6 +245,7 @@ impl AppState {
             cors,
             mtls,
             crl_cache,
+            metrics: metrics_handle(),
         })
     }
 
