@@ -37,6 +37,16 @@ hex = "0.4"
 bytes = "1"
 async-trait = "0.1"
 base64 = "0.22"
+# Operator bearer-token auth (Entra ID / Azure AD). `jsonwebtoken` drags in
+# `ring` transitively and we have a workspace rule against ring (see README);
+# `jwt-simple` ships with pure-rust crypto (rsa / p256 / ed25519-dalek) and
+# avoids ring entirely. `reqwest` is configured with `native-tls` (Schannel
+# on Windows, SecureTransport on macOS, OpenSSL on Linux) for the same
+# reason — `rustls-tls` pulls ring unless swapped to aws-lc-rs.
+jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+# Operator-auth JWKS cache needs non-blocking read-heavy access.
+parking_lot = "0.12"
 # Parse-on-ingest pipeline. Path-dep on the sibling cmtraceopen submodule;
 # the submodule pointer is managed at the repo root (.gitmodules). The
 # crate is pure Rust (no filesystem I/O, no tokio) and compiles to
@@ -48,9 +58,12 @@ cmtraceopen-parser = { path = "../../cmtraceopen/crates/cmtraceopen-parser" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
-# Integration tests talk to a local loopback server — no TLS needed, and
-# disabling the default TLS features keeps clang off the build path.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Ingest integration tests use reqwest with json-only features (native-tls
+# feature is already pulled in via the main `reqwest` entry, so no extra
+# build cost here — this entry exists so the test-only client can hit the
+# local loopback server over plain HTTP without the tls stack complaining).
+# The operator-auth integration test signs short-lived tokens with jwt-simple.
+jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "io-util", "sync", "time"] }
 # The parse-on-ingest integration test builds a synthetic evidence-zip

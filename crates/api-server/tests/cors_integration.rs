@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use api_server::auth::{AuthMode, AuthState, JwksCache};
 use api_server::router;
 use api_server::state::{AppState, CorsConfig};
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
@@ -39,7 +40,16 @@ async fn start_server_with_cors(cors: CorsConfig) -> TestServer {
             .await
             .expect("sqlite"),
     );
-    let state = AppState::with_cors(meta, blobs, "127.0.0.1:0".to_string(), cors);
+    // CORS preflight tests don't exercise the operator-bearer auth surface;
+    // build with auth disabled so OPTIONS / health requests don't trip the
+    // extractor. See `auth_integration.rs` for the auth-on tests.
+    let auth = AuthState {
+        mode: AuthMode::Disabled,
+        entra: None,
+        jwks: Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string())),
+    };
+    let state =
+        AppState::with_cors(meta, blobs, "127.0.0.1:0".to_string(), auth, cors);
     let app = router(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
