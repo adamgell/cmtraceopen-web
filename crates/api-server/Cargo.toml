@@ -56,6 +56,64 @@ cmtraceopen-parser = { path = "../../cmtraceopen/crates/cmtraceopen-parser" }
 # default features only (deflate) so no ring/openssl drift into the
 # transitive tree; the integration build verifies this.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# --- Wave 3 mTLS termination ---------------------------------------------
+# axum-server is the TLS-terminating wrapper around hyper that gives us
+# access to the rustls `ServerConnection`'s peer-cert handle (axum's own
+# `serve` does not surface the peer cert). The `tls-rustls-no-provider`
+# feature avoids pulling rustls' default `ring` provider — we explicitly
+# wire the `aws-lc-rs` provider below to keep the workspace ring-free
+# (see the README rule + the comment on the `jwt-simple` dep above).
+#
+# Gated behind the default `mtls` feature: the underlying `aws-lc-sys`
+# crate compiles a chunk of C/asm (cmake + NASM at build time). CI Ubuntu
+# has both; aarch64-windows-msvc dev boxes typically don't, so the dev
+# can drop the feature to compile-check the rest of the codebase
+# (`cargo check -p api-server --no-default-features`). When the feature
+# is off, the `tls_enabled` config flag is unconditionally `false`.
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+# `webpki` is pulled transitively by `rustls`, but we depend on it
+# explicitly so the `WebPkiClientVerifier` builder path is available.
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "aws-lc-rs"], optional = true }
+# rustls' parsed ClientCertVerified surface doesn't expose SAN extensions
+# directly — we re-parse the leaf DER with x509-parser to pull the URI
+# from the SAN.
+x509-parser = { version = "0.16", optional = true }
+
+[features]
+default = ["mtls"]
+# When enabled, the api-server can terminate TLS + perform mTLS client-cert
+# verification. Disable to skip building the rustls / aws-lc-sys C+asm
+# dependencies (useful on dev boxes that lack cmake/NASM). With the
+# feature off, `Config::tls_enabled` is forced to `false` and the only
+# device-identity surface is the legacy `X-Device-Id` header.
+mtls = [
+    "dep:axum-server",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:rustls-webpki",
+    "dep:x509-parser",
+]
+# Optional integration tests that mint a self-signed CA + leaf with
+# `rcgen`, spin up the TLS-terminating server, and drive a real mTLS
+# client through the ingest flow. Gated behind a feature so the default
+# `cargo test --workspace` pass doesn't require any extra setup; CI flips
+# `--features test-mtls` on the api-server crate explicitly. Implies
+# `mtls` since the test needs the TLS server bring-up code.
+test-mtls = ["mtls", "dep:rcgen", "dep:tokio-rustls"]
+
+[dependencies.rcgen]
+version = "0.13"
+optional = true
+default-features = false
+features = ["aws_lc_rs", "pem"]
+
+[dependencies.tokio-rustls]
+version = "0.26"
+optional = true
+default-features = false
+features = ["aws-lc-rs"]
 
 [dev-dependencies]
 # Ingest integration tests use reqwest with json-only features (native-tls
@@ -72,3 +130,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "
 # code path being exercised end-to-end.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "macros"] }
+# Note: rcgen + tokio-rustls are intentionally NOT mirrored into the
+# default dev-dependencies. The gated `test-mtls` integration test pulls
+# them via the `[features]` block above, so a default `cargo test` on a
+# dev box without cmake/NASM never touches aws-lc-sys.
