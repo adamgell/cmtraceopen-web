@@ -5,8 +5,10 @@
 //!   PUT  /v1/ingest/bundles/{upload_id}/chunks?offset=N  - append chunk
 //!   POST /v1/ingest/bundles/{upload_id}/finalize         - verify + commit
 //!
-//! Device identity is carried in the `X-Device-Id` header for MVP. All three
-//! routes require it. TODO(M2): switch to cert-identity middleware.
+//! Device identity comes from the [`DeviceIdentity`] extractor (Wave 3).
+//! Under TLS termination the identity is the AAD device ID parsed out of
+//! the client cert's SAN URI; the legacy `X-Device-Id` header still
+//! works as a transitional fallback when `CMTRACE_MTLS_REQUIRE_INGEST=false`.
 
 use std::sync::Arc;
 
@@ -25,8 +27,8 @@ use common_wire::ingest::{
     BundleInitResponse, ChunkUploadResponse,
 };
 
+use crate::auth::DeviceIdentity;
 use crate::error::AppError;
-use crate::extract::DeviceId;
 use crate::pipeline::parse_worker::{self, ParseDeps};
 use crate::state::{AppState, DEFAULT_CHUNK_SIZE, MAX_CHUNK_SIZE};
 use crate::storage::{NewUpload, SessionRow, StorageError};
@@ -72,7 +74,8 @@ fn validate_content_kind(k: &str) -> Result<(), AppError> {
 #[instrument(
     skip_all,
     fields(
-        device_id = %device_id,
+        device_id = %identity.device_id,
+        identity_source = ?identity.source,
         bundle_id = %req.bundle_id,
         size_bytes = req.size_bytes,
         content_kind = %req.content_kind,
@@ -80,9 +83,10 @@ fn validate_content_kind(k: &str) -> Result<(), AppError> {
 )]
 async fn init(
     State(state): State<Arc<AppState>>,
-    DeviceId(device_id): DeviceId,
+    identity: DeviceIdentity,
     Json(req): Json<BundleInitRequest>,
 ) -> Result<(StatusCode, Json<BundleInitResponse>), AppError> {
+    let device_id = identity.device_id.clone();
     validate_sha256_hex(&req.sha256)?;
     validate_content_kind(&req.content_kind)?;
     if req.size_bytes == 0 {
@@ -223,7 +227,8 @@ struct ChunkQuery {
 #[instrument(
     skip_all,
     fields(
-        device_id = %device_id,
+        device_id = %identity.device_id,
+        identity_source = ?identity.source,
         upload_id = %upload_id,
         offset = q.offset,
         chunk_len = body.len(),
@@ -231,11 +236,12 @@ struct ChunkQuery {
 )]
 async fn put_chunk(
     State(state): State<Arc<AppState>>,
-    DeviceId(device_id): DeviceId,
+    identity: DeviceIdentity,
     Path(upload_id): Path<Uuid>,
     Query(q): Query<ChunkQuery>,
     body: Bytes,
 ) -> Result<Json<ChunkUploadResponse>, AppError> {
+    let device_id = identity.device_id.clone();
     let upload = state.meta.get_upload(upload_id).await?;
 
     // Device binding: the upload belongs to the device that created it. A
@@ -316,16 +322,18 @@ async fn put_chunk(
 #[instrument(
     skip_all,
     fields(
-        device_id = %device_id,
+        device_id = %identity.device_id,
+        identity_source = ?identity.source,
         upload_id = %upload_id,
     ),
 )]
 async fn finalize(
     State(state): State<Arc<AppState>>,
-    DeviceId(device_id): DeviceId,
+    identity: DeviceIdentity,
     Path(upload_id): Path<Uuid>,
     Json(req): Json<BundleFinalizeRequest>,
 ) -> Result<(StatusCode, Json<BundleFinalizeResponse>), AppError> {
+    let device_id = identity.device_id.clone();
     validate_sha256_hex(&req.final_sha256)?;
 
     let upload = state.meta.get_upload(upload_id).await?;

@@ -16,6 +16,27 @@ use std::time::Instant;
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 use crate::storage::{BlobStore, MetadataStore};
 
+/// Subset of [`crate::config::TlsConfig`] the request-handling layer needs
+/// at runtime: which scheme to expect on the SAN URI and whether ingest
+/// routes should reject requests that arrive without a verified client
+/// cert. The cert/key/CA paths live only in the startup path.
+#[derive(Debug, Clone)]
+pub struct MtlsRuntimeConfig {
+    /// Mirror of [`crate::config::TlsConfig::require_on_ingest`].
+    pub require_on_ingest: bool,
+    /// Mirror of [`crate::config::TlsConfig::expected_san_uri_scheme`].
+    pub expected_san_uri_scheme: String,
+}
+
+impl Default for MtlsRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            require_on_ingest: false,
+            expected_san_uri_scheme: "device".to_string(),
+        }
+    }
+}
+
 /// Subset of [`crate::config::Config`] that the router threads into layers.
 ///
 /// Kept as a small `Clone` struct (rather than an `Arc<Config>`) so tests can
@@ -63,6 +84,10 @@ pub struct AppState {
     /// CORS settings threaded into the outer layer at router-build time. Kept
     /// on `AppState` so tests and `main.rs` share a single construction path.
     pub cors: CorsConfig,
+    /// mTLS runtime knobs consumed by the `DeviceIdentity` extractor on
+    /// ingest routes. Defaults to "no enforcement", which preserves the
+    /// legacy `X-Device-Id` header-only behavior.
+    pub mtls: MtlsRuntimeConfig,
 }
 
 impl AppState {
@@ -89,6 +114,20 @@ impl AppState {
         auth: AuthState,
         cors: CorsConfig,
     ) -> Arc<Self> {
+        Self::full(meta, blobs, listen_addr, auth, cors, MtlsRuntimeConfig::default())
+    }
+
+    /// Build the shared state with explicit CORS + mTLS knobs. The full
+    /// constructor used by `main.rs`; tests usually go through `new` /
+    /// `with_cors` and pick up the default (mTLS off) variant.
+    pub fn full(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        auth: AuthState,
+        cors: CorsConfig,
+        mtls: MtlsRuntimeConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             meta,
             blobs,
@@ -98,6 +137,7 @@ impl AppState {
             hostname: detect_hostname(),
             auth,
             cors,
+            mtls,
         })
     }
 

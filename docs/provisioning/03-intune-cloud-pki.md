@@ -273,29 +273,45 @@ Reference: <https://learn.microsoft.com/mem/intune/configuration/custom-settings
    - **Prod**: `/etc/cmtraceopen/certs/client-ca.pem`, owned by the api-server
      service user, mode `0644`.
    - **Dev**: `./config/ca/cloud-pki-issuing.pem` relative to the compose root.
-5. Future `docker-compose.yml` mount (Wave 3 — reference, not required yet):
+5. `docker-compose.yml` mount (Wave 3 — reference; uses the
+   `CMTRACE_*` prefix the api-server actually reads):
 
    ```yaml
    services:
      api-server:
        volumes:
-         - ./config/ca/cloud-pki-issuing.pem:/etc/cmtraceopen/certs/client-ca.pem:ro
+         - ./config/ca/gell-pki-root.pem:/etc/cmtraceopen/certs/client-ca.pem:ro
+         - ./config/tls/server.crt:/etc/cmtraceopen/certs/server.crt:ro
+         - ./config/tls/server.key:/etc/cmtraceopen/certs/server.key:ro
        environment:
-         CMTRACEOPEN_CLIENT_CA_BUNDLE: /etc/cmtraceopen/certs/client-ca.pem
-         CMTRACEOPEN_MTLS_REQUIRE: "true"
-         CMTRACEOPEN_SAN_URI_SCHEME: "device"
+         CMTRACE_TLS_ENABLED: "true"
+         CMTRACE_TLS_CERT: /etc/cmtraceopen/certs/server.crt
+         CMTRACE_TLS_KEY: /etc/cmtraceopen/certs/server.key
+         CMTRACE_CLIENT_CA_BUNDLE: /etc/cmtraceopen/certs/client-ca.pem
+         CMTRACE_MTLS_REQUIRE_INGEST: "true"
+         CMTRACE_SAN_URI_SCHEME: "device"
    ```
 
 ### api-server config contract (for the Wave 3 mTLS agent)
 
-| Env var                          | Meaning                                                               | Example                                       |
-| -------------------------------- | --------------------------------------------------------------------- | --------------------------------------------- |
-| `CMTRACEOPEN_CLIENT_CA_BUNDLE`   | Absolute path to the PEM-encoded Cloud PKI issuing CA                 | `/etc/cmtraceopen/certs/client-ca.pem`        |
-| `CMTRACEOPEN_MTLS_REQUIRE`       | If `true`, reject connections that don't present a valid client cert  | `true`                                        |
-| `CMTRACEOPEN_SAN_URI_SCHEME`     | Expected URI scheme in the client cert SAN                            | `device`                                      |
-| `CMTRACEOPEN_TENANT_ID_EXPECTED` | Optional — pin accepted tenant GUID in the SAN URI host component     | `00000000-0000-0000-0000-000000000000`        |
-| `CMTRACEOPEN_CRL_URL`            | CRL distribution point polled hourly (Wave 3 revocation check)        | `https://<cloud-pki-crl-endpoint>/cmtrace.crl` |
-| `CMTRACEOPEN_CRL_REFRESH_SECS`   | Seconds between CRL refreshes (default 3600)                          | `3600`                                        |
+> **Note:** the env-var prefix shipped in code is `CMTRACE_*` (not the
+> `CMTRACEOPEN_*` placeholder originally drafted in this runbook). The
+> rest of the platform — `CMTRACE_LISTEN_ADDR`, `CMTRACE_AUTH_MODE`, etc.
+> — already uses `CMTRACE_`, so the mTLS surface follows suit.
+> CRL polling (`CMTRACE_CRL_*`) is a follow-up; only the `CMTRACE_TLS_*`
+> + `CMTRACE_MTLS_*` + `CMTRACE_SAN_URI_SCHEME` + `CMTRACE_CLIENT_CA_BUNDLE`
+> rows below are wired in the Wave 3 PR.
+
+| Env var                       | Meaning                                                               | Example                                       |
+| ----------------------------- | --------------------------------------------------------------------- | --------------------------------------------- |
+| `CMTRACE_TLS_ENABLED`         | Master switch — turns on TLS termination + the mTLS surface           | `true`                                        |
+| `CMTRACE_TLS_CERT`            | Absolute path to the server's own PEM-encoded cert chain              | `/etc/cmtraceopen/certs/server.crt`           |
+| `CMTRACE_TLS_KEY`             | Absolute path to the server's PEM-encoded private key                 | `/etc/cmtraceopen/certs/server.key`           |
+| `CMTRACE_CLIENT_CA_BUNDLE`    | Absolute path to the PEM-encoded Cloud PKI trust bundle               | `/etc/cmtraceopen/certs/client-ca.pem`        |
+| `CMTRACE_MTLS_REQUIRE_INGEST` | If `true`, ingest 401s without a verified client cert (default: true) | `true`                                        |
+| `CMTRACE_SAN_URI_SCHEME`      | Expected URI scheme in the client cert SAN (default: `device`)        | `device`                                      |
+| `CMTRACE_CRL_URL`             | _Future:_ CRL distribution point polled hourly                        | `https://<cloud-pki-crl-endpoint>/cmtrace.crl` |
+| `CMTRACE_CRL_REFRESH_SECS`    | _Future:_ seconds between CRL refreshes (default 3600)                | `3600`                                        |
 
 Filesystem convention:
 

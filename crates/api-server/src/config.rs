@@ -57,6 +57,67 @@ pub struct Config {
     /// already satisfied — but we document it here so the config surface is
     /// self-explanatory.
     pub allow_credentials: bool,
+
+    /// TLS termination + mTLS client-cert verification. See [`TlsConfig`] for
+    /// the full env-var contract.
+    pub tls: TlsConfig,
+}
+
+/// TLS-termination + mTLS client-cert verification. Populated from
+/// `CMTRACE_TLS_*` and `CMTRACE_CLIENT_CA_BUNDLE`.
+///
+/// All fields are present on every build, but the `mtls` Cargo feature
+/// controls whether the server binary can actually act on them. With the
+/// feature off, [`Config::from_env`] forces `enabled = false` even if
+/// `CMTRACE_TLS_ENABLED=true` was set, and emits a tracing warning at
+/// startup (logged from `main.rs`, not here, since the config layer must
+/// stay free of side effects).
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// Master switch. Env: `CMTRACE_TLS_ENABLED`, default `false` so the
+    /// existing plaintext dev path stays the no-config path.
+    pub enabled: bool,
+
+    /// Server's own cert chain in PEM format (the listener's identity).
+    /// Env: `CMTRACE_TLS_CERT`. Required when `enabled`.
+    pub server_cert_pem: Option<PathBuf>,
+
+    /// Server's private key in PEM format. Env: `CMTRACE_TLS_KEY`.
+    /// Required when `enabled`.
+    pub server_key_pem: Option<PathBuf>,
+
+    /// PEM bundle of trust anchors for client certs (Gell - PKI Root +
+    /// Issuing per the runbook in `docs/provisioning/03-intune-cloud-pki.md`).
+    /// Env: `CMTRACE_CLIENT_CA_BUNDLE`. Required when `enabled`.
+    pub client_ca_bundle: Option<PathBuf>,
+
+    /// Whether to require a valid client cert on ingest routes. Env:
+    /// `CMTRACE_MTLS_REQUIRE_INGEST`. Defaults to `true` when [`Self::enabled`]
+    /// is true, otherwise `false`.
+    ///
+    /// `true`: ingest 401s without a cert (closed). `false`: ingest still
+    /// works without a client cert, falling back to the legacy `X-Device-Id`
+    /// header (transitional path while devices roll over to PKCS-issued
+    /// certs).
+    pub require_on_ingest: bool,
+
+    /// Expected URI scheme in the client cert SAN. Env:
+    /// `CMTRACE_SAN_URI_SCHEME`, default `device`. The full SAN URI shape
+    /// is `device://{tenant-id}/{aad-device-id}` per the Intune PKCS profile.
+    pub expected_san_uri_scheme: String,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            server_cert_pem: None,
+            server_key_pem: None,
+            client_ca_bundle: None,
+            require_on_ingest: false,
+            expected_san_uri_scheme: "device".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,6 +134,18 @@ pub enum ConfigError {
 
     #[error("invalid CMTRACE_CORS_CREDENTIALS: {0} (expected true/false/1/0)")]
     InvalidCorsCredentials(String),
+
+    #[error("invalid CMTRACE_TLS_ENABLED: {0} (expected true/false/1/0)")]
+    InvalidTlsEnabled(String),
+
+    #[error("invalid CMTRACE_MTLS_REQUIRE_INGEST: {0} (expected true/false/1/0)")]
+    InvalidMtlsRequireIngest(String),
+
+    #[error(
+        "CMTRACE_TLS_ENABLED=true but {0} is not set; mTLS bring-up needs the \
+         server cert, key, and client-CA bundle paths"
+    )]
+    MissingTlsPath(&'static str),
 }
 
 impl Config {
@@ -133,6 +206,8 @@ impl Config {
             Err(_) => false,
         };
 
+        let tls = TlsConfig::from_env()?;
+
         Ok(Self {
             listen_addr,
             data_dir,
@@ -141,6 +216,61 @@ impl Config {
             entra,
             allowed_origins,
             allow_credentials,
+            tls,
+        })
+    }
+}
+
+impl TlsConfig {
+    /// Read `CMTRACE_TLS_*` + related env vars. Validates that when TLS is
+    /// enabled all three required paths are set; doesn't open the files
+    /// (that happens in `main.rs` so failures show up in the startup log
+    /// alongside the bind-port error path).
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let enabled = match env::var("CMTRACE_TLS_ENABLED") {
+            Ok(v) => parse_bool(&v).ok_or(ConfigError::InvalidTlsEnabled(v))?,
+            Err(_) => false,
+        };
+
+        let server_cert_pem = env::var("CMTRACE_TLS_CERT").ok().map(PathBuf::from);
+        let server_key_pem = env::var("CMTRACE_TLS_KEY").ok().map(PathBuf::from);
+        let client_ca_bundle = env::var("CMTRACE_CLIENT_CA_BUNDLE")
+            .ok()
+            .map(PathBuf::from);
+
+        // Default `require_on_ingest` mirrors `enabled`: if you've turned
+        // TLS on you almost certainly want mTLS enforced on the ingest
+        // surface too. Override via env when rolling over from header-based
+        // identity (transitional).
+        let require_on_ingest = match env::var("CMTRACE_MTLS_REQUIRE_INGEST") {
+            Ok(v) => parse_bool(&v).ok_or(ConfigError::InvalidMtlsRequireIngest(v))?,
+            Err(_) => enabled,
+        };
+
+        let expected_san_uri_scheme = env::var("CMTRACE_SAN_URI_SCHEME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "device".to_string());
+
+        if enabled {
+            if server_cert_pem.is_none() {
+                return Err(ConfigError::MissingTlsPath("CMTRACE_TLS_CERT"));
+            }
+            if server_key_pem.is_none() {
+                return Err(ConfigError::MissingTlsPath("CMTRACE_TLS_KEY"));
+            }
+            if client_ca_bundle.is_none() {
+                return Err(ConfigError::MissingTlsPath("CMTRACE_CLIENT_CA_BUNDLE"));
+            }
+        }
+
+        Ok(Self {
+            enabled,
+            server_cert_pem,
+            server_key_pem,
+            client_ca_bundle,
+            require_on_ingest,
+            expected_san_uri_scheme,
         })
     }
 }
