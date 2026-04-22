@@ -30,7 +30,7 @@ use crate::collectors::event_logs::EventLogsCollector;
 use crate::collectors::evidence::EvidenceOrchestrator;
 use crate::collectors::logs::LogsCollector;
 use crate::config::AgentConfig;
-use crate::config_sync::{ConfigSync, CONFIG_FETCH_INTERVAL};
+use crate::config_sync::ConfigSync;
 use crate::queue::{Queue, QueueState};
 use crate::redact::Redactor;
 use crate::tls::{self, TlsClientOptions};
@@ -145,7 +145,12 @@ pub async fn run_task_loop(
 ) {
     let mut collect_tick = tokio::time::interval(COLLECT_INTERVAL);
     let mut drain_tick = tokio::time::interval(DRAIN_INTERVAL);
-    let mut config_tick = tokio::time::interval(CONFIG_FETCH_INTERVAL);
+    // Per-device-jittered fetch interval keeps the fleet from stampeding
+    // /v1/config/{id} simultaneously. Read once here so the interval is
+    // stable for the life of the loop; future config rotations on the
+    // device id would require a daemon restart anyway.
+    let config_fetch_interval = components.config_sync.lock().await.fetch_interval();
+    let mut config_tick = tokio::time::interval(config_fetch_interval);
 
     // Skip the first immediate collect tick — let the daemon finish
     // booting. Drain fires immediately so crash-survivor queue entries

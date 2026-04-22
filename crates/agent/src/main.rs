@@ -116,10 +116,11 @@ async fn run(config: AgentConfig, oneshot: bool) -> Result<(), Box<dyn std::erro
 
     // Daemon mode: drive the shared task loop with a watch channel that
     // ctrl-c flips to `true`. Mirrors how `service.rs` drives the same
-    // loop from the SCM control handler. The CollectionScheduler module
-    // (added by this PR) is wired into the task loop in a follow-up;
-    // for now run_task_loop runs the queue drainer with the existing
-    // tick-based collection cadence.
+    // loop from the SCM control handler. The task loop owns the
+    // collect/drain/config-sync select! — including the per-device-jittered
+    // config-fetch tick so a fleet doesn't stampede /v1/config/{id} every
+    // six hours.
+
     let (stop_tx, stop_rx) = watch::channel(false);
 
     let task_loop = tokio::spawn(async move {

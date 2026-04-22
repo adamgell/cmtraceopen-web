@@ -231,9 +231,16 @@ pub mod config {
                 && self.log_paths.is_none()
         }
 
-        /// Validate that overridable numeric fields are within acceptable
-        /// bounds.  Returns `Err` with a human-readable message for the
-        /// first failing field, `Ok(())` if everything looks sane.
+        /// Validate that override fields are within acceptable bounds and
+        /// structurally well-formed. Returns `Err` with a human-readable
+        /// message for the first failing field, `Ok(())` if everything looks
+        /// sane.
+        ///
+        /// **Why validate on the wire side too:** the api-server validates
+        /// at write time so an operator can't push a bricking override; the
+        /// agent validates again on receive so a server bug or a corrupted
+        /// payload can't slip past either. The two validation passes share
+        /// this implementation, so the contract can't drift.
         pub fn validate(&self) -> Result<(), String> {
             if let Some(t) = self.request_timeout_secs {
                 if t == 0 {
@@ -259,8 +266,113 @@ pub mod config {
                     ));
                 }
             }
+            // log_level: structural check. We can't pull tracing-subscriber
+            // into common-wire (would force every consumer to compile the
+            // tracing stack), so we accept either a bare level or a single
+            // `target=level` directive — both are subsets of EnvFilter and
+            // cover what operators actually push. The agent does a full
+            // EnvFilter::try_new round-trip on receive as a backstop.
+            if let Some(level) = self.log_level.as_deref() {
+                validate_log_level(level)?;
+            }
+            // evidence_schedule: structural cron check. Standard 5-field
+            // (or 6-field with seconds) only, and the parser-side will
+            // reject anything more pathological at scheduler-init time.
+            if let Some(cron) = self.evidence_schedule.as_deref() {
+                validate_cron_expr(cron)?;
+            }
+            // log_paths: cap the count + per-entry length so a buggy
+            // operator push can't blow out the agent's argv / disk-walk.
+            if let Some(paths) = self.log_paths.as_ref() {
+                if paths.len() > 64 {
+                    return Err(format!(
+                        "log_paths has {} entries; safety cap is 64",
+                        paths.len()
+                    ));
+                }
+                for (i, p) in paths.iter().enumerate() {
+                    if p.is_empty() {
+                        return Err(format!("log_paths[{i}] is empty"));
+                    }
+                    if p.len() > 1024 {
+                        return Err(format!(
+                            "log_paths[{i}] is {} chars; safety cap is 1024",
+                            p.len()
+                        ));
+                    }
+                }
+            }
             Ok(())
         }
+    }
+
+    /// Reject obviously-malformed `log_level` directives. Accepts a bare
+    /// level token (`info` / `debug` / `trace` / `warn` / `error` / `off`)
+    /// or a single `target=level` pair. Comma-separated multi-directive
+    /// strings are rejected — operators that need that complexity should
+    /// edit `config.toml` directly rather than push it via the override
+    /// channel.
+    fn validate_log_level(s: &str) -> Result<(), String> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err("log_level is empty".into());
+        }
+        if trimmed.len() > 256 {
+            return Err(format!("log_level length {} exceeds 256", trimmed.len()));
+        }
+        if trimmed.contains(',') {
+            return Err(
+                "log_level cannot contain ','; push a single directive (e.g. \"info\" or \"my_target=debug\")".into(),
+            );
+        }
+        // Strip optional `target=` prefix.
+        let level_token = trimmed.rsplit('=').next().unwrap_or(trimmed);
+        const KNOWN: &[&str] = &["off", "error", "warn", "info", "debug", "trace"];
+        if !KNOWN.iter().any(|k| k.eq_ignore_ascii_case(level_token)) {
+            return Err(format!(
+                "log_level token {level_token:?} is not one of: {}",
+                KNOWN.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// Structural cron validation: 5 or 6 whitespace-separated fields, each
+    /// composed of cron-legal characters (digits, `*`, `,`, `-`, `/`, `?`,
+    /// `L`, `W`, `#`). Defers semantic validation (range checks, day-of-week
+    /// vs day-of-month conflicts) to the agent's actual cron parser at
+    /// scheduler-init time — the goal here is to reject obviously-broken
+    /// inputs like the literal string `"this is not a cron expression"`
+    /// before they reach the agent.
+    fn validate_cron_expr(s: &str) -> Result<(), String> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err("evidence_schedule is empty".into());
+        }
+        if trimmed.len() > 256 {
+            return Err(format!(
+                "evidence_schedule length {} exceeds 256",
+                trimmed.len()
+            ));
+        }
+        let fields: Vec<&str> = trimmed.split_whitespace().collect();
+        if fields.len() < 5 || fields.len() > 6 {
+            return Err(format!(
+                "evidence_schedule must have 5 or 6 whitespace-separated fields, got {}",
+                fields.len()
+            ));
+        }
+        for (i, f) in fields.iter().enumerate() {
+            if !f.chars().all(|c| {
+                c.is_ascii_digit()
+                    || matches!(c, '*' | ',' | '-' | '/' | '?' | 'L' | 'W' | '#' | 'l' | 'w')
+            }) {
+                return Err(format!(
+                    "evidence_schedule field {i} ({f:?}) contains illegal characters"
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -458,6 +570,81 @@ mod tests {
             ..AgentConfigOverride::default()
         };
         assert!(bad_queue.validate().is_err());
+    }
+
+    #[test]
+    fn agent_config_override_validate_accepts_valid_log_level() {
+        for ok in &["info", "debug", "trace", "warn", "error", "off",
+                    "INFO", "DEBUG", "my_target=debug"] {
+            let o = AgentConfigOverride {
+                log_level: Some((*ok).into()),
+                ..AgentConfigOverride::default()
+            };
+            assert!(o.validate().is_ok(), "log_level {ok:?} should be ok");
+        }
+    }
+
+    #[test]
+    fn agent_config_override_validate_rejects_bogus_log_level() {
+        for bad in &["", "verbose", "debug,info", "this is not a level"] {
+            let o = AgentConfigOverride {
+                log_level: Some((*bad).into()),
+                ..AgentConfigOverride::default()
+            };
+            assert!(
+                o.validate().is_err(),
+                "log_level {bad:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_config_override_validate_accepts_valid_cron() {
+        for ok in &[
+            "0 3 * * *",         // 5-field daily at 03:00
+            "*/15 * * * *",      // every 15 min
+            "0 0 1 * *",         // monthly
+            "0 9-17 * * 1-5",    // business hours weekdays
+            "0 0 3 * * *",       // 6-field with seconds
+        ] {
+            let o = AgentConfigOverride {
+                evidence_schedule: Some((*ok).into()),
+                ..AgentConfigOverride::default()
+            };
+            assert!(o.validate().is_ok(), "cron {ok:?} should be ok");
+        }
+    }
+
+    #[test]
+    fn agent_config_override_validate_rejects_bogus_cron() {
+        for bad in &[
+            "",                                // empty
+            "this is not a cron expression",   // word soup
+            "0 3 * *",                         // 4 fields
+            "0 3 * * * * *",                   // 7 fields
+            "0 3 * * @",                       // illegal char
+        ] {
+            let o = AgentConfigOverride {
+                evidence_schedule: Some((*bad).into()),
+                ..AgentConfigOverride::default()
+            };
+            assert!(o.validate().is_err(), "cron {bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn agent_config_override_validate_caps_log_paths() {
+        let too_many = AgentConfigOverride {
+            log_paths: Some((0..200).map(|i| format!("/var/log/{i}.log")).collect()),
+            ..AgentConfigOverride::default()
+        };
+        assert!(too_many.validate().is_err());
+
+        let with_empty = AgentConfigOverride {
+            log_paths: Some(vec!["ok".into(), "".into()]),
+            ..AgentConfigOverride::default()
+        };
+        assert!(with_empty.validate().is_err());
     }
 
     #[test]
