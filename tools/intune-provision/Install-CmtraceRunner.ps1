@@ -291,18 +291,39 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir '.runner')) {
 }
 
 # ------------------------------------------------------------------------
-# 5) Install + start service
+# 5) Install + start the Windows service
+#
+# The Windows runner zip ships no svc.cmd (that's a Linux/macOS artifact).
+# config.cmd --runasservice can create it, but only during initial config;
+# for already-configured runners we install via sc.exe directly, which is
+# also what --runasservice does under the hood.
 # ------------------------------------------------------------------------
-$svcFlag = Join-Path $InstallDir '.service'
-if (Test-Path -LiteralPath $svcFlag) {
-    Write-Host 'Runner service already installed.' -ForegroundColor DarkGray
+$repoSegment = ($Repo -replace '^https?://github\.com/', '') -replace '/', '-'
+$svcName     = "actions.runner.$repoSegment.$RunnerName"
+
+$svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+if (-not $svc) {
+    Write-Host "Creating Windows service '$svcName' ..." -ForegroundColor Cyan
+    $binQuoted = '"' + (Join-Path $InstallDir 'bin\Runner.Listener.exe') + '"'
+    # sc.exe arg syntax: `key= value` (space after =). Run via cmd /c to
+    # survive PowerShell's arg parsing of the `=` literals.
+    $scCmd = "sc.exe create `"$svcName`" binPath= $binQuoted` run start= auto obj= `"NT AUTHORITY\NETWORK SERVICE`""
+    cmd.exe /c $scCmd | Write-Host
+    if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed with exit code $LASTEXITCODE." }
+    # Friendly display name + description (cosmetic).
+    cmd.exe /c "sc.exe config `"$svcName`" DisplayName= `"GitHub Actions Runner ($RunnerName)`"" | Out-Null
+    cmd.exe /c "sc.exe description `"$svcName`" `"cmtraceopen self-hosted GitHub Actions runner`"" | Out-Null
+    $svc = Get-Service -Name $svcName -ErrorAction Stop
 } else {
-    Write-Host 'Installing runner as a Windows service ...' -ForegroundColor Cyan
-    & .\svc.cmd install
-    if ($LASTEXITCODE -ne 0) { throw "svc.cmd install failed ($LASTEXITCODE)." }
+    Write-Host "Service '$svcName' already exists." -ForegroundColor DarkGray
 }
-Write-Host 'Starting runner service ...' -ForegroundColor Cyan
-& .\svc.cmd start | Out-Null
+
+if ($svc.Status -ne 'Running') {
+    Write-Host "Starting service '$svcName' ..." -ForegroundColor Cyan
+    Start-Service -Name $svcName
+} else {
+    Write-Host "Service '$svcName' is already Running." -ForegroundColor DarkGray
+}
 
 Pop-Location
 
