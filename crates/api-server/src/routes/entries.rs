@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use common_wire::{LogEntryDto, Paginated};
 
-use crate::auth::OperatorPrincipal;
+use crate::auth::{OperatorTag, RequireRole};
 use crate::error::AppError;
 use crate::routes::{clamp_limit, decode_cursor, encode_cursor};
 use crate::state::AppState;
@@ -174,7 +174,7 @@ fn row_to_dto(r: EntryRow) -> LogEntryDto {
 )]
 async fn list_entries(
     State(state): State<Arc<AppState>>,
-    _principal: OperatorPrincipal,
+    _principal: RequireRole<OperatorTag>,
     Path(session_id): Path<Uuid>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Paginated<LogEntryDto>>, AppError> {

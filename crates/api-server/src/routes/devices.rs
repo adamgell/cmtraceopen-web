@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use common_wire::{DeviceSummary, Paginated};
 
-use crate::auth::OperatorPrincipal;
+use crate::auth::{OperatorTag, RequireRole};
 use crate::error::AppError;
 use crate::routes::{clamp_limit, decode_cursor, encode_cursor};
 use crate::state::AppState;
@@ -31,7 +31,7 @@ const MAX_LIMIT: u32 = 500;
 
 async fn list_devices(
     State(state): State<Arc<AppState>>,
-    _principal: OperatorPrincipal,
+    _principal: RequireRole<OperatorTag>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Paginated<DeviceSummary>>, AppError> {
     let limit = clamp_limit(q.limit, DEFAULT_LIMIT, MAX_LIMIT);

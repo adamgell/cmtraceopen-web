@@ -14,16 +14,35 @@
 //!     match `CMTRACE_ENTRA_AUDIENCE`, `iss` must match
 //!     `https://login.microsoftonline.com/<tenant-id>/v2.0`, and `exp`/`nbf`
 //!     are checked with default 15 s clock skew.
-//!  4. Authorisation: `scp` must contain `CmtraceOpen.Query` OR (for
-//!     client-credential / app-only tokens) `roles` must contain the same
-//!     role name. This keeps the matrix "anyone with the Query scope OR app
-//!     permission may read".
+//!  4. Authorisation: the token must yield at least one [`Role`]. The mapping
+//!     is:
+//!       - `scp` (delegated tokens) contains `CmtraceOpen.Query` →
+//!         [`Role::Operator`].
+//!       - `roles` (app-only tokens) contains `CmtraceOpen.Operator` →
+//!         [`Role::Operator`].
+//!       - `roles` contains `CmtraceOpen.Admin` → [`Role::Admin`].
+//!
+//!     A principal with [`Role::Admin`] is implicitly also an
+//!     [`Role::Operator`]; this is enforced at the per-route gate
+//!     ([`RequireRole`]) rather than by stuffing both roles into the
+//!     principal, so the principal's `roles` vector reflects exactly what the
+//!     token claimed.
+//!
+//! # Per-route role gating
+//! Handlers that require a specific role list it explicitly via the
+//! [`RequireRole`] extractor — e.g. `RequireRole<{ Role::Operator }>` for
+//! query routes and `RequireRole<{ Role::Admin }>` for admin routes. The
+//! extractor wraps the [`OperatorPrincipal`] extractor, so an unauthenticated
+//! request still 401s before the role check happens; only authenticated-but-
+//! under-privileged requests see a 403.
 //!
 //! # Dev-mode bypass
 //! When `CMTRACE_AUTH_MODE=disabled` is set the extractor short-circuits to
-//! a synthetic `OperatorPrincipal { subject: "dev", ... }`. Intended for
-//! `cargo run` on a laptop; MUST NOT be flipped in production. The config
-//! layer logs a loud WARN on startup every time it's observed.
+//! a synthetic `OperatorPrincipal { subject: "dev", ... }` carrying **both**
+//! roles, so dev tools can hit every route (including admin stubs) without
+//! standing up an Entra tenant. Intended for `cargo run` on a laptop; MUST
+//! NOT be flipped in production. The config layer logs a loud WARN on
+//! startup every time it's observed.
 //!
 //! # Crate choice
 //! We use `jwt-simple` rather than `jsonwebtoken` because the latter drags
@@ -55,8 +74,19 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-/// Required scope / role on the access token authorizing operator queries.
+/// Delegated-flow scope (`scp` claim) granting operator-level query access.
+/// Exposed on the API app registration's "Expose an API" surface.
 pub const REQUIRED_SCOPE: &str = "CmtraceOpen.Query";
+
+/// App-role (`roles` claim) name granting operator-level query access for
+/// app-only / client-credential tokens. Defined on the API app registration's
+/// "App roles" surface.
+pub const ROLE_OPERATOR: &str = "CmtraceOpen.Operator";
+
+/// App-role (`roles` claim) name granting admin access (operator privileges
+/// plus any future admin-only routes). Defined on the API app registration's
+/// "App roles" surface.
+pub const ROLE_ADMIN: &str = "CmtraceOpen.Admin";
 
 /// Default JWKS cache lifetime. One hour matches Entra's key-rotation cadence
 /// guidance and avoids hammering the discovery endpoint.
@@ -254,6 +284,17 @@ fn decode_b64url(s: &str) -> Result<Vec<u8>, String> {
 // Principal
 // ---------------------------------------------------------------------------
 
+/// Authorization role assigned to a principal. The MVP recognises two:
+/// [`Role::Operator`] (read query data) and [`Role::Admin`] (operator + admin
+/// routes). Admin-implies-operator is enforced at the per-route gate
+/// ([`RequireRole`]), not by the principal carrying both roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    Operator,
+    Admin,
+}
+
 /// An authenticated operator. Populated from validated-JWT claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct OperatorPrincipal {
@@ -264,20 +305,86 @@ pub struct OperatorPrincipal {
     /// `tid` — Entra tenant id as reported in the token. Logged on every
     /// request so cross-tenant tokens are trivially observable.
     pub tenant_id: String,
-    /// Parsed `scp` (space-delimited) + `roles` array. Deduplicated.
+    /// Parsed `scp` (space-delimited) + `roles` array. Deduplicated. Kept as
+    /// raw strings so log-trail / debug output reflects exactly what the
+    /// token carried.
     pub scopes: Vec<String>,
+    /// Role-membership derived from `scopes`. Set semantics:
+    /// [`Role::Admin`] does **not** imply membership in [`Role::Operator`]
+    /// here — that implication is applied at the route gate so this vector
+    /// stays a faithful representation of what the token actually claimed.
+    pub roles: Vec<Role>,
 }
 
 impl OperatorPrincipal {
-    /// Synthetic principal used under `CMTRACE_AUTH_MODE=disabled`.
+    /// Synthetic principal used under `CMTRACE_AUTH_MODE=disabled`. Carries
+    /// **both** roles so dev tools can hit every route (including admin
+    /// stubs) without a real Entra tenant.
     pub fn dev_bypass() -> Self {
         Self {
             subject: "dev".to_string(),
             name: Some("dev-bypass".to_string()),
             tenant_id: "dev".to_string(),
-            scopes: vec![REQUIRED_SCOPE.to_string()],
+            scopes: vec![
+                REQUIRED_SCOPE.to_string(),
+                ROLE_OPERATOR.to_string(),
+                ROLE_ADMIN.to_string(),
+            ],
+            roles: vec![Role::Operator, Role::Admin],
         }
     }
+
+    /// True iff the principal holds `role`, applying the
+    /// admin-implies-operator rule: a principal with [`Role::Admin`]
+    /// satisfies a [`Role::Operator`] requirement automatically.
+    pub fn has_role(&self, role: Role) -> bool {
+        if self.roles.contains(&role) {
+            return true;
+        }
+        // Admin implies Operator — only direction that's transitive.
+        matches!(role, Role::Operator) && self.roles.contains(&Role::Admin)
+    }
+}
+
+/// Map a token's raw `scp` (space-delimited) and `roles` (array) claims to
+/// the role set the principal carries. Returns the deduplicated raw scope
+/// list alongside the resolved roles so the principal can surface both for
+/// debug / audit purposes.
+///
+/// Mapping (per `CmtraceOpen` runbook §02-entra-app-registration):
+///   - `scp` contains [`REQUIRED_SCOPE`] → [`Role::Operator`].
+///   - `roles` contains [`ROLE_OPERATOR`] → [`Role::Operator`] (app-only
+///     fallback for client-credential flows).
+///   - `roles` contains [`ROLE_ADMIN`] → [`Role::Admin`].
+///
+/// Either signal grants Operator. Admin is exclusively granted via the
+/// `roles` claim — the SPA flow can't elevate itself.
+pub fn extract_roles(scp: Option<&str>, roles: Option<&[String]>) -> (Vec<String>, Vec<Role>) {
+    let mut scopes: Vec<String> = Vec::new();
+    if let Some(scp) = scp {
+        for s in scp.split_ascii_whitespace() {
+            scopes.push(s.to_string());
+        }
+    }
+    if let Some(roles) = roles {
+        for r in roles {
+            scopes.push(r.clone());
+        }
+    }
+    scopes.sort();
+    scopes.dedup();
+
+    let mut out: Vec<Role> = Vec::new();
+    let has_query_scope = scopes.iter().any(|s| s == REQUIRED_SCOPE);
+    let has_operator_role = scopes.iter().any(|s| s == ROLE_OPERATOR);
+    let has_admin_role = scopes.iter().any(|s| s == ROLE_ADMIN);
+    if has_query_scope || has_operator_role {
+        out.push(Role::Operator);
+    }
+    if has_admin_role {
+        out.push(Role::Admin);
+    }
+    (scopes, out)
 }
 
 // Custom-claims struct we hand `jwt-simple` for deserialization.
@@ -309,10 +416,15 @@ pub enum AuthError {
     UnknownKid,
     #[error("invalid token: {0}")]
     InvalidToken(String),
-    #[error("insufficient scope: requires '{REQUIRED_SCOPE}'")]
+    #[error("insufficient scope: requires '{REQUIRED_SCOPE}' (or app role '{ROLE_OPERATOR}' / '{ROLE_ADMIN}')")]
     InsufficientScope,
     #[error("auth not configured")]
     NotConfigured,
+    /// Returned by per-route role gates ([`RequireRole`]) when the principal
+    /// authenticated successfully but lacks the role the route demands. Maps
+    /// to HTTP 403 (vs. 401 for the other variants).
+    #[error("forbidden: role '{0:?}' required")]
+    ForbiddenRole(Role),
 }
 
 impl AuthError {
@@ -325,6 +437,7 @@ impl AuthError {
             AuthError::InvalidToken(_) => "token validation failed",
             AuthError::InsufficientScope => "insufficient scope",
             AuthError::NotConfigured => "server auth misconfigured",
+            AuthError::ForbiddenRole(_) => "insufficient role",
         }
     }
 }
@@ -333,19 +446,32 @@ impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let status = match self {
             AuthError::NotConfigured => StatusCode::INTERNAL_SERVER_ERROR,
+            // 403 — authenticated, but the role doesn't permit this route.
+            // Per RFC 7235 we don't issue a `WWW-Authenticate` challenge for
+            // 403 (no point asking the same identity to retry); we still
+            // return a JSON body so the SPA can render a friendly message.
+            AuthError::ForbiddenRole(_) => StatusCode::FORBIDDEN,
             _ => StatusCode::UNAUTHORIZED,
         };
-        let challenge = format!(
-            "Bearer error=\"invalid_token\", error_description=\"{}\"",
-            self.description()
-        );
+        let body_code = if matches!(self, AuthError::ForbiddenRole(_)) {
+            "forbidden"
+        } else {
+            "unauthorized"
+        };
         let body = Json(serde_json::json!({
-            "error": "unauthorized",
+            "error": body_code,
             "message": self.to_string(),
         }));
         let mut resp = (status, body).into_response();
-        if let Ok(val) = challenge.parse() {
-            resp.headers_mut().insert(WWW_AUTHENTICATE, val);
+        // Only emit the bearer challenge on 401-class responses.
+        if status == StatusCode::UNAUTHORIZED {
+            let challenge = format!(
+                "Bearer error=\"invalid_token\", error_description=\"{}\"",
+                self.description()
+            );
+            if let Ok(val) = challenge.parse() {
+                resp.headers_mut().insert(WWW_AUTHENTICATE, val);
+            }
         }
         resp
     }
@@ -385,22 +511,14 @@ pub async fn validate_bearer(
         .verify_token::<EntraCustomClaims>(token, Some(opts))
         .map_err(|e| AuthError::InvalidToken(e.to_string()))?;
 
-    // Scope check: `scp` (space-delimited) OR `roles` array must include
-    // REQUIRED_SCOPE.
-    let mut scopes: Vec<String> = Vec::new();
-    if let Some(scp) = claims.custom.scp.as_deref() {
-        for s in scp.split_ascii_whitespace() {
-            scopes.push(s.to_string());
-        }
-    }
-    if let Some(roles) = claims.custom.roles.as_ref() {
-        for r in roles {
-            scopes.push(r.clone());
-        }
-    }
-    scopes.sort();
-    scopes.dedup();
-    if !scopes.iter().any(|s| s == REQUIRED_SCOPE) {
+    // Role check: token must yield at least one of {Operator, Admin}. The
+    // mapping itself lives in `extract_roles` so unit tests can exercise it
+    // directly without minting JWTs.
+    let (scopes, roles) = extract_roles(
+        claims.custom.scp.as_deref(),
+        claims.custom.roles.as_deref(),
+    );
+    if roles.is_empty() {
         return Err(AuthError::InsufficientScope);
     }
 
@@ -409,6 +527,7 @@ pub async fn validate_bearer(
         name: claims.custom.name,
         tenant_id: claims.custom.tid.unwrap_or_default(),
         scopes,
+        roles,
     })
 }
 
@@ -451,6 +570,80 @@ where
         validate_bearer(&token, entra, &auth.jwks)
             .await
             .map_err(|e| e.into_response())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-route role gate
+// ---------------------------------------------------------------------------
+
+/// Marker trait connecting a zero-sized role-tag type to its [`Role`] value.
+/// Implemented by [`OperatorTag`] and [`AdminTag`]; consumers parameterise
+/// [`RequireRole`] over these tags rather than over the [`Role`] enum
+/// directly because Rust (stable, as of 1.77) does not permit user-defined
+/// enums as const-generic parameters.
+pub trait RoleTag {
+    const ROLE: Role;
+}
+
+/// Tag for [`Role::Operator`] used as the type parameter on
+/// [`RequireRole<OperatorTag>`].
+pub struct OperatorTag;
+impl RoleTag for OperatorTag {
+    const ROLE: Role = Role::Operator;
+}
+
+/// Tag for [`Role::Admin`] used as the type parameter on
+/// [`RequireRole<AdminTag>`].
+pub struct AdminTag;
+impl RoleTag for AdminTag {
+    const ROLE: Role = Role::Admin;
+}
+
+/// Axum extractor that runs [`OperatorPrincipal`] extraction first, then
+/// checks the principal holds the role identified by the [`RoleTag`] type
+/// parameter. 401s propagate unchanged (unauthenticated); a
+/// successfully-authenticated principal that lacks the requested role
+/// triggers a 403 via [`AuthError::ForbiddenRole`].
+///
+/// Admin-implies-operator is handled inside [`OperatorPrincipal::has_role`],
+/// so `RequireRole<OperatorTag>` accepts both operator- and admin-role
+/// principals, while `RequireRole<AdminTag>` only accepts admin.
+///
+/// Typical usage:
+/// ```ignore
+/// use api_server::auth::{OperatorTag, RequireRole};
+///
+/// async fn list_devices(
+///     State(state): State<Arc<AppState>>,
+///     RequireRole(principal, _): RequireRole<OperatorTag>,
+///     ...
+/// ) -> Result<...> { ... }
+/// ```
+pub struct RequireRole<R: RoleTag>(pub OperatorPrincipal, pub std::marker::PhantomData<R>);
+
+impl<S, R> FromRequestParts<S> for RequireRole<R>
+where
+    S: Send + Sync,
+    R: RoleTag,
+    Arc<crate::state::AppState>: axum::extract::FromRef<S>,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        // Defer to the existing `OperatorPrincipal` extractor so the 401
+        // path (missing / malformed / expired token) stays identical.
+        let principal = OperatorPrincipal::from_request_parts(parts, state).await?;
+        if !principal.has_role(R::ROLE) {
+            debug!(
+                subject = %principal.subject,
+                required = ?R::ROLE,
+                actual = ?principal.roles,
+                "role check failed",
+            );
+            return Err(AuthError::ForbiddenRole(R::ROLE).into_response());
+        }
+        Ok(RequireRole(principal, std::marker::PhantomData))
     }
 }
 
@@ -623,5 +816,95 @@ mod tests {
             cfg.expected_issuer(),
             "https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/v2.0"
         );
+    }
+
+    // ----- RBAC: role extraction --------------------------------------------
+
+    #[test]
+    fn extract_roles_from_scp_only() {
+        // Delegated SPA token: `scp` includes the Query scope, no `roles`.
+        let (scopes, roles) =
+            extract_roles(Some("openid CmtraceOpen.Query profile"), None);
+        assert!(scopes.iter().any(|s| s == REQUIRED_SCOPE));
+        assert_eq!(roles, vec![Role::Operator]);
+    }
+
+    #[test]
+    fn extract_roles_from_roles_only_operator() {
+        // App-only token via the Operator app role (no `scp`).
+        let app_roles = vec![ROLE_OPERATOR.to_string()];
+        let (_, roles) = extract_roles(None, Some(&app_roles));
+        assert_eq!(roles, vec![Role::Operator]);
+    }
+
+    #[test]
+    fn extract_roles_from_roles_only_admin() {
+        // App-only token via the Admin app role. Admin only — implicit
+        // Operator-grant happens at the gate, not here.
+        let app_roles = vec![ROLE_ADMIN.to_string()];
+        let (_, roles) = extract_roles(None, Some(&app_roles));
+        assert_eq!(roles, vec![Role::Admin]);
+    }
+
+    #[test]
+    fn extract_roles_with_both_signals() {
+        // A token that somehow carries both — e.g. a hybrid future flow. Both
+        // roles are surfaced; downstream gates take care of admin-implies-
+        // operator semantics.
+        let app_roles = vec![ROLE_OPERATOR.to_string(), ROLE_ADMIN.to_string()];
+        let (scopes, roles) = extract_roles(Some(REQUIRED_SCOPE), Some(&app_roles));
+        // Order is sorted+deduped on the scopes vector.
+        assert!(scopes.contains(&REQUIRED_SCOPE.to_string()));
+        assert!(scopes.contains(&ROLE_ADMIN.to_string()));
+        assert!(roles.contains(&Role::Operator));
+        assert!(roles.contains(&Role::Admin));
+        assert_eq!(roles.len(), 2);
+    }
+
+    #[test]
+    fn extract_roles_with_neither_signal_yields_empty() {
+        // Token has unrelated scopes (e.g. just openid/profile). No role
+        // membership — `validate_bearer` translates this to InsufficientScope.
+        let (_, roles) = extract_roles(Some("openid profile"), None);
+        assert!(roles.is_empty());
+        let (_, roles) = extract_roles(None, None);
+        assert!(roles.is_empty());
+    }
+
+    #[test]
+    fn admin_principal_implies_operator_at_gate() {
+        // The set-membership semantics live on `OperatorPrincipal::has_role`;
+        // a principal carrying only Admin must still satisfy Operator gates.
+        let p = OperatorPrincipal {
+            subject: "admin-only".to_string(),
+            name: None,
+            tenant_id: "t".to_string(),
+            scopes: vec![ROLE_ADMIN.to_string()],
+            roles: vec![Role::Admin],
+        };
+        assert!(p.has_role(Role::Admin));
+        assert!(p.has_role(Role::Operator), "admin must imply operator");
+
+        // Operator-only principal does NOT satisfy Admin (no upward implication).
+        let op = OperatorPrincipal {
+            subject: "op-only".to_string(),
+            name: None,
+            tenant_id: "t".to_string(),
+            scopes: vec![REQUIRED_SCOPE.to_string()],
+            roles: vec![Role::Operator],
+        };
+        assert!(op.has_role(Role::Operator));
+        assert!(!op.has_role(Role::Admin), "operator must NOT imply admin");
+    }
+
+    #[test]
+    fn dev_bypass_principal_carries_both_roles() {
+        // Critical for the dev-mode bypass: `cargo run` against a no-Entra
+        // setup still needs the synthetic principal to satisfy admin-route
+        // gates so dev tools (curl, the SPA pointed at a dev backend, etc.)
+        // can exercise the full route table.
+        let p = OperatorPrincipal::dev_bypass();
+        assert!(p.has_role(Role::Operator));
+        assert!(p.has_role(Role::Admin));
     }
 }

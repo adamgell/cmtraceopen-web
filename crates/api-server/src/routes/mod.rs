@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod devices;
 pub mod entries;
 pub mod files;

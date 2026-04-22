@@ -252,18 +252,112 @@ sign-in to a curated operator list:
    (initial list: `Adam.Gell`; grow as the team scales) → assign the
    default **User** role → **Assign**.
 
-### Optional future extension — app roles / RBAC
+> Sign-in to the SPA is gated on the **viewer** app's user assignment
+> (this step). RBAC tier (Operator vs Admin) is gated on the **API**
+> app's role assignment (Step 6 below). They're separate surfaces:
+> a user who's signed in to the viewer but holds neither API app role
+> only gets `scp: CmtraceOpen.Query` from delegated consent, which the
+> api-server treats as Operator. Add them to the API app's
+> `CmtraceOpen.Admin` role to unlock admin routes.
 
-The MVP only distinguishes authenticated operators from unauthenticated
-traffic. A future iteration can define **app roles** on
-`cmtraceopen-api` for finer-grained authorization, e.g.:
+---
 
-- `cmtraceopen.admin` — full access including ingest-side admin routes.
-- `cmtraceopen.viewer` — read-only query access.
+## Step 6 — App roles: Operator + Admin
 
-When added, the api-server would enforce the `roles` claim alongside
-`scp`. Do **not** implement this in the MVP; documented here so the Wave
-2 agent knows the extension point.
+The api-server distinguishes two RBAC tiers, both surfaced as **app roles**
+on the `cmtraceopen-api` registration:
+
+| Role value (`roles` claim) | Tier | Granted to |
+| --- | --- | --- |
+| `CmtraceOpen.Operator` | Operator (read all device/session/entries data) | App-only / client-credential callers that need read access without going through a delegated user flow. Delegated SPA tokens get the same tier automatically via the `CmtraceOpen.Query` **scope** from Step 1a, so most viewer users do not need this role. |
+| `CmtraceOpen.Admin` | Admin (Operator + reserved admin routes, e.g. `POST /v1/admin/devices/{id}/disable`) | A small named set of operators. Admin can never be obtained via the delegated `scp` claim — only via direct app-role assignment in Entra. |
+
+The api-server treats Admin as **implying** Operator at the route gate, so
+admin users do not need to be assigned both roles. See
+`crates/api-server/src/auth/mod.rs` (`OperatorPrincipal::has_role`) for the
+exact resolution.
+
+### 6a — Define the app roles in the API app manifest
+
+**Portal path:** `Entra ID` → `App registrations` → `cmtraceopen-api` →
+`App roles` → `Create app role`.
+
+Create the **Operator** role:
+
+| Field | Value |
+| --- | --- |
+| Display name | `CmtraceOpen Operator` |
+| Allowed member types | **Users/Groups** AND **Applications** |
+| Value | `CmtraceOpen.Operator` |
+| Description | `Read access to all device, session, and log-entry data via the cmtraceopen api-server.` |
+| Do you want to enable this app role? | **Yes** |
+
+Create the **Admin** role:
+
+| Field | Value |
+| --- | --- |
+| Display name | `CmtraceOpen Admin` |
+| Allowed member types | **Users/Groups** AND **Applications** |
+| Value | `CmtraceOpen.Admin` |
+| Description | `Operator privileges plus access to admin routes (device disable, future destructive admin actions).` |
+| Do you want to enable this app role? | **Yes** |
+
+The exact spelling of the **Value** field matters — it lands verbatim in
+the JWT's `roles` claim, and the api-server matches against the constants
+`ROLE_OPERATOR` / `ROLE_ADMIN` defined in `crates/api-server/src/auth/mod.rs`.
+Do not rename without updating both sides.
+
+### 6b — Assign users / groups to a role
+
+**Portal path:** `Entra ID` → `Enterprise applications` → `cmtraceopen-api`
+(NOT the app registration — Enterprise Applications is the service-principal
+view) → `Users and groups` → `Add user/group`.
+
+1. Pick the user (or group — strongly preferred for ongoing operations:
+   create `cmtraceopen-operators` and `cmtraceopen-admins` security groups
+   in Entra and assign to those, not to individual users).
+2. Under **Select a role**, pick `CmtraceOpen Operator` or
+   `CmtraceOpen Admin`.
+3. **Assign**.
+
+If the **Select a role** picker is greyed out / shows only `Default Access`,
+the app roles created in Step 6a haven't propagated yet — wait a minute
+and refresh, or check that the role's "Do you want to enable" toggle is on.
+
+For the SPA path: when an operator with the **Admin** role signs in, the
+issued access token's `roles` claim includes `CmtraceOpen.Admin` *in
+addition to* the delegated `scp: CmtraceOpen.Query`. The api-server reads
+both — `scp` grants Operator, `roles` upgrades to Admin.
+
+### 6c — App-only / client-credential callers
+
+For non-interactive callers (CLI tools, CI jobs, future scripted admin
+flows) provision a separate app registration with a client secret or
+certificate, then under that app's **API permissions** add an
+**Application permission** on `cmtraceopen-api` for either
+`CmtraceOpen.Operator` or `CmtraceOpen.Admin`. Grant admin consent.
+
+Tokens minted via the client-credentials flow will carry the role in
+`roles` (no `scp`), which the api-server's
+[`extract_roles`][api-server-extract-roles] helper handles as the app-only
+fallback path.
+
+[api-server-extract-roles]: ../../crates/api-server/src/auth/mod.rs
+
+### 6d — Verification
+
+1. **Manifest check.** `App roles` blade lists both roles, both **Enabled**.
+2. **Assignment check.** `Enterprise applications` → `cmtraceopen-api` →
+   `Users and groups` shows the expected user/group ↔ role mappings.
+3. **Token claim check.** Sign in to the SPA as an admin-assigned user,
+   capture the access token, decode at <https://jwt.ms>, confirm:
+   - `aud` = `api://<api-client-id>`
+   - `scp` includes `CmtraceOpen.Query` (delegated scope)
+   - `roles` includes `CmtraceOpen.Admin` (app role)
+4. **API smoke test.** Hit `POST /v1/admin/devices/test/disable` with the
+   admin token → `501 Not Implemented` (placeholder response — the route
+   is reserved + role-gated; the disable function lands in a future PR).
+   With an operator-only token the same call returns `403 Forbidden`.
 
 ---
 
@@ -308,10 +402,16 @@ When added, the api-server would enforce the `roles` claim alongside
 
 - [ ] `cmtraceopen-api` app registration exists; `CmtraceOpen.Query`
       scope is exposed and enabled.
+- [ ] `cmtraceopen-api` exposes both app roles (`CmtraceOpen.Operator`
+      and `CmtraceOpen.Admin`), both **Enabled**.
 - [ ] `cmtraceopen-viewer` app registration exists with SPA redirect
       URIs configured; admin consent granted for `CmtraceOpen.Query`.
 - [ ] At least one operator user is assigned to the viewer's Enterprise
       Application (if `Assignment required` was turned on).
+- [ ] At least one operator is assigned to `cmtraceopen-api` →
+      Enterprise Applications → Users and groups under the
+      `CmtraceOpen.Admin` role (verified by inspecting their token's
+      `roles` claim at <https://jwt.ms>).
 - [ ] Tenant ID + both client IDs + Application ID URI captured into the
       team password manager. **Not** committed to this repository.
 - [ ] Tenant OpenID-configuration endpoint returns valid JSON.
