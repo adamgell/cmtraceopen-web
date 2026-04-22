@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 use crate::storage::{BlobStore, MetadataStore};
 
 /// Subset of [`crate::config::Config`] that the router threads into layers.
@@ -56,25 +57,28 @@ pub struct AppState {
     /// Hostname reported by the kernel at startup (best-effort; falls back to
     /// `"unknown"` if the OS lookup fails).
     pub hostname: String,
+    /// Operator-bearer auth configuration + JWKS cache. Consumed by the
+    /// `OperatorPrincipal` extractor on query routes.
+    pub auth: AuthState,
     /// CORS settings threaded into the outer layer at router-build time. Kept
     /// on `AppState` so tests and `main.rs` share a single construction path.
     pub cors: CorsConfig,
 }
 
 impl AppState {
-    /// Build the full shared state. `listen_addr` is the stringified bind
-    /// address used purely for display on the status page.
+    /// Build the full shared state with auth enabled. `listen_addr` is the
+    /// stringified bind address used purely for display on the status page.
     ///
-    /// Integration tests that don't exercise CORS can call this helper; it
-    /// defaults to an empty allowed-origins list (fail-closed). Call sites
-    /// that need CORS (the real `main.rs`, the CORS integration tests) use
-    /// [`AppState::with_cors`] instead.
+    /// Defaults to an empty CORS allowed-origins list (fail-closed). Call
+    /// sites that need CORS (the real `main.rs`, the CORS integration tests)
+    /// use [`AppState::with_cors`] instead.
     pub fn new(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
         listen_addr: String,
+        auth: AuthState,
     ) -> Arc<Self> {
-        Self::with_cors(meta, blobs, listen_addr, CorsConfig::default())
+        Self::with_cors(meta, blobs, listen_addr, auth, CorsConfig::default())
     }
 
     /// Same as [`AppState::new`] but with an explicit CORS config.
@@ -82,6 +86,7 @@ impl AppState {
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
         listen_addr: String,
+        auth: AuthState,
         cors: CorsConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -91,8 +96,44 @@ impl AppState {
             request_count: AtomicU64::new(0),
             listen_addr,
             hostname: detect_hostname(),
+            auth,
             cors,
         })
+    }
+
+    /// Test-only shortcut: build state with auth disabled and no Entra
+    /// config. Integration tests that don't exercise the auth surface
+    /// prefer this over hand-rolling a full `AuthState`.
+    pub fn new_auth_disabled(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+    ) -> Arc<Self> {
+        let auth = AuthState {
+            mode: AuthMode::Disabled,
+            entra: None,
+            jwks: Arc::new(JwksCache::new(
+                "http://127.0.0.1:1/unused".to_string(),
+            )),
+        };
+        Self::new(meta, blobs, listen_addr, auth)
+    }
+
+    /// Test helper: build state with auth enabled, pointed at a caller-
+    /// supplied JWKS cache (typically pre-seeded with a hand-minted pubkey).
+    pub fn new_with_auth(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        entra: EntraConfig,
+        jwks: Arc<JwksCache>,
+    ) -> Arc<Self> {
+        let auth = AuthState {
+            mode: AuthMode::Enabled,
+            entra: Some(entra),
+            jwks,
+        };
+        Self::new(meta, blobs, listen_addr, auth)
     }
 }
 
