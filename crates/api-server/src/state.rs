@@ -4,14 +4,16 @@
 //! whether the backend is local-fs + SQLite (MVP) or S3 + Postgres (later).
 //!
 //! Also carries a handful of process-wide fields surfaced on the dev status
-//! page (`GET /`): monotonic start time, a request counter bumped by the
-//! counter middleware, the listen address, and the host name. These are
-//! intentionally parked on the same struct so every handler sees a single
+//! page (`GET /`): monotonic start time, a per-route request counter bumped
+//! by the counter middleware, the listen address, and the host name. These
+//! are intentionally parked on the same struct so every handler sees a single
 //! unified state type rather than juggling multiple `State<T>` extractors.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Instant;
+
+use dashmap::DashMap;
 
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 use crate::storage::{BlobStore, MetadataStore};
@@ -36,6 +38,23 @@ impl Default for MtlsRuntimeConfig {
         }
     }
 }
+
+/// Per-route request counter map, keyed by the Axum `MatchedPath` template
+/// (e.g. `/v1/sessions/{id}/entries`, not the substituted path). The
+/// request-counter middleware bumps the bucket for the matched route on
+/// every request; the dev status page sweeps the map to render a top-N
+/// table.
+///
+/// `DashMap` shards internally so two requests on different routes don't
+/// contend on a single mutex. Each value is an `AtomicU64` so bumps inside
+/// a shard are still lock-free reads on the shard map. Sentinel key
+/// `unmatched` collects 404s where no route template was matched.
+pub type RouteCounterMap = DashMap<String, AtomicU64>;
+
+/// Sentinel key used by the request-counter middleware when a request didn't
+/// match any registered route (i.e. would 404). Surfaced verbatim in the
+/// status-page table so operators can spot unexpected probe traffic.
+pub const UNMATCHED_ROUTE_KEY: &str = "unmatched";
 
 /// Subset of [`crate::config::Config`] that the router threads into layers.
 ///
@@ -70,9 +89,11 @@ pub struct AppState {
     pub blobs: Arc<dyn BlobStore>,
     /// Monotonic start time; used by the status page for uptime math.
     pub started_at: Instant,
-    /// Total HTTP requests served since process start, all routes + methods.
-    /// Incremented once per request by the request-counter middleware.
-    pub request_count: AtomicU64,
+    /// Per-route HTTP request count since process start, keyed by the Axum
+    /// `MatchedPath` route template (so `/v1/sessions/{id}/entries` counts
+    /// once per route, not per id). Bumped by the request-counter middleware
+    /// once per request; swept and sorted by the status page handler.
+    pub request_counts: Arc<RouteCounterMap>,
     /// Listen address copied from Config at startup — cheap to stringify.
     pub listen_addr: String,
     /// Hostname reported by the kernel at startup (best-effort; falls back to
@@ -132,7 +153,7 @@ impl AppState {
             meta,
             blobs,
             started_at: Instant::now(),
-            request_count: AtomicU64::new(0),
+            request_counts: Arc::new(DashMap::new()),
             listen_addr,
             hostname: detect_hostname(),
             auth,

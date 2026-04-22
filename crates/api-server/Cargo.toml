@@ -37,6 +37,13 @@ hex = "0.4"
 bytes = "1"
 async-trait = "0.1"
 base64 = "0.22"
+# Per-route request counter map, surfaced on the dev status page (`GET /`).
+# `DashMap` gives us lock-free reads/writes per-key — the middleware bumps
+# one bucket per request and the status handler sweeps all buckets to
+# render a top-N table. A `Mutex<HashMap>` would also work but would
+# serialize every counter bump across all routes; `DashMap` shards
+# internally so two requests on different routes don't contend.
+dashmap = "6"
 # Operator bearer-token auth (Entra ID / Azure AD). `jsonwebtoken` drags in
 # `ring` transitively and we have a workspace rule against ring (see README);
 # `jwt-simple` ships with pure-rust crypto (rsa / p256 / ed25519-dalek) and

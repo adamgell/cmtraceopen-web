@@ -560,3 +560,99 @@ async fn concurrent_chunks_at_same_offset_one_wins() {
         "the loser must 409 offset_mismatch (got s1={s1}, s2={s2})"
     );
 }
+
+/// End-to-end smoke test for the dev status page additions: ingest a single
+/// bundle then GET / and assert both the recent-bundles row (device_id +
+/// short session id) and the per-route counter table show up in the rendered
+/// HTML. Regression guard for the PR that added per-route counts + a
+/// `recent_sessions` storage trait method.
+#[tokio::test]
+async fn status_page_shows_recent_bundle_and_route_counts() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+
+    let device_id = "WIN-STATUS-99";
+    let payload = b"status page bundle";
+    let sha = sha256_hex(payload);
+    let bundle_id = Uuid::now_v7();
+
+    let init: BundleInitResponse = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("x-device-id", device_id)
+        .json(&BundleInitRequest {
+            bundle_id,
+            device_hint: None,
+            sha256: sha.clone(),
+            size_bytes: payload.len() as u64,
+            content_kind: content_kind::RAW_FILE.into(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    client
+        .put(format!(
+            "{}/v1/ingest/bundles/{}/chunks?offset=0",
+            server.base, init.upload_id
+        ))
+        .header("x-device-id", device_id)
+        .body(payload.to_vec())
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let fin: BundleFinalizeResponse = client
+        .post(format!(
+            "{}/v1/ingest/bundles/{}/finalize",
+            server.base, init.upload_id
+        ))
+        .header("x-device-id", device_id)
+        .json(&BundleFinalizeRequest {
+            final_sha256: sha.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Hit /healthz a few times so the per-route counter has at least one
+    // route with a non-trivial count to render.
+    for _ in 0..3 {
+        client
+            .get(format!("{}/healthz", server.base))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+
+    // GET / and check the rendered HTML.
+    let resp = client.get(format!("{}/", server.base)).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body = resp.text().await.unwrap();
+
+    // Recent bundles section: device_id + short session id (first 8 hex
+    // chars of the UUID) + parse_state.
+    let short = &fin.session_id.to_string()[..8];
+    assert!(body.contains("Recent bundles"), "missing Recent bundles header");
+    assert!(body.contains(device_id), "missing device id {device_id}");
+    assert!(body.contains(short), "missing short session id {short}");
+    assert!(!body.contains("No bundles ingested yet"), "should not show empty state");
+
+    // Per-route counter section: /healthz appears as a route bucket. The
+    // status route itself ('/') will also be in the map after this request.
+    assert!(body.contains("Top routes"), "missing Top routes header");
+    assert!(body.contains("/healthz"), "missing /healthz route bucket");
+}
