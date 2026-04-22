@@ -366,6 +366,11 @@ pub fn merge_override(base: &AgentConfig, over: &AgentConfigOverride) -> AgentCo
             .log_paths
             .clone()
             .unwrap_or_else(|| base.log_paths.clone()),
+
+        // --- NOT overridable (safety boundary) ---
+        // Redaction config is server-config but not push-overridable in v1;
+        // tracked under `docs/wave4/14-redaction.md`. Take from base.
+        redaction: base.redaction.clone(),
     }
 }
 
