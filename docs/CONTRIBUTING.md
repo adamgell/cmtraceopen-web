@@ -310,9 +310,19 @@ git add cmtraceopen
 git commit -m "chore: bump cmtraceopen submodule to <short-sha>"
 ```
 
-Cadence: bump on demand, not on a schedule. Each bump is a discrete
-commit so it's easy to revert if the parser introduces a regression.
-The CI parser-regression canary
+**Automated bumps:** the
+[`submodule-bump` workflow](../.github/workflows/submodule-bump.yml)
+runs every Tuesday at 14:00 UTC and opens a PR automatically when
+`cmtraceopen`'s upstream `main` has moved ahead of the pinned pointer.
+The PR title follows the pattern
+`chore: bump cmtraceopen submodule from <oldsha> to <newsha>` and the
+body includes the upstream changelog. A PR is only opened when the
+pointer has actually changed; if an open bump PR already exists the
+workflow skips to avoid duplicates. You can also trigger it on-demand
+via **Actions → Bump cmtraceopen submodule → Run workflow**.
+
+Each bump is a discrete commit so it's easy to revert if the parser
+introduces a regression. The CI parser-regression canary
 ([`scripts/wasm-smoke.mjs`](../scripts/wasm-smoke.mjs)) catches drift
 between the WASM build and the desktop parser; if it fails on a bump,
 the parser changed and you need to update the expected counts.
