@@ -321,23 +321,24 @@ fn check_revocation(
 /// Azure Application Gateway sends the client cert as a PEM string
 /// base64-encoded in the `X-ARR-ClientCert` header. Some other proxies
 /// (nginx `ssl_client_cert`, HAProxy) send the PEM inline with newlines
-/// percent-encoded (`%0A`) or replaced by spaces. This function
-/// auto-detects the encoding:
+/// percent-encoded (`%0A`). This function tries the following in order:
 ///
-/// 1. If the trimmed value starts with `-----BEGIN`, it is raw PEM
-///    (uncommon in HTTP headers due to newlines, but handled for
-///    completeness and when the proxy strips newlines).
-/// 2. If the trimmed value looks like URL-percent-encoded PEM (contains
-///    `%0A` or `%0a`), percent-decode it then parse as PEM.
-/// 3. Otherwise, try standard base64 decode, then URL-safe base64.
-///    - If the decoded bytes start with `-----BEGIN`, the payload is
-///      base64(PEM) — decode the PEM to get the DER.
-///    - Otherwise, treat the decoded bytes as raw DER directly.
+/// 1. If the trimmed value starts with `-----BEGIN`, it is raw PEM.
+/// 2. Try standard base64 decode, then URL-safe base64 (AppGW default).
+///    - If decoded bytes start with `-----BEGIN` → base64(PEM); parse to DER.
+///    - If decoded bytes start with `0x30` (ASN.1 SEQUENCE tag) → base64(DER).
+///    - Otherwise, the base64 payload is not a cert; skip this path.
+/// 3. Try percent-decoding (nginx `ssl_client_cert` uses `%0A` for newlines,
+///    but other percent-sequences may appear). Returns `None` if the
+///    percent-decoded result does not start with `-----BEGIN`.
 ///
-/// Returns the DER-encoded leaf cert bytes, or `None` if decoding fails.
+/// Returning `None` for any format that doesn't match gives the caller a
+/// clear signal ("this header value is not a cert") rather than passing
+/// garbage bytes to the DER parser and getting a cryptic 401.
 ///
-/// This is feature-gated on `mtls` because `extract_identity_from_leaf`
-/// (which parses the DER) requires x509-parser which is mtls-gated.
+/// Note: PEM is ASCII-only, so `percent_decode_pem` → `String::from_utf8`
+/// is lossless for any well-formed cert header. Non-UTF-8 sequences after
+/// percent-decoding return `None`.
 #[cfg(feature = "mtls")]
 fn decode_peer_cert_header(value: &str) -> Option<Vec<u8>> {
     use rustls_pemfile::certs;
@@ -350,50 +351,60 @@ fn decode_peer_cert_header(value: &str) -> Option<Vec<u8>> {
         return None;
     }
 
+    // Path 1: raw PEM — starts with the standard PEM banner.
     if trimmed.starts_with("-----BEGIN") {
-        // Path 1: raw PEM (possibly with whitespace instead of newlines) —
-        // extract the first cert DER.
         let mut reader = BufReader::new(trimmed.as_bytes());
-        let first = certs(&mut reader).find_map(|r| r.ok());
-        return first.map(|c| c.to_vec());
+        return certs(&mut reader).find_map(|r| r.ok()).map(|c| c.to_vec());
     }
 
-    // Path 2: percent-encoded PEM (%0A for newlines, as nginx sends).
-    if trimmed.contains("%0") {
-        let decoded_str = percent_decode_pem(trimmed);
-        if decoded_str.starts_with("-----BEGIN") {
-            let mut reader = BufReader::new(decoded_str.as_bytes());
-            let first = certs(&mut reader).find_map(|r| r.ok());
-            return first.map(|c| c.to_vec());
-        }
-    }
-
-    // Path 3: base64-encoded payload. Try standard, then URL-safe.
-    // AppGW default: base64(PEM).
-    let decoded = STANDARD
+    // Path 2: base64-encoded payload (AppGW default). Try standard, then
+    // URL-safe alphabet. Note: `%` is not in either base64 alphabet, so
+    // percent-encoded values will fail here and fall through to path 3.
+    let b64_decoded = STANDARD
         .decode(trimmed)
         .or_else(|_| URL_SAFE.decode(trimmed))
-        .ok()?;
-
-    if decoded.starts_with(b"-----BEGIN") {
-        // Decoded bytes are PEM text — parse to DER.
-        let pem_text = String::from_utf8(decoded).ok()?;
-        let mut reader = BufReader::new(pem_text.as_bytes());
-        let first = certs(&mut reader).find_map(|r| r.ok());
-        return first.map(|c| c.to_vec());
+        .ok();
+    if let Some(decoded) = b64_decoded {
+        if decoded.starts_with(b"-----BEGIN") {
+            // base64(PEM) — AppGW default format.
+            let pem_text = String::from_utf8(decoded).ok()?;
+            let mut reader = BufReader::new(pem_text.as_bytes());
+            return certs(&mut reader).find_map(|r| r.ok()).map(|c| c.to_vec());
+        }
+        // base64(DER) — only accept if the bytes look like an ASN.1
+        // SEQUENCE (tag byte 0x30). Accepting arbitrary base64 payloads
+        // that decode to non-PEM, non-DER bytes would surface as a cryptic
+        // 401 rather than "the header value is not a cert".
+        if decoded.first().copied() == Some(0x30) {
+            return Some(decoded);
+        }
+        // Decoded bytes are neither PEM nor DER — fall through to path 3.
     }
 
-    // Path 4: decoded bytes are raw DER.
-    Some(decoded)
+    // Path 3: percent-encoded PEM (nginx ssl_client_cert uses %0A for
+    // newlines; other percent-sequences are also handled). Tried as a
+    // fallback so no gate heuristic is needed — percent-decoding is cheap
+    // and the result is validated against `-----BEGIN`.
+    let pct_decoded = percent_decode_pem(trimmed)?;
+    if pct_decoded.starts_with("-----BEGIN") {
+        let mut reader = BufReader::new(pct_decoded.as_bytes());
+        return certs(&mut reader).find_map(|r| r.ok()).map(|c| c.to_vec());
+    }
+
+    None
 }
 
-/// Percent-decode a PEM string that uses `%0A` (or `%0a`) for newlines.
-/// Handles only the subset needed for PEM headers (newlines + spaces) to
-/// avoid pulling in a full URL-parsing dependency.
+/// Percent-decode a string, handling the `%XX` escape sequences used by
+/// proxies like nginx when forwarding PEM in HTTP headers.
+///
+/// Collects decoded bytes first, then validates as UTF-8 via
+/// `String::from_utf8`. PEM is ASCII-only, so any well-formed cert header
+/// will round-trip cleanly. Returns `None` if the decoded bytes are not
+/// valid UTF-8 (which would indicate a non-PEM, non-ASCII payload).
 #[cfg(feature = "mtls")]
-fn percent_decode_pem(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+fn percent_decode_pem(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
@@ -401,15 +412,15 @@ fn percent_decode_pem(s: &str) -> String {
                 hex_nibble(bytes[i + 1]),
                 hex_nibble(bytes[i + 2]),
             ) {
-                out.push((hi << 4 | lo) as char);
+                out.push(hi << 4 | lo);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(bytes[i]);
         i += 1;
     }
-    out
+    String::from_utf8(out).ok()
 }
 
 #[cfg(feature = "mtls")]
@@ -422,9 +433,62 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Extractor
-// ---------------------------------------------------------------------------
+/// Re-validate `leaf_der` against the operator-supplied CA trust anchors.
+///
+/// Builds a [`rustls::RootCertStore`] from `ca_ders` and calls
+/// [`rustls::server::WebPkiClientVerifier::verify_client_cert`] with an
+/// empty intermediate chain. The cert must chain directly to one of the
+/// trust anchors (i.e., the **issuing** CA cert must be in the bundle —
+/// both Root CA and Issuing CA belong in `CMTRACE_CLIENT_CA_BUNDLE`).
+///
+/// Also checks the cert's validity period (`notBefore` ≤ `now` ≤
+/// `notAfter`) because the proxy may have already validated this, but we
+/// cannot assume that without reading the cert ourselves.
+///
+/// Returns `Ok(())` when the cert is valid; `Err(reason)` with a
+/// log-friendly description of the failure otherwise.
+///
+/// # Why this matters
+///
+/// When `CMTRACE_PEER_CERT_HEADER` is used, AppGW is supposed to verify
+/// the client cert against its `clientCertSettings.trustedRootCertificate`
+/// before forwarding it. But if the AppGW is misconfigured (no client-cert
+/// policy, or a test proxy forwards headers unconditionally), a caller with
+/// HTTP access could inject an arbitrary cert — including a self-signed one
+/// — and claim any device identity. Re-validating here closes that gap.
+#[cfg(feature = "mtls")]
+fn validate_cert_against_ca_bundle(
+    leaf_der: &[u8],
+    ca_ders: &[Vec<u8>],
+) -> Result<(), String> {
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::RootCertStore;
+    use rustls_pki_types::{CertificateDer, UnixTime};
+
+    debug_assert!(!ca_ders.is_empty(), "caller should check for empty ca_ders");
+
+    let mut roots = RootCertStore::empty();
+    for der in ca_ders {
+        roots
+            .add(CertificateDer::from(der.clone()))
+            .map_err(|e| format!("invalid CA cert DER in bundle: {e}"))?;
+    }
+
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .map_err(|e| format!("failed to build CA verifier: {e}"))?;
+
+    let leaf = CertificateDer::from(leaf_der.to_vec());
+    let now = UnixTime::now();
+
+    // No intermediates — the issuing CA must be a trust anchor in the
+    // bundle. The `allow_unauthenticated` flag is NOT set, so an untrusted
+    // or expired cert is a hard error.
+    verifier
+        .verify_client_cert(&leaf, &[], now)
+        .map_err(|e| e.to_string())
+        .map(|_| ())
+}
 
 impl<S> FromRequestParts<S> for DeviceIdentity
 where
@@ -459,16 +523,84 @@ where
                         if let Some(hv) = parts.headers.get(header_name.as_str()) {
                             if let Ok(cert_str) = hv.to_str() {
                                 if let Some(der) = decode_peer_cert_header(cert_str) {
-                                    if let Some((parsed, fingerprint)) =
-                                        extract_identity_from_leaf(&der, &mtls_cfg.expected_san_uri_scheme)
+                                    // Re-validate the cert against our CA bundle
+                                    // before trusting its SAN URI. AppGW should
+                                    // have already verified the chain, but we
+                                    // check here so a misconfigured proxy (or a
+                                    // test environment that forwards headers
+                                    // unconditionally) cannot inject an arbitrary
+                                    // self-signed cert and claim any device id.
+                                    if !mtls_cfg.trusted_ca_ders.is_empty() {
+                                        if let Err(reason) = validate_cert_against_ca_bundle(
+                                            &der,
+                                            &mtls_cfg.trusted_ca_ders,
+                                        ) {
+                                            warn!(
+                                                peer_ip = %ip,
+                                                header = %header_name,
+                                                reason = %reason,
+                                                "cert header from trusted proxy rejected by CA \
+                                                 bundle validation (chain does not lead to a \
+                                                 configured trust anchor); falling through",
+                                            );
+                                            // Fall through: cert failed validation, do not
+                                            // extract identity from it.
+                                        } else if let Some((parsed, fingerprint)) =
+                                            extract_identity_from_leaf(
+                                                &der,
+                                                &mtls_cfg.expected_san_uri_scheme,
+                                            )
+                                        {
+                                            debug!(
+                                                device_id = %parsed.device_id,
+                                                tenant_id = %parsed.tenant_id,
+                                                cert_sha256 = %fingerprint,
+                                                peer_ip = %ip,
+                                                header = %header_name,
+                                                "device identity from reverse-proxy cert header \
+                                                 (chain-validated against CA bundle)",
+                                            );
+                                            metrics::counter!(
+                                                METRIC_PEER_CERT_SOURCE,
+                                                "source" => "header"
+                                            )
+                                            .increment(1);
+                                            return Ok(DeviceIdentity {
+                                                device_id: parsed.device_id,
+                                                tenant_id: Some(parsed.tenant_id),
+                                                cert_fingerprint: Some(fingerprint),
+                                                source: DeviceIdentitySource::PeerCertHeader,
+                                            });
+                                        } else {
+                                            // Cert validated but no matching SAN URI — fall
+                                            // through.
+                                            warn!(
+                                                peer_ip = %ip,
+                                                header = %header_name,
+                                                "cert header CA-validated but no SAN URI matched \
+                                                 scheme {:?}; falling through to next identity \
+                                                 source",
+                                                mtls_cfg.expected_san_uri_scheme,
+                                            );
+                                        }
+                                    } else if let Some((parsed, fingerprint)) =
+                                        extract_identity_from_leaf(
+                                            &der,
+                                            &mtls_cfg.expected_san_uri_scheme,
+                                        )
                                     {
+                                        // No CA bundle configured (test or transitional
+                                        // mode) — accept without chain validation. In
+                                        // production, TlsConfig::from_env ensures the
+                                        // bundle is always present.
                                         debug!(
                                             device_id = %parsed.device_id,
                                             tenant_id = %parsed.tenant_id,
                                             cert_sha256 = %fingerprint,
                                             peer_ip = %ip,
                                             header = %header_name,
-                                            "device identity from reverse-proxy cert header",
+                                            "device identity from reverse-proxy cert header \
+                                             (no CA bundle; skipping chain validation)",
                                         );
                                         metrics::counter!(
                                             METRIC_PEER_CERT_SOURCE,
@@ -481,15 +613,16 @@ where
                                             cert_fingerprint: Some(fingerprint),
                                             source: DeviceIdentitySource::PeerCertHeader,
                                         });
+                                    } else {
+                                        // Cert decoded but no valid SAN URI — fall through.
+                                        warn!(
+                                            peer_ip = %ip,
+                                            header = %header_name,
+                                            "cert header present but no SAN URI matched scheme {:?}; \
+                                             falling through to next identity source",
+                                            mtls_cfg.expected_san_uri_scheme,
+                                        );
                                     }
-                                    // Cert decoded but no valid SAN URI — fall through.
-                                    warn!(
-                                        peer_ip = %ip,
-                                        header = %header_name,
-                                        "cert header present but no SAN URI matched scheme {:?}; \
-                                         falling through to next identity source",
-                                        mtls_cfg.expected_san_uri_scheme,
-                                    );
                                 }
                             }
                         }
@@ -967,23 +1100,6 @@ mod tests {
 
     // --- decode_peer_cert_header unit tests (mtls-gated) ---
 
-    /// Minimal self-signed cert DER for decode tests. Generated once with
-    /// `openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=test'`
-    /// and hard-coded here so the decode tests have no external deps.
-    #[cfg(feature = "mtls")]
-    fn minimal_cert_pem() -> String {
-        // We'll build this dynamically from rcgen in tests that have it,
-        // but for the unit-level decode test we just test that the function
-        // doesn't panic and returns *something* for valid input. The actual
-        // SAN extraction is tested in the integration tests.
-        //
-        // Use the simplest valid PEM that rustls_pemfile will accept: a
-        // self-signed cert with no extensions at all. We generate it from
-        // rcgen behind the test-mtls feature; for non-mtls builds this
-        // whole block is compiled out.
-        "dummy".to_string() // replaced below by #[cfg(feature = "test-mtls")]
-    }
-
     #[cfg(feature = "mtls")]
     #[test]
     fn decode_peer_cert_header_rejects_empty() {
@@ -998,6 +1114,16 @@ mod tests {
         let pem = "-----BEGIN CERTIFICATE-----\nABCD\n-----END CERTIFICATE-----\n";
         let encoded = pem.replace('\n', "%0a");
         let decoded = percent_decode_pem(&encoded);
-        assert_eq!(decoded, pem);
+        assert_eq!(decoded, Some(pem.to_string()));
+    }
+
+    #[cfg(feature = "mtls")]
+    #[test]
+    fn percent_decode_handles_upper_and_lower_hex() {
+        // %0A (upper) and %0a (lower) should both decode to newline.
+        let upper = "abc%0Axyz";
+        let lower = "abc%0axyz";
+        assert_eq!(percent_decode_pem(upper), Some("abc\nxyz".to_string()));
+        assert_eq!(percent_decode_pem(lower), Some("abc\nxyz".to_string()));
     }
 }

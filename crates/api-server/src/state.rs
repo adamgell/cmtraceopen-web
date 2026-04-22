@@ -39,6 +39,16 @@ pub struct MtlsRuntimeConfig {
     /// The cert header is only honoured when the request's TCP peer address
     /// falls within this CIDR.
     pub trusted_proxy_cidr: Option<ipnet::IpNet>,
+    /// DER-encoded bytes of the trusted CA certs loaded from
+    /// `CMTRACE_CLIENT_CA_BUNDLE`. Populated at startup when
+    /// `peer_cert_header` is set. The `DeviceIdentity` extractor uses this
+    /// to re-validate the cert presented in the header against the same
+    /// trust anchors that the in-process TLS path uses, guarding against
+    /// misconfigured proxies that forward unverified certs.
+    ///
+    /// Empty when `peer_cert_header` is `None` (CA validation is then
+    /// handled by the rustls TLS layer for the in-process path).
+    pub trusted_ca_ders: Vec<Vec<u8>>,
 }
 
 impl Default for MtlsRuntimeConfig {
@@ -48,6 +58,7 @@ impl Default for MtlsRuntimeConfig {
             expected_san_uri_scheme: "device".to_string(),
             peer_cert_header: None,
             trusted_proxy_cidr: None,
+            trusted_ca_ders: vec![],
         }
     }
 }

@@ -199,11 +199,42 @@ async fn main() -> ExitCode {
         allowed_origins: config.allowed_origins.clone(),
         allow_credentials: config.allow_credentials,
     };
+
+    // Load the CA bundle DER bytes for the header-cert path. This is only
+    // needed when CMTRACE_PEER_CERT_HEADER is set; TlsConfig::from_env
+    // already verified that CMTRACE_CLIENT_CA_BUNDLE is present in that
+    // case, so the `expect` below is unreachable in practice.
+    #[allow(unused_mut)]
+    let mut trusted_ca_ders: Vec<Vec<u8>> = vec![];
+    #[cfg(feature = "mtls")]
+    if config.tls.peer_cert_header.is_some() {
+        let ca_path = config
+            .tls
+            .client_ca_bundle
+            .as_ref()
+            .expect("TlsConfig::from_env ensures client_ca_bundle is set when peer_cert_header is set");
+        match api_server::tls::load_ca_ders_from_pem(ca_path) {
+            Ok(ders) => {
+                info!(
+                    count = ders.len(),
+                    path = %ca_path.display(),
+                    "CA bundle loaded for header-cert chain validation",
+                );
+                trusted_ca_ders = ders;
+            }
+            Err(err) => {
+                eprintln!("fatal: failed to load CA bundle for peer-cert-header mode: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
     let mtls = MtlsRuntimeConfig {
         require_on_ingest: config.tls.require_on_ingest,
         expected_san_uri_scheme: config.tls.expected_san_uri_scheme.clone(),
         peer_cert_header: config.tls.peer_cert_header.clone(),
         trusted_proxy_cidr: config.tls.trusted_proxy_cidr.clone(),
+        trusted_ca_ders,
     };
 
     // Build the CRL cache (if the `crl` feature is on) and prime it with

@@ -286,6 +286,32 @@ fn load_roots_from_pem(path: &Path) -> Result<RootCertStore, TlsBringupError> {
     Ok(roots)
 }
 
+/// Load raw DER bytes of every certificate in a PEM file.
+///
+/// Used by `main.rs` to pre-load the CA bundle into [`MtlsRuntimeConfig`]
+/// when `peer_cert_header` is configured. The `DeviceIdentity` extractor
+/// rebuilds the webpki trust store from these bytes on each request so it
+/// can re-validate the cert forwarded in the header against the same CA
+/// that the in-process TLS path trusts.
+///
+/// Returns an error if the file cannot be read or contains no certificates.
+pub fn load_ca_ders_from_pem(path: &Path) -> Result<Vec<Vec<u8>>, TlsBringupError> {
+    let bytes = std::fs::read(path).map_err(|err| TlsBringupError::Io {
+        what: "client CA bundle (header path)",
+        err,
+    })?;
+    let mut reader = bytes.as_slice();
+    let ders: Vec<Vec<u8>> = rustls_pemfile::certs(&mut reader)
+        .filter_map(Result::ok)
+        .map(|c| c.to_vec())
+        .collect();
+    if ders.is_empty() {
+        return Err(TlsBringupError::NoCertsInPem(path.display().to_string()));
+    }
+    debug!(count = ders.len(), "CA bundle loaded for header-cert validation");
+    Ok(ders)
+}
+
 // ---------------------------------------------------------------------------
 // Custom acceptor: peer-cert capture + per-request extension injection
 // ---------------------------------------------------------------------------

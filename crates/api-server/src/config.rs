@@ -344,6 +344,15 @@ pub enum ConfigError {
          Set CMTRACE_TRUSTED_PROXY_CIDR to the AppGW subnet (e.g. 10.224.0.0/16)."
     )]
     MissingTrustedProxyCidr,
+
+    #[error(
+        "CMTRACE_PEER_CERT_HEADER is set but CMTRACE_CLIENT_CA_BUNDLE is not; \
+         the header path re-validates the cert against this bundle to guard against \
+         misconfigured proxies that forward unverified certs. \
+         Set CMTRACE_CLIENT_CA_BUNDLE to the PEM bundle containing your Root CA \
+         and Issuing CA (the same bundle used by CMTRACE_TLS_ENABLED mode)."
+    )]
+    MissingClientCaBundleForHeaderPath,
 }
 
 impl Config {
@@ -584,6 +593,14 @@ impl TlsConfig {
             if client_ca_bundle.is_none() {
                 return Err(ConfigError::MissingTlsPath("CMTRACE_CLIENT_CA_BUNDLE"));
             }
+        }
+
+        // The header path re-validates the presented cert against the CA
+        // bundle to guard against misconfigured proxies that forward
+        // unverified certs. Requiring the bundle here (at config time)
+        // ensures the check is not accidentally skipped in production.
+        if peer_cert_header.is_some() && client_ca_bundle.is_none() {
+            return Err(ConfigError::MissingClientCaBundleForHeaderPath);
         }
 
         Ok(Self {

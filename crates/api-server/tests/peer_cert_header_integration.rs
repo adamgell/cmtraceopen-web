@@ -37,11 +37,14 @@ use tokio::net::TcpListener;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// A self-signed cert DER + its PEM encoding for use as a client cert in
-/// reverse-proxy header tests.
+/// A CA-signed client cert for use in reverse-proxy header tests.
 struct TestCert {
     _der: CertificateDer<'static>,
     pem: String,
+    /// DER bytes of the CA that signed this cert. Pass this as
+    /// `trusted_ca_ders` in `MtlsRuntimeConfig` so the extractor can
+    /// re-validate the chain.
+    ca_der: Vec<u8>,
 }
 
 fn mint_client_cert(tenant_id: &str, device_id: &str) -> TestCert {
@@ -78,6 +81,7 @@ fn mint_client_cert(tenant_id: &str, device_id: &str) -> TestCert {
     TestCert {
         _der: CertificateDer::from(cli_cert.der().to_vec()),
         pem: cli_cert.pem(),
+        ca_der: ca_cert.der().to_vec(),
     }
 }
 
@@ -89,6 +93,7 @@ struct TestServer {
 async fn start_server_with_peer_cert_header(
     header_name: &str,
     trusted_cidr: &str,
+    trusted_ca_ders: Vec<Vec<u8>>,
 ) -> TestServer {
     let tmp = TempDir::new().expect("tempdir");
     let blobs = Arc::new(
@@ -107,6 +112,7 @@ async fn start_server_with_peer_cert_header(
         expected_san_uri_scheme: "device".into(),
         peer_cert_header: Some(header_name.to_string()),
         trusted_proxy_cidr: Some(trusted_cidr.parse().expect("valid CIDR")),
+        trusted_ca_ders,
     };
 
     let state = AppState::full(
@@ -155,7 +161,11 @@ async fn raw_pem_header_from_trusted_ip_yields_device_identity() {
 
     // 127.0.0.1 is the loopback address; use a /8 CIDR so the test server
     // running on localhost is always in the trusted range.
-    let server = start_server_with_peer_cert_header("X-ARR-ClientCert", "127.0.0.0/8").await;
+    let server = start_server_with_peer_cert_header(
+        "X-ARR-ClientCert",
+        "127.0.0.0/8",
+        vec![cert.ca_der.clone()],
+    ).await;
     let client = reqwest::Client::new();
 
     // AppGW sends the PEM base64-encoded so the header value is a single
@@ -199,7 +209,11 @@ async fn base64_pem_header_yields_device_identity() {
     // Simulate AppGW base64-encoding the PEM string.
     let b64_pem = STANDARD.encode(cert.pem.trim().as_bytes());
 
-    let server = start_server_with_peer_cert_header("X-ARR-ClientCert", "127.0.0.0/8").await;
+    let server = start_server_with_peer_cert_header(
+        "X-ARR-ClientCert",
+        "127.0.0.0/8",
+        vec![cert.ca_der.clone()],
+    ).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -222,7 +236,12 @@ async fn base64_pem_header_yields_device_identity() {
 /// No cert header → falls through to legacy X-Device-Id when not required.
 #[tokio::test]
 async fn missing_cert_header_falls_back_to_device_id_header() {
-    let server = start_server_with_peer_cert_header("X-ARR-ClientCert", "127.0.0.0/8").await;
+    // No CA DER needed here — no cert header is sent.
+    let server = start_server_with_peer_cert_header(
+        "X-ARR-ClientCert",
+        "127.0.0.0/8",
+        vec![],
+    ).await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -239,6 +258,52 @@ async fn missing_cert_header_falls_back_to_device_id_header() {
         resp.status(),
         reqwest::StatusCode::UNAUTHORIZED,
         "X-Device-Id fallback should work when cert header absent; got {}",
+        resp.status()
+    );
+}
+
+/// A cert that was NOT signed by the configured CA bundle is rejected.
+///
+/// This test documents the defence-in-depth property introduced by comment
+/// A in the review: the api-server re-validates the forwarded cert against
+/// CMTRACE_CLIENT_CA_BUNDLE even though AppGW should have already verified
+/// it. A misconfigured proxy (or a test proxy that forwards headers
+/// unconditionally) cannot be used to inject an arbitrary self-signed cert
+/// and claim a device identity.
+#[tokio::test]
+async fn cert_not_signed_by_trusted_ca_is_rejected() {
+    let tenant = "55555555-0000-0000-0000-000000000000";
+    let device = "66666666-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+    // Mint a cert signed by CA-A.
+    let cert = mint_client_cert(tenant, device);
+
+    // Server is configured to trust CA-B (a completely different CA).
+    let other_cert = mint_client_cert("other-tenant", "other-device");
+    let server = start_server_with_peer_cert_header(
+        "X-ARR-ClientCert",
+        "127.0.0.0/8",
+        vec![other_cert.ca_der.clone()], // CA-B, not CA-A
+    ).await;
+    let client = reqwest::Client::new();
+
+    // Send cert signed by CA-A to a server that trusts CA-B only.
+    let b64_pem = STANDARD.encode(cert.pem.trim().as_bytes());
+    let resp = client
+        .post(format!("{}/v1/ingest/bundles", server.base))
+        .header("X-ARR-ClientCert", &b64_pem)
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .expect("request");
+
+    // The untrusted cert should be rejected — the extractor falls through
+    // and returns 401 (no X-Device-Id header is sent).
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "cert signed by an untrusted CA must be rejected; got {}",
         resp.status()
     );
 }
@@ -264,6 +329,7 @@ async fn extractor_ignores_header_without_connect_info() {
         expected_san_uri_scheme: "device".into(),
         peer_cert_header: Some("X-ARR-ClientCert".to_string()),
         trusted_proxy_cidr: Some("127.0.0.0/8".parse().unwrap()),
+        trusted_ca_ders: vec![cert.ca_der.clone()],
     };
     let state = AppState::full(
         meta,
