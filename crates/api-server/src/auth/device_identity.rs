@@ -1115,6 +1115,7 @@ mod tests {
             auth,
             crate::state::CorsConfig::default(),
             mtls,
+            Arc::new(crate::state::RateLimitState::disabled()),
         );
 
         let req = axum::http::Request::builder()

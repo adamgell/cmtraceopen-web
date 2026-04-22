@@ -54,19 +54,43 @@ const X_DEVICE_ID: HeaderName = HeaderName::from_static("x-device-id");
 /// requests are answered before they reach any auth / counter middleware.
 /// Preflight responses must not depend on authentication state or they'll
 /// blow the request before the real verb ever runs.
+///
+/// Within each sub-router, rate-limit middleware is applied so that
+/// per-device and per-IP limits are checked before the handler runs. The
+/// device limit fires first (it's the innermost layer); then the IP limit.
 pub fn router(state: Arc<AppState>) -> Router {
     let cors = build_cors_layer(&state.cors);
 
-    Router::new()
-        .merge(routes::status::router(state.clone()))
-        .merge(routes::health::router())
-        .merge(routes::metrics::router(state.clone()))
+    // Ingest sub-router: device-ID limit + IP limit.
+    let ingest_router = Router::new()
         .merge(routes::ingest::router(state.clone()))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::middleware::rate_limit::ip_ingest_middleware,
+        ))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::middleware::rate_limit::device_ingest_middleware,
+        ));
+
+    // Operator query sub-router: IP limit.
+    let query_router = Router::new()
         .merge(routes::devices::router(state.clone()))
         .merge(routes::sessions::router(state.clone()))
         .merge(routes::files::router(state.clone()))
         .merge(routes::entries::router(state.clone()))
         .merge(routes::admin::router(state.clone()))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::middleware::rate_limit::ip_query_middleware,
+        ));
+
+    Router::new()
+        .merge(routes::status::router(state.clone()))
+        .merge(routes::health::router())
+        .merge(routes::metrics::router(state.clone()))
+        .merge(ingest_router)
+        .merge(query_router)
         .layer(from_fn_with_state(
             state,
             routes::status::request_counter_middleware,

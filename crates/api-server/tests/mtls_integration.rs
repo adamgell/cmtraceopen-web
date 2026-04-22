@@ -157,6 +157,7 @@ async fn start_tls_server(
         auth,
         Default::default(),
         mtls,
+        Arc::new(api_server::state::RateLimitState::disabled()),
     );
     let app = router(state);
 

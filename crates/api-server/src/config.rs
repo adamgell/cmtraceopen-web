@@ -7,6 +7,42 @@ use ipnet::IpNet;
 
 use crate::auth::{AuthMode, EntraConfig};
 
+/// Rate-limiting thresholds for the three protected scopes.
+///
+/// All limits default to safe values for the 8-device beta pilot. Setting
+/// any value to `0` disables that particular scope entirely (no 429s emitted
+/// for that scope).
+#[derive(Debug, Clone)]
+pub struct RateLimitConfig {
+    /// Maximum bundle-ingest requests **per device** per hour, keyed on the
+    /// device identity (header or cert). Env:
+    /// `CMTRACE_RATE_LIMIT_INGEST_PER_DEVICE_HOUR`. Default: `100`. `0` =
+    /// disabled.
+    pub ingest_per_device_hour: u64,
+
+    /// Maximum requests per minute **per source IP** on `/v1/ingest/*`
+    /// routes. Backstop against a single host running many devices. Env:
+    /// `CMTRACE_RATE_LIMIT_INGEST_PER_IP_MINUTE`. Default: `1000`. `0` =
+    /// disabled.
+    pub ingest_per_ip_minute: u64,
+
+    /// Maximum requests per minute **per source IP** on query routes
+    /// (`/v1/devices`, sessions, files, entries). Env:
+    /// `CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE`. Default: `60`. `0` =
+    /// disabled.
+    pub query_per_ip_minute: u64,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            ingest_per_device_hour: 100,
+            ingest_per_ip_minute: 1000,
+            query_per_ip_minute: 60,
+        }
+    }
+}
+
 /// Which blob-storage backend the api-server uses for finalized bundles.
 ///
 /// `Local` is the dev / test default — bundles land on the local filesystem
@@ -186,6 +222,10 @@ pub struct Config {
     /// loop just runs again on its next tick and chips away at the
     /// backlog batch by batch.
     pub retention_batch_size: u32,
+
+    /// Per-device and per-IP rate-limit thresholds. See [`RateLimitConfig`]
+    /// for the per-field env-var contract and defaults.
+    pub rate_limit: RateLimitConfig,
 }
 
 /// TLS-termination + mTLS client-cert verification. Populated from
@@ -353,6 +393,9 @@ pub enum ConfigError {
          and Issuing CA (the same bundle used by CMTRACE_TLS_ENABLED mode)."
     )]
     MissingClientCaBundleForHeaderPath,
+
+    #[error("invalid {0}: expected a non-negative integer")]
+    InvalidRateLimit(&'static str),
 }
 
 impl Config {
@@ -520,6 +563,20 @@ impl Config {
             bundle_ttl_days,
             retention_scan_interval_secs,
             retention_batch_size,
+            rate_limit: RateLimitConfig {
+                ingest_per_device_hour: parse_rate_limit(
+                    "CMTRACE_RATE_LIMIT_INGEST_PER_DEVICE_HOUR",
+                    100,
+                )?,
+                ingest_per_ip_minute: parse_rate_limit(
+                    "CMTRACE_RATE_LIMIT_INGEST_PER_IP_MINUTE",
+                    1000,
+                )?,
+                query_per_ip_minute: parse_rate_limit(
+                    "CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE",
+                    60,
+                )?,
+            },
         })
     }
 }
@@ -621,5 +678,16 @@ fn parse_bool(raw: &str) -> Option<bool> {
         "true" | "1" | "yes" | "on" => Some(true),
         "false" | "0" | "no" | "off" => Some(false),
         _ => None,
+    }
+}
+
+/// Parse an optional u64 env var. Missing var → default; present but
+/// unparseable → error. Accepts `0` (disables the feature).
+fn parse_rate_limit(var: &'static str, default: u64) -> Result<u64, ConfigError> {
+    match env::var(var) {
+        Ok(v) => v
+            .parse::<u64>()
+            .map_err(|_| ConfigError::InvalidRateLimit(var)),
+        Err(_) => Ok(default),
     }
 }

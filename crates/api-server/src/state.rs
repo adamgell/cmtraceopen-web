@@ -11,7 +11,7 @@
 
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -19,9 +19,118 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 #[cfg(feature = "crl")]
 use crate::auth::CrlCache;
+use crate::config::RateLimitConfig;
 use crate::storage::{AuditStore, BlobStore, MetadataStore, NoopAuditStore};
 
-/// Subset of [`crate::config::TlsConfig`] the request-handling layer needs
+// ---------------------------------------------------------------------------
+// Rate limiting
+// ---------------------------------------------------------------------------
+
+/// A single fixed-window bucket for one rate-limit key.
+///
+/// Reset when `now - window_start >= window`; counter incremented otherwise.
+struct WindowEntry {
+    window_start: Instant,
+    count: u64,
+}
+
+/// Simple fixed-window rate limiter keyed by an arbitrary string.
+///
+/// Backed by a [`DashMap`] so concurrent requests on different keys don't
+/// contend. Each per-key entry holds the window start time and the request
+/// count. When the window expires, the entry is reset and the new window
+/// begins.
+///
+/// The implementation uses a write lock (via `DashMap::entry`) per check so
+/// the increment and the threshold comparison are atomic with respect to other
+/// concurrent callers for the same key.
+pub struct RateLimiter {
+    windows: DashMap<String, WindowEntry>,
+    /// Maximum requests in a single window.
+    pub limit: u64,
+    /// Duration of one window.
+    pub window: Duration,
+}
+
+impl RateLimiter {
+    /// Create a new limiter with the given window `limit` and `window` size.
+    pub fn new(limit: u64, window: Duration) -> Self {
+        Self {
+            windows: DashMap::new(),
+            limit,
+            window,
+        }
+    }
+
+    /// Check whether `key` is within the rate limit and increment the counter.
+    ///
+    /// Returns `Ok(())` when the request is allowed.
+    /// Returns `Err(retry_after)` when the limit is exceeded; `retry_after`
+    /// is the duration until the current window expires.
+    pub fn check(&self, key: &str) -> Result<(), Duration> {
+        let now = Instant::now();
+        let mut entry = self
+            .windows
+            .entry(key.to_string())
+            .or_insert_with(|| WindowEntry { window_start: now, count: 0 });
+
+        if now.duration_since(entry.window_start) >= self.window {
+            // Window expired — start a fresh one.
+            entry.window_start = now;
+            entry.count = 1;
+            Ok(())
+        } else if entry.count < self.limit {
+            entry.count += 1;
+            Ok(())
+        } else {
+            // Compute how long until this window ends.
+            let window_end = entry.window_start + self.window;
+            let remaining = window_end.saturating_duration_since(now);
+            Err(remaining)
+        }
+    }
+}
+
+/// Collection of rate limiters for the three protected scopes.
+///
+/// Each limiter is optional — `None` means that scope is disabled (either
+/// the limit was configured to `0` or this is a test build that doesn't
+/// need rate limiting).
+pub struct RateLimitState {
+    /// Per-device-ID limiter on bundle-ingest routes. Window: 1 hour.
+    pub device_ingest: Option<RateLimiter>,
+    /// Per-source-IP limiter on `/v1/ingest/*` routes. Window: 1 minute.
+    pub ip_ingest: Option<RateLimiter>,
+    /// Per-source-IP limiter on query routes. Window: 1 minute.
+    pub ip_query: Option<RateLimiter>,
+}
+
+impl RateLimitState {
+    /// Build from the runtime config. Scopes whose limit is `0` become
+    /// `None` (disabled).
+    pub fn from_config(cfg: &RateLimitConfig) -> Self {
+        let make = |limit: u64, window: Duration| {
+            (limit > 0).then(|| RateLimiter::new(limit, window))
+        };
+        Self {
+            device_ingest: make(cfg.ingest_per_device_hour, Duration::from_secs(3600)),
+            ip_ingest: make(cfg.ingest_per_ip_minute, Duration::from_secs(60)),
+            ip_query: make(cfg.query_per_ip_minute, Duration::from_secs(60)),
+        }
+    }
+
+    /// All scopes disabled — the default for test constructors that don't
+    /// exercise rate-limiting behaviour.
+    pub fn disabled() -> Self {
+        Self {
+            device_ingest: None,
+            ip_ingest: None,
+            ip_query: None,
+        }
+    }
+}
+
+
 /// at runtime: which scheme to expect on the SAN URI and whether ingest
 /// routes should reject requests that arrive without a verified client
 /// cert. The cert/key/CA paths live only in the startup path.
@@ -152,6 +261,9 @@ pub struct AppState {
     /// renders against the same underlying registry — counters incremented
     /// during a test show up in that test's `/metrics` response.
     pub metrics: PrometheusHandle,
+    /// Per-device and per-IP rate-limit state. Shared across the middleware
+    /// functions; individual scopes are `None` when that limit is disabled.
+    pub rate_limit: Arc<RateLimitState>,
 }
 
 /// Process-wide Prometheus recorder + handle.
@@ -195,9 +307,9 @@ impl AppState {
     /// Build the full shared state with auth enabled. `listen_addr` is the
     /// stringified bind address used purely for display on the status page.
     ///
-    /// Defaults to an empty CORS allowed-origins list (fail-closed). Call
-    /// sites that need CORS (the real `main.rs`, the CORS integration tests)
-    /// use [`AppState::with_cors`] instead.
+    /// Defaults to an empty CORS allowed-origins list (fail-closed) and rate
+    /// limiting disabled. Call sites that need CORS use [`AppState::with_cors`];
+    /// sites that need rate limiting use [`AppState::full`] directly.
     pub fn new(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
@@ -215,16 +327,28 @@ impl AppState {
         auth: AuthState,
         cors: CorsConfig,
     ) -> Arc<Self> {
-        Self::full(meta, blobs, listen_addr, auth, cors, MtlsRuntimeConfig::default())
+        Self::full(
+            meta,
+            blobs,
+            listen_addr,
+            auth,
+            cors,
+            MtlsRuntimeConfig::default(),
+            Arc::new(RateLimitState::disabled()),
+        )
     }
 
-    /// Build the shared state with explicit CORS + mTLS knobs. The full
-    /// constructor used by `main.rs`; tests usually go through `new` /
-    /// `with_cors` and pick up the default (mTLS off) variant.
+    /// Build the shared state with explicit CORS, mTLS, and rate-limit knobs.
+    ///
+    /// This is the canonical production constructor called from `main.rs`.
+    /// Tests that don't need rate limiting go through [`AppState::new`] /
+    /// [`AppState::with_cors`] / [`AppState::new_auth_disabled`], which all
+    /// default to `RateLimitState::disabled()`.
     ///
     /// Defaults to [`NoopAuditStore`] — production callers that need a real
     /// audit log should pass an [`AuditSqliteStore`][crate::storage::AuditSqliteStore]
-    /// via the `audit` parameter.
+    /// via the `audit` parameter (see [`AppState::full_with_audit`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn full(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
@@ -232,12 +356,23 @@ impl AppState {
         auth: AuthState,
         cors: CorsConfig,
         mtls: MtlsRuntimeConfig,
+        rate_limit: Arc<RateLimitState>,
     ) -> Arc<Self> {
-        Self::full_with_audit(meta, blobs, listen_addr, auth, cors, mtls, Arc::new(NoopAuditStore))
+        Self::full_with_audit(
+            meta,
+            blobs,
+            listen_addr,
+            auth,
+            cors,
+            mtls,
+            rate_limit,
+            Arc::new(NoopAuditStore),
+        )
     }
 
     /// Like [`AppState::full`] but with an explicit [`AuditStore`] backend.
     /// Used by `main.rs` and audit integration tests to wire in a real store.
+    #[allow(clippy::too_many_arguments)]
     pub fn full_with_audit(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
@@ -245,6 +380,7 @@ impl AppState {
         auth: AuthState,
         cors: CorsConfig,
         mtls: MtlsRuntimeConfig,
+        rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -261,6 +397,7 @@ impl AppState {
             #[cfg(feature = "crl")]
             crl_cache: None,
             metrics: metrics_handle(),
+            rate_limit,
         })
     }
 
@@ -269,6 +406,7 @@ impl AppState {
     /// existing test call sites that already pass through
     /// [`AppState::with_cors`] / [`AppState::new`].
     #[cfg(feature = "crl")]
+    #[allow(clippy::too_many_arguments)]
     pub fn with_cors_and_crl(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
@@ -277,14 +415,25 @@ impl AppState {
         cors: CorsConfig,
         mtls: MtlsRuntimeConfig,
         crl_cache: Option<Arc<CrlCache>>,
+        rate_limit: Arc<RateLimitState>,
     ) -> Arc<Self> {
-        Self::with_cors_crl_and_audit(meta, blobs, listen_addr, auth, cors, mtls, crl_cache, Arc::new(NoopAuditStore))
+        Self::with_cors_crl_and_audit(
+            meta,
+            blobs,
+            listen_addr,
+            auth,
+            cors,
+            mtls,
+            crl_cache,
+            rate_limit,
+            Arc::new(NoopAuditStore),
+        )
     }
 
     /// Full constructor including CRL cache and an explicit [`AuditStore`].
     /// Used by `main.rs` in production.
     ///
-    /// Eight positional args is one over clippy's `too-many-arguments`
+    /// Nine positional args is over clippy's `too-many-arguments`
     /// threshold. Refactoring to a builder would touch every call site
     /// for a constructor only `main.rs` actually uses; silencing the
     /// lint locally is the lower-cost choice.
@@ -298,6 +447,7 @@ impl AppState {
         cors: CorsConfig,
         mtls: MtlsRuntimeConfig,
         crl_cache: Option<Arc<CrlCache>>,
+        rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -313,6 +463,7 @@ impl AppState {
             mtls,
             crl_cache,
             metrics: metrics_handle(),
+            rate_limit,
         })
     }
 
@@ -332,6 +483,33 @@ impl AppState {
             )),
         };
         Self::new(meta, blobs, listen_addr, auth)
+    }
+
+    /// Test helper: build state with auth disabled and explicit rate-limit
+    /// config. Used by the rate-limit integration tests to exercise limiting
+    /// without standing up an Entra tenant.
+    pub fn new_auth_disabled_with_rate_limit(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        rate_limit: Arc<RateLimitState>,
+    ) -> Arc<Self> {
+        let auth = AuthState {
+            mode: AuthMode::Disabled,
+            entra: None,
+            jwks: Arc::new(JwksCache::new(
+                "http://127.0.0.1:1/unused".to_string(),
+            )),
+        };
+        Self::full(
+            meta,
+            blobs,
+            listen_addr,
+            auth,
+            CorsConfig::default(),
+            MtlsRuntimeConfig::default(),
+            rate_limit,
+        )
     }
 
     /// Test helper: build state with auth enabled, pointed at a caller-

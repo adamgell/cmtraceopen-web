@@ -469,6 +469,7 @@ mod tests {
             // Share the process-wide recorder so handler tests don't double-
             // install (the metrics-rs recorder is global + install-once).
             metrics: crate::state::install_metrics_recorder(),
+            rate_limit: Arc::new(crate::state::RateLimitState::disabled()),
         }
     }
 
