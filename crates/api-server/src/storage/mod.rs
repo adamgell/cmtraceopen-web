@@ -141,7 +141,7 @@ mod build_blob_store_tests {
 
     use super::*;
     use crate::auth::AuthMode;
-    use crate::config::{BlobBackend, Config};
+    use crate::config::{BlobBackend, Config, TlsConfig};
     use std::net::SocketAddr;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -155,6 +155,7 @@ mod build_blob_store_tests {
             entra: None,
             allowed_origins: vec![],
             allow_credentials: false,
+            tls: TlsConfig::default(),
             blob_backend: BlobBackend::Local,
             blob_azure_account: None,
             blob_azure_container: None,
