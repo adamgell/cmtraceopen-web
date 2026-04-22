@@ -61,7 +61,9 @@ fn route_to_action(method: &Method, template: Option<&str>) -> String {
 fn route_to_target(template: Option<&str>, path: &str) -> (Option<String>, Option<String>) {
     match template {
         Some("/v1/admin/devices/{device_id}/disable") => {
-            // /v1/admin/devices/<device_id>/disable → parts[4] is device_id
+            // Path structure: /v1/admin/devices/<device_id>/disable
+            // Indices:         0   1   2      3       4         5
+            // (leading slash causes an empty segment at index 0)
             let device_id = path.split('/').nth(4).map(str::to_string);
             (Some("device".to_string()), device_id)
         }

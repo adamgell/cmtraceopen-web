@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, SqlitePool};
 use uuid::Uuid;
 
 use super::{AuditFilters, AuditRow, AuditStore, NewAuditRow, StorageError};
@@ -90,130 +90,32 @@ impl AuditStore for AuditSqliteStore {
         // Cap at 1000 so a misconfigured caller can't pull the whole table in
         // one shot.
         let effective_limit = limit.min(1000) as i64;
-
-        // Build the query dynamically depending on which filters are set.
-        // SQLite has no parameterised WHERE…AND construction, so we
-        // assemble the SQL string. All values are still bound as parameters
-        // so there is no SQL-injection risk.
         let after_ts_s = filters.after_ts.as_ref().map(|dt| dt.to_rfc3339());
 
-        let rows = match (&after_ts_s, &filters.principal, &filters.action) {
-            (None, None, None) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(after), None, None) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE ts_utc > ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(after)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (None, Some(principal), None) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE principal_id = ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(principal)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (None, None, Some(action)) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE action = ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(action)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(after), Some(principal), None) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE ts_utc > ? AND principal_id = ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(after)
-                .bind(principal)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(after), None, Some(action)) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE ts_utc > ? AND action = ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(after)
-                .bind(action)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (None, Some(principal), Some(action)) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE principal_id = ? AND action = ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(principal)
-                .bind(action)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-            (Some(after), Some(principal), Some(action)) => {
-                sqlx::query(
-                    "SELECT id, ts_utc, principal_kind, principal_id, principal_display,
-                            action, target_kind, target_id, result, details_json, request_id
-                     FROM audit_log
-                     WHERE ts_utc > ? AND principal_id = ? AND action = ?
-                     ORDER BY ts_utc DESC
-                     LIMIT ?",
-                )
-                .bind(after)
-                .bind(principal)
-                .bind(action)
-                .bind(effective_limit)
-                .fetch_all(&self.pool)
-                .await?
-            }
-        };
+        // Build the query dynamically using QueryBuilder so we avoid
+        // replicating the SELECT / ORDER BY / LIMIT clause eight times across
+        // every combination of optional filters.
+        let mut qb = QueryBuilder::new(
+            "SELECT id, ts_utc, principal_kind, principal_id, principal_display, \
+             action, target_kind, target_id, result, details_json, request_id \
+             FROM audit_log WHERE 1=1",
+        );
+        if let Some(ref after) = after_ts_s {
+            qb.push(" AND ts_utc > ");
+            qb.push_bind(after.as_str());
+        }
+        if let Some(ref principal) = filters.principal {
+            qb.push(" AND principal_id = ");
+            qb.push_bind(principal.as_str());
+        }
+        if let Some(ref action) = filters.action {
+            qb.push(" AND action = ");
+            qb.push_bind(action.as_str());
+        }
+        qb.push(" ORDER BY ts_utc DESC LIMIT ");
+        qb.push_bind(effective_limit);
+
+        let rows = qb.build().fetch_all(&self.pool).await?;
 
         rows.into_iter()
             .map(|row| {
