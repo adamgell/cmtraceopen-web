@@ -18,6 +18,48 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// A single PII-redaction rule.
+///
+/// `regex` is compiled once at agent startup (see [`crate::redact::Redactor`]).
+/// `replacement` supports back-references (`$1`, `${name}`) as accepted by
+/// the [`regex::Regex::replace_all`] replacement syntax.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RedactionRule {
+    /// Human-readable identifier, e.g. `"username_path"`. Used only in
+    /// error messages and operator tooling output.
+    pub name: String,
+    /// ECMAScript-compatible regular expression. Compiled by the `regex`
+    /// crate; Unicode enabled, case-sensitive by default.
+    pub regex: String,
+    /// Replacement string. May contain back-references (`$1`, `${name}`).
+    pub replacement: String,
+}
+
+/// Redaction configuration table (`[redaction]` in TOML).
+///
+/// Default rules are baked into [`crate::redact::Redactor`]; the `patterns`
+/// field here adds *extra* rules on top of the defaults. To suppress a
+/// default rule, set `enabled = false` and re-add only the rules you want.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RedactionConfig {
+    /// Master switch. When `false` the agent forwards raw collected text
+    /// with no substitutions applied. Defaults to `true`.
+    pub enabled: bool,
+    /// Operator-supplied rules appended after the built-in defaults.
+    /// An empty list keeps just the defaults (the common case).
+    pub patterns: Vec<RedactionRule>,
+}
+
+impl Default for RedactionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            patterns: Vec::new(),
+        }
+    }
+}
+
 /// Agent configuration. Mirrors the layout in the project plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -76,6 +118,13 @@ pub struct AgentConfig {
     /// (the common case for fleets that trust a public CA).
     #[serde(default)]
     pub tls_ca_bundle_pem: Option<PathBuf>,
+
+    /// PII-redaction settings. Applied to all text collector output before
+    /// it is bundled. Binary files (`.evtx`, `.reg`) are not redacted in
+    /// v1 — see `docs/wave4/14-redaction.md` for rationale and how to add
+    /// custom rules.
+    #[serde(default)]
+    pub redaction: RedactionConfig,
 }
 
 fn default_log_paths() -> Vec<String> {
@@ -102,6 +151,7 @@ impl Default for AgentConfig {
             tls_client_cert_pem: None,
             tls_client_key_pem: None,
             tls_ca_bundle_pem: None,
+            redaction: RedactionConfig::default(),
         }
     }
 }

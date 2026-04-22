@@ -32,6 +32,7 @@ use super::{
     dsregcmd::DsRegCmdCollector, event_logs::EventLogsCollector, logs::LogsCollector, BundleMetadata,
     Collector, CollectorManifest,
 };
+use crate::redact::Redactor;
 
 /// Output of a full evidence pass. The caller (typically the main loop)
 /// enqueues `(metadata, zip_path)` on the upload queue.
@@ -53,6 +54,9 @@ pub struct EvidenceOrchestrator {
     /// will be created. Typically `%ProgramData%\CMTraceOpen\Agent\work`
     /// in production; tempdir in tests.
     work_root: PathBuf,
+    /// PII-redaction engine. Applied to every text file in the staging
+    /// directory before zipping. Binary files (.evtx) are skipped.
+    redactor: Redactor,
 }
 
 impl EvidenceOrchestrator {
@@ -61,12 +65,14 @@ impl EvidenceOrchestrator {
         event_logs: EventLogsCollector,
         dsregcmd: DsRegCmdCollector,
         work_root: PathBuf,
+        redactor: Redactor,
     ) -> Self {
         Self {
             logs,
             event_logs,
             dsregcmd,
             work_root,
+            redactor,
         }
     }
 
@@ -115,6 +121,13 @@ impl EvidenceOrchestrator {
         .expect("manifest serialization");
         tokio::fs::write(&manifest_path, &manifest_bytes).await?;
 
+        // Apply PII redaction to all text files in the staging dir before
+        // zipping. Binary collectors (.evtx, .reg) are skipped. The
+        // redactor is a no-op when `config.redaction.enabled = false`.
+        if !self.redactor.is_noop() {
+            self.redact_staging_dir(&staging).await?;
+        }
+
         // Zip the whole staging dir into a sibling file. We hand the
         // actual zip work off to a blocking task — the `zip` crate is
         // synchronous and CPU + syscall heavy, so running it on the
@@ -146,6 +159,140 @@ impl EvidenceOrchestrator {
             staging_dir: staging,
         })
     }
+
+    /// Walk every file in `dir` and apply PII redaction to text files
+    /// in-place. Files with extensions `.evtx` or `.reg` are skipped
+    /// (binary — redacting them requires a parse-extract-redact-reserialize
+    /// pipeline deferred to v2). Files in [`SKIP_FILES_BY_NAME`] (currently
+    /// `manifest.json`) are also skipped — see comment on the constant for
+    /// why. Non-UTF-8 files are skipped silently.
+    ///
+    /// Files larger than [`STREAMING_THRESHOLD_BYTES`] are processed
+    /// line-by-line via `BufReader` + temp file + atomic rename, capping
+    /// peak memory at ~2× the longest line rather than ~3× the whole file.
+    /// Smaller files take the simpler whole-file fast path.
+    async fn redact_staging_dir(&self, dir: &Path) -> Result<(), EvidenceError> {
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let mut entries = tokio::fs::read_dir(&current).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                let meta = entry.file_type().await?;
+                if meta.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !meta.is_file() {
+                    continue;
+                }
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase());
+                // Skip known binary formats.
+                if matches!(ext.as_deref(), Some("evtx") | Some("reg")) {
+                    continue;
+                }
+                // Skip files we MUST NOT redact (the bundle's own manifest
+                // carries a UUID-v7 `bundleId` that the GUID rule would
+                // otherwise clobber, destroying forensic provenance).
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if SKIP_FILES_BY_NAME.contains(&name) {
+                        continue;
+                    }
+                }
+
+                // Decide between streaming (large) and whole-file (small).
+                let file_size = entry.metadata().await.map(|m| m.len()).unwrap_or(0);
+                let result = if file_size > STREAMING_THRESHOLD_BYTES {
+                    redact_file_streaming(&path, &self.redactor).await
+                } else {
+                    redact_file_whole(&path, &self.redactor).await
+                };
+
+                if let Err(e) = result {
+                    warn!(path = %path.display(), error = %e, "redact: failed, skipping");
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Files that must NEVER be touched by the redactor. `manifest.json`
+/// carries a UUID-v7 `bundleId` that the GUID rule would otherwise
+/// rewrite to `<GUID>` — destroying forensic provenance and making
+/// operator-side debugging impossible.
+const SKIP_FILES_BY_NAME: &[&str] = &["manifest.json"];
+
+/// Files larger than this take the line-by-line streaming path. 4 MiB
+/// is large enough that small ConfigMgr / Intune logs (typically
+/// <500 KiB) keep the simpler whole-file fast path, but small enough
+/// that the 100 MB+ logs the spec calls out are streamed.
+const STREAMING_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Whole-file redact: read → apply → conditional write. The fast path
+/// for small files where the simplicity is worth the ~2× peak memory.
+async fn redact_file_whole(path: &Path, redactor: &Redactor) -> std::io::Result<()> {
+    let raw = tokio::fs::read(path).await?;
+    let text = match std::str::from_utf8(&raw) {
+        Ok(s) => s,
+        Err(_) => return Ok(()), // non-UTF-8 → skip silently
+    };
+    let redacted = redactor.apply(text);
+    if let std::borrow::Cow::Owned(out) = redacted {
+        tokio::fs::write(path, out.as_bytes()).await?;
+    }
+    Ok(())
+}
+
+/// Streaming redact: read line-by-line, write to a sibling temp file,
+/// atomic rename on success. Caps peak memory at ~2× the longest line
+/// rather than ~3× the whole file (read + UTF-8 validate + Cow::Owned
+/// clone). Required for the "<5% perf overhead on 100 MB logs" claim
+/// in the redaction spec.
+async fn redact_file_streaming(
+    path: &Path,
+    redactor: &Redactor,
+) -> std::io::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let tmp_path = match path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => path.with_file_name(format!("{name}.redact.tmp")),
+        None => return Ok(()), // pathological — skip
+    };
+
+    let in_file = tokio::fs::File::open(path).await?;
+    let mut reader = BufReader::new(in_file);
+    let mut out_file = tokio::fs::File::create(&tmp_path).await?;
+
+    let mut line_buf = Vec::with_capacity(4096);
+    loop {
+        line_buf.clear();
+        let n = reader.read_until(b'\n', &mut line_buf).await?;
+        if n == 0 {
+            break;
+        }
+        // Best-effort UTF-8: a non-UTF-8 line is written through unchanged
+        // (so binary blobs spliced into a log don't tank the redaction
+        // pass; we don't pretend to redact bytes we can't decode).
+        match std::str::from_utf8(&line_buf) {
+            Ok(s) => {
+                let red = redactor.apply(s);
+                out_file.write_all(red.as_bytes()).await?;
+            }
+            Err(_) => {
+                out_file.write_all(&line_buf).await?;
+            }
+        }
+    }
+    out_file.flush().await?;
+    drop(out_file);
+    drop(reader);
+
+    // Atomic rename — Windows MoveFileEx(REPLACE_EXISTING) under the hood.
+    tokio::fs::rename(&tmp_path, path).await?;
+    Ok(())
 }
 
 /// Recursively zip every file under `src_dir` into `zip_path`, storing
@@ -207,6 +354,7 @@ pub enum EvidenceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redact::Redactor;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -230,6 +378,7 @@ mod tests {
             EventLogsCollector::with_defaults(),
             DsRegCmdCollector::new(),
             work.path().to_path_buf(),
+            Redactor::noop(),
         );
 
         let bundle = orch.collect_once().await.expect("collect");

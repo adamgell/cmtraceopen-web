@@ -19,6 +19,7 @@ use cmtraceopen_agent::collectors::event_logs::EventLogsCollector;
 use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
 use cmtraceopen_agent::collectors::logs::LogsCollector;
 use cmtraceopen_agent::queue::{Queue, QueueState};
+use cmtraceopen_agent::redact::Redactor;
 use cmtraceopen_agent::tls::TlsClientOptions;
 use cmtraceopen_agent::uploader::{RetryPolicy, Uploader, UploaderConfig};
 use common_wire::{Paginated, SessionSummary};
@@ -86,6 +87,7 @@ async fn agent_ships_bundle_to_api_server_end_to_end() {
         EventLogsCollector::with_defaults(), // NotSupported on Linux
         DsRegCmdCollector::new(),            // NotSupported on Linux
         work.path().to_path_buf(),
+        Redactor::noop(),
     );
 
     let bundle = orch.collect_once().await.expect("collect");
