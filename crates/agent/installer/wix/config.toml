@@ -51,8 +51,8 @@ log_paths = [
 cert_store = "LocalMachine\\My"
 
 # Match the cert by issuer Common Name. The Cloud PKI Issuing CA's CN is
-# "issuing.gell.internal.cdw.lab" - see reference_cloud_pki.md. We match on
-# CN substring rather than full DN so a future CA renewal (with the same CN
+# "issuing.gell.internal.cdw.lab" - see docs/provisioning/03-intune-cloud-pki.md.
+# We match on CN substring rather than full DN so a future CA renewal (with the same CN
 # but a new serial) still gets picked up automatically.
 issuer_cn_pattern = "issuing.gell.internal.cdw.lab"
 

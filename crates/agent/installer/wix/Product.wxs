@@ -80,7 +80,8 @@
     <Property Id="WIXUI_INSTALLDIR" Value="AgentInstallDir" />
 
     <!--
-      Minimum OS: Windows 10 (VersionNT >= 1000, i.e., 10.0.x).
+      Minimum OS: Windows 10 or later (VersionNT >= 1000 in the MSI property
+      table, where 1000 maps to version 10.0 / build 10240+).
       The agent uses Windows APIs that don't exist on earlier versions.
       Attempting to install on an unsupported OS produces a friendly error
       rather than a runtime crash.

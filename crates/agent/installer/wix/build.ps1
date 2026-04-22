@@ -190,7 +190,7 @@ if ($SignCertThumbprint) {
     } else {
         & signtool sign `
             /sha1 $SignCertThumbprint `
-            /tr http://timestamp.digicert.com `
+            /tr https://timestamp.digicert.com `
             /td sha256 `
             /fd sha256 `
             /a `
