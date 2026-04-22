@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Files.wxs — Binary, LICENSE.txt, README.txt, and CertCheck.ps1 components.
+
+  Installs three files under %ProgramFiles%\CMTraceOpen\Agent\:
+    - LICENSE.txt            (repo LICENSE, MIT text)
+    - README.txt             (operator one-pager, from README.txt source file)
+    - CertCheck.ps1          (Cloud PKI cert check script, run by custom action)
+
+  NOTE: The agent EXE (cmtraceopen-agent.exe) is owned by Service.wxs, not this
+  file. Service.wxs installs the EXE as the KeyPath of the service component so
+  that the file and the SCM registration are managed as a single atomic unit.
+  WiX requires that each file appear in exactly one component; Files.wxs owns
+  the supplementary files (LICENSE, README, CertCheck.ps1) while Service.wxs
+  owns the primary binary.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <?include Variables.wxi ?>
+
+  <Fragment>
+
+    <!--
+      Directory structure under TARGETDIR.
+      ProgramFilesFolder resolves to %ProgramFiles% on 64-bit installs
+      (the Package element uses Scope="perMachine" and arch="x64" in build.ps1).
+    -->
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="CMTraceOpenRootDir" Name="CMTraceOpen">
+        <Directory Id="AgentInstallDir" Name="Agent" />
+      </Directory>
+    </StandardDirectory>
+
+    <!--
+      AgentBinaries ComponentGroup — referenced from Product.wxs Feature graph.
+    -->
+    <ComponentGroup Id="AgentBinaries" Directory="AgentInstallDir">
+
+      <!--
+        LicenseComponent — MIT license text.
+        Source path climbs four directories to the repo root LICENSE file.
+      -->
+      <Component Id="LicenseComponent" Guid="C4B5D3E2-F6A7-5B8C-9D0E-1F2A3B4C5D6E">
+        <File
+            Id="LicenseTxt"
+            Source="..\..\..\..\LICENSE"
+            Name="LICENSE.txt"
+            KeyPath="yes" />
+      </Component>
+
+      <!--
+        ReadmeComponent — one-page operator README.
+        Source file lives alongside the .wxs files: README.txt.
+      -->
+      <Component Id="ReadmeComponent" Guid="D5C6E4F3-A7B8-6C9D-0E1F-2A3B4C5D6E7F">
+        <File
+            Id="ReadmeTxt"
+            Source="README.txt"
+            Name="README.txt"
+            KeyPath="yes" />
+      </Component>
+
+      <!--
+        CertCheckComponent — the Cloud PKI cert presence check PowerShell script.
+
+        Installed alongside the binary so operators can inspect it or run it
+        manually. Also executed by the CertCheck deferred custom action in
+        Product.wxs after InstallFiles and before StartServices.
+      -->
+      <Component Id="CertCheckComponent" Guid="E6D8F5B4-C9A0-7E1F-2B3C-4D5E6F7A8B9C">
+        <File
+            Id="CertCheckPs1"
+            Source="CustomActions\CertCheck.ps1"
+            Name="CertCheck.ps1"
+            KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+
+  </Fragment>
+
+</Wix>

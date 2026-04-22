@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Variables.wxi — WiX v4 preprocessor definitions for CMTraceOpenAgent.msi.
+
+  These defines are included by every .wxs file via <?include Variables.wxi ?>.
+  The Version and ReleaseBinary values are overridden on the wix build command
+  line; everything else is fixed per-product.
+
+  IMPORTANT: UpgradeCode must never change. Changing it orphans existing
+  installs — old MSIs become unrelated products and MajorUpgrade stops working.
+-->
+<Include xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    UpgradeCode — fixed forever per design §11.
+    Generated once; documented here and never changed again.
+  -->
+  <?define UpgradeCode = "463FD20A-1029-448F-AE5B-F81C818861D0" ?>
+
+  <!--
+    Version — overridden by build.ps1 via -d Version=x.y.z.
+    Default matches the current Cargo.toml version so a developer can run
+    wix build directly without specifying -d Version.
+  -->
+  <?ifndef Version ?>
+    <?define Version = "0.1.0" ?>
+  <?endif ?>
+
+  <!--
+    ReleaseBinary — path to the built cmtraceopen-agent.exe.
+    Overridden by build.ps1 via -d ReleaseBinary=<path>.
+    Default is the standard cargo release output so developers can test locally.
+  -->
+  <?ifndef ReleaseBinary ?>
+    <?define ReleaseBinary = "..\..\..\..\target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe" ?>
+  <?endif ?>
+
+  <!--
+    Install paths.
+    ProgramFilesDir — where the binary, LICENSE.txt, README.txt land.
+    ProgramDataDir  — where config.toml, Queue/, and logs/ land.
+    These match the defaults hardcoded in crates/agent/src/config.rs.
+  -->
+  <?define ProgramFilesDir = "CMTraceOpen\Agent" ?>
+  <?define ProgramDataDir  = "CMTraceOpen\Agent" ?>
+
+  <!--
+    Service name — must match the Name= attribute in ServiceInstall and every
+    ServiceControl element. Keeping it in a define prevents typo drift.
+  -->
+  <?define ServiceName = "CMTraceOpenAgent" ?>
+
+</Include>
