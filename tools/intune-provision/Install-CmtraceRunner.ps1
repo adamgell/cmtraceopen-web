@@ -469,7 +469,11 @@ Pop-Location
 # 6) Grant the service account read on the code-signing cert's private key
 # ------------------------------------------------------------------------
 if ($signCert) {
-    $aclPrincipal = ".\$ServiceAccount"
+    # .NET's FileSystemAccessRule resolves identities via LookupAccountName,
+    # and the `.\user` short form doesn't always translate reliably -- use
+    # the fully-qualified MACHINE\user form to avoid "Some or all identity
+    # references could not be translated".
+    $aclPrincipal = "$env:COMPUTERNAME\$ServiceAccount"
     Write-Host "Granting $aclPrincipal read access to the code-signing private key ..." -ForegroundColor Cyan
     try {
         $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($signCert)
