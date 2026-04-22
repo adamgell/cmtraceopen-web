@@ -14,7 +14,7 @@
 //! explicitly out of scope for the scaffold — see the TODO comments below.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +53,29 @@ pub struct AgentConfig {
     /// Defaults cover the ConfigMgr + Intune + Entra-join log trees.
     #[serde(default = "default_log_paths")]
     pub log_paths: Vec<String>,
+
+    /// Path to a PEM-encoded client certificate (chain) that the agent
+    /// presents to the api-server during the TLS handshake. Wave 3 will
+    /// flip server-side enforcement on; today this is loaded if both
+    /// this and [`Self::tls_client_key_pem`] are set, but the server
+    /// doesn't reject a missing cert. Leave `None` to skip client
+    /// auth entirely.
+    #[serde(default)]
+    pub tls_client_cert_pem: Option<PathBuf>,
+
+    /// Path to the PEM-encoded private key matching
+    /// [`Self::tls_client_cert_pem`]. PKCS#8 / SEC1 / RSA PKCS#1 are all
+    /// accepted (rustls-pemfile decides). Required when
+    /// `tls_client_cert_pem` is set; ignored otherwise.
+    #[serde(default)]
+    pub tls_client_key_pem: Option<PathBuf>,
+
+    /// Optional PEM bundle of additional trusted root CAs. When set, the
+    /// agent uses **only** these roots — the OS native trust store is
+    /// *not* layered on top. Leave `None` to use the OS native roots
+    /// (the common case for fleets that trust a public CA).
+    #[serde(default)]
+    pub tls_ca_bundle_pem: Option<PathBuf>,
 }
 
 fn default_log_paths() -> Vec<String> {
@@ -76,6 +99,9 @@ impl Default for AgentConfig {
             log_level: String::from("info"),
             device_id: String::new(),
             log_paths: default_log_paths(),
+            tls_client_cert_pem: None,
+            tls_client_key_pem: None,
+            tls_ca_bundle_pem: None,
         }
     }
 }
@@ -158,6 +184,21 @@ impl AgentConfig {
         if let Ok(v) = std::env::var("CMTRACE_DEVICE_ID") {
             cfg.device_id = v;
         }
+        if let Ok(v) = std::env::var("CMTRACE_TLS_CLIENT_CERT") {
+            if !v.is_empty() {
+                cfg.tls_client_cert_pem = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = std::env::var("CMTRACE_TLS_CLIENT_KEY") {
+            if !v.is_empty() {
+                cfg.tls_client_key_pem = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = std::env::var("CMTRACE_TLS_CA_BUNDLE") {
+            if !v.is_empty() {
+                cfg.tls_ca_bundle_pem = Some(PathBuf::from(v));
+            }
+        }
 
         cfg
     }
@@ -201,6 +242,10 @@ mod tests {
         assert!(!cfg.evidence_schedule.is_empty());
         assert!(cfg.device_id.is_empty());
         assert!(!cfg.log_paths.is_empty());
+        // TLS knobs default to "use OS native roots, no client cert".
+        assert!(cfg.tls_client_cert_pem.is_none());
+        assert!(cfg.tls_client_key_pem.is_none());
+        assert!(cfg.tls_ca_bundle_pem.is_none());
     }
 
     #[test]
