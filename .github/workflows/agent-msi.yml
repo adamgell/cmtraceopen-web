@@ -356,13 +356,22 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Install WiX v4
         shell: pwsh
+        env:
+          # WiX 4.0.6 is the last v4 release. WiX v5+ / v7 introduced a
+          # new licensing gate (WIX7015: "accept OSMF EULA") that breaks
+          # non-interactive CI and conflicts with the .wxs sources in
+          # crates/agent/installer/wix/ which target v4. Pin hard to v4.
+          WIX_VERSION: '4.0.6'
         run: |
-          $out = dotnet tool install --global wix 2>&1 | Out-String
+          # Previous runs may have installed the latest (v7), which now
+          # requires accepting an OSMF EULA and breaks non-interactive CI.
+          # Uninstall any existing copy before pinning to v4.
+          dotnet tool uninstall --global wix 2>&1 | Out-Null
+
+          $out = dotnet tool install --global wix --version $env:WIX_VERSION 2>&1 | Out-String
           Write-Host $out
-          # dotnet tool install exits 1 if the tool is already installed at
-          # the same version — treat that as success.
           if ($LASTEXITCODE -ne 0 -and $out -notmatch 'already installed') {
-            Write-Error "Failed to install WiX v4 (exit $LASTEXITCODE)"
+            Write-Error "Failed to install WiX $env:WIX_VERSION (exit $LASTEXITCODE)"
             exit $LASTEXITCODE
           }
           # Persist the dotnet tools directory to GITHUB_PATH so wix.exe is
@@ -382,11 +391,16 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Add WiX Util extension
         shell: pwsh
+        env:
+          # Pin to the matching v4 extension release. The default (no
+          # version) can resolve to a v7 extension that refuses to load
+          # without the OSMF EULA acceptance.
+          WIX_UTIL_VERSION: '4.0.6'
         run: |
-          $out = wix extension add --global WixToolset.Util.wixext 2>&1 | Out-String
+          $out = wix extension add --global "WixToolset.Util.wixext/$env:WIX_UTIL_VERSION" 2>&1 | Out-String
           Write-Host $out
           if ($LASTEXITCODE -ne 0 -and $out -notmatch 'already added') {
-            Write-Error "Failed to add WixToolset.Util.wixext (exit $LASTEXITCODE)"
+            Write-Error "Failed to add WixToolset.Util.wixext $env:WIX_UTIL_VERSION (exit $LASTEXITCODE)"
             exit $LASTEXITCODE
           }
           wix extension list --global
