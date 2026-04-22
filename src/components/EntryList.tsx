@@ -1,9 +1,17 @@
-import { useRef } from "react";
+import { useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { LogEntry, Severity } from "../lib/log-types";
+import { applyFilters, type Filters } from "./FilterBar";
 
 export interface EntryListProps {
   entries: LogEntry[];
+  /**
+   * Optional client-side filter. When omitted, the list renders `entries`
+   * as-is (preserving the pre-filter behaviour for callers that haven't
+   * adopted FilterBar yet, e.g. callers that push filtering fully
+   * server-side).
+   */
+  filters?: Filters;
 }
 
 const ROW_HEIGHT = 24;
@@ -19,11 +27,19 @@ const SEVERITY_COLORS: Record<Severity, { bg: string; fg: string; label: string 
  * severity, component, thread, message. Message is truncated with ellipsis;
  * the native `title` attribute surfaces the full text on hover.
  */
-export function EntryList({ entries }: EntryListProps) {
+export function EntryList({ entries, filters }: EntryListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
 
+  // Derive the filtered view. Empty filters short-circuit to the input
+  // reference inside applyFilters so `displayEntries === entries` — no
+  // virtualizer thrash when the user hasn't narrowed.
+  const displayEntries = useMemo(
+    () => (filters ? applyFilters(entries, filters) : entries),
+    [entries, filters],
+  );
+
   const virtualizer = useVirtualizer({
-    count: entries.length,
+    count: displayEntries.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_HEIGHT,
     overscan: 20,
@@ -59,7 +75,7 @@ export function EntryList({ entries }: EntryListProps) {
           }}
         >
           {items.map((vi) => {
-            const entry = entries[vi.index];
+            const entry = displayEntries[vi.index];
             if (!entry) return null;
             return (
               <Row

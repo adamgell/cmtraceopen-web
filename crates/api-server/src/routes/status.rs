@@ -274,6 +274,7 @@ mod tests {
                 entra: None,
                 jwks: Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string())),
             },
+            cors: crate::state::CorsConfig::default(),
         }
     }
 

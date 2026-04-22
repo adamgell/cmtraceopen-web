@@ -37,11 +37,12 @@ function url(path: string): string {
   return `${apiBase}${path}`;
 }
 
-async function getJson<T>(path: string): Promise<T> {
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const full = url(path);
   const res = await fetch(full, {
     method: "GET",
     headers: { Accept: "application/json" },
+    signal,
   });
   if (!res.ok) {
     // Include a short body snippet when present — api-server returns JSON
@@ -61,6 +62,19 @@ async function getJson<T>(path: string): Promise<T> {
 export interface ListEntriesOptions {
   /** Max entries to return. Server clamps; client default matches the v1 UI. */
   limit?: number;
+  /**
+   * Minimum severity floor ("Info" | "Warning" | "Error"). The server
+   * treats this as a >= comparison against its numeric severity column.
+   */
+  severity?: "Info" | "Warning" | "Error";
+  /** Inclusive lower bound on `ts_ms`. */
+  afterMs?: number;
+  /** Exclusive upper bound on `ts_ms`. */
+  beforeMs?: number;
+  /** Plain substring applied to the `message` column (server-side LIKE). */
+  q?: string;
+  /** AbortSignal so the caller can cancel in-flight requests when filters change. */
+  signal?: AbortSignal;
 }
 
 export function listDevices(): Promise<Paginated<DeviceSummary>> {
@@ -79,7 +93,16 @@ export function listEntries(
   opts: ListEntriesOptions = {},
 ): Promise<Paginated<LogEntryDto>> {
   const limit = opts.limit ?? 500;
+  // Build a URLSearchParams so empty / undefined filters drop out cleanly
+  // and values get percent-encoded correctly (q may contain spaces).
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (opts.severity) params.set("severity", opts.severity.toLowerCase());
+  if (opts.afterMs != null) params.set("after_ts", String(opts.afterMs));
+  if (opts.beforeMs != null) params.set("before_ts", String(opts.beforeMs));
+  if (opts.q && opts.q.trim() !== "") params.set("q", opts.q);
   return getJson<Paginated<LogEntryDto>>(
-    `/v1/sessions/${encodeURIComponent(sessionId)}/entries?limit=${limit}`,
+    `/v1/sessions/${encodeURIComponent(sessionId)}/entries?${params.toString()}`,
+    opts.signal,
   );
 }

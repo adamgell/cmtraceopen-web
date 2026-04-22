@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { initWasm, parse } from "../lib/wasm-bridge";
 import type { ParseResult } from "../lib/log-types";
 import { DropZone } from "./DropZone";
 import { EntryList } from "./EntryList";
+import {
+  FilterBar,
+  applyFilters,
+  collectComponents,
+  defaultFilters,
+  type Filters,
+} from "./FilterBar";
 
 type State =
   | { tag: "init" }
@@ -30,6 +37,9 @@ export interface LocalModeProps {
  */
 export function LocalMode({ onLoaded }: LocalModeProps) {
   const [state, setState] = useState<State>({ tag: "init" });
+  // Filters are owned here (not in EntryList) so the bar can render its
+  // result count against the same derived list the virtualizer sees.
+  const [filters, setFilters] = useState<Filters>(() => defaultFilters());
   // Monotonic request counter used to discard stale parse results when a user
   // drops a new file before the previous parse resolves.
   const parseReqId = useRef(0);
@@ -69,6 +79,9 @@ export function LocalMode({ onLoaded }: LocalModeProps) {
       const text = await file.text();
       const result = await parse(text, file.name, file.size);
       if (parseReqId.current !== reqId) return;
+      // Reset filters on a fresh file — the "Networking" component from
+      // the last log almost certainly doesn't exist in the new one.
+      setFilters(defaultFilters());
       setState({ tag: "loaded", fileName: file.name, result });
     } catch (err) {
       if (parseReqId.current !== reqId) return;
@@ -79,6 +92,20 @@ export function LocalMode({ onLoaded }: LocalModeProps) {
   const handleDismiss = useCallback(() => {
     setState({ tag: "idle" });
   }, []);
+
+  // Precompute the component set + filtered length only when loaded. We
+  // compute `shown` here (not inside EntryList) so the FilterBar's count
+  // reflects exactly what the virtualizer renders.
+  const loadedEntries =
+    state.tag === "loaded" ? state.result.entries : null;
+  const knownComponents = useMemo(
+    () => (loadedEntries ? collectComponents(loadedEntries) : []),
+    [loadedEntries],
+  );
+  const shown = useMemo(
+    () => (loadedEntries ? applyFilters(loadedEntries, filters).length : 0),
+    [loadedEntries, filters],
+  );
 
   return (
     <>
@@ -105,7 +132,18 @@ export function LocalMode({ onLoaded }: LocalModeProps) {
           )}
         </div>
       )}
-      {state.tag === "loaded" && <EntryList entries={state.result.entries} />}
+      {state.tag === "loaded" && (
+        <>
+          <FilterBar
+            filters={filters}
+            onChange={setFilters}
+            total={state.result.entries.length}
+            shown={shown}
+            knownComponents={knownComponents}
+          />
+          <EntryList entries={state.result.entries} filters={filters} />
+        </>
+      )}
     </>
   );
 }

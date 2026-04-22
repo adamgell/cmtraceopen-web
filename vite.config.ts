@@ -6,10 +6,12 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: false,
-    // Dev-only reverse proxy so the viewer can call the api-server without
-    // CORS headers on the server side. Once the api-server grows a proper
-    // CORS layer (follow-up) this can drop — prod deployments are expected
-    // to be co-located anyway, so same-origin remains the default.
+    // Dev-only reverse proxy. The api-server now has a proper CORS layer
+    // (env: CMTRACE_CORS_ORIGINS), so this proxy is no longer *required* —
+    // but it keeps the dev loop on a single origin and skips the preflight
+    // round-trip, which is still convenient. Prod deployments should either
+    // serve the viewer same-origin OR set CMTRACE_CORS_ORIGINS to the
+    // viewer's public origin.
     proxy: {
       "/v1": { target: "http://localhost:8080", changeOrigin: true },
       "/healthz": { target: "http://localhost:8080", changeOrigin: true },

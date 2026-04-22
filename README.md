@@ -62,6 +62,25 @@ When the full stack is running via `docker compose up`, two debugging UIs are ex
 
 Both are **dev-only** — no auth, not production-safe. Firewall them off (or drop them from the compose file) before deploying anywhere real.
 
+## Cross-origin requests (CORS)
+
+The api-server ships with a `tower-http` CORS layer applied outermost on the
+router, so preflight `OPTIONS` requests are answered before any auth
+middleware runs. It's configured via environment variables:
+
+- `CMTRACE_CORS_ORIGINS` — comma-separated list of exact origins permitted to
+  call the API from a browser. Default: empty (all cross-origin requests
+  rejected — fail closed).
+- `CMTRACE_CORS_CREDENTIALS` — `true`/`false` (default `false`). When `true`,
+  browsers may attach cookies / `Authorization` headers on cross-origin
+  requests.
+
+Typical dev values: `CMTRACE_CORS_ORIGINS=http://localhost:5173,http://localhost:4173`
+(Vite dev server + Vite preview). The Vite dev proxy in `vite.config.ts`
+remains as a convenience for local development (no CORS round-trip needed),
+but **prod deployments** should either serve the viewer same-origin with the
+API or set `CMTRACE_CORS_ORIGINS` to the viewer's public origin.
+
 ## License
 
 MIT (matches cmtraceopen).
