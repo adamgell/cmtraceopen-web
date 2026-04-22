@@ -137,10 +137,37 @@ investigation:
 
 ---
 
-## 6. Raw k6 output
+## 6. HTTP protocol and parse-queue notes
+
+**HTTP version:** k6 negotiates HTTP/2 by default when the server advertises
+ALPN `h2`. Record the actual protocol used here (check k6 `--http-debug`
+output); HTTP/1.1 head-of-line blocking at 100 VUs affects p99 materially.
+
+| Run | Protocol negotiated | Notes |
+|---|---|---|
+| SQLite + local-FS | _fill in_ | |
+| Postgres + local-FS | _fill in_ | |
+| SQLite + Azure Blob | _fill in_ | |
+| Postgres + Azure Blob | _fill in_ | |
+
+**Parse-worker queue depth (`parse_queue_depth` gauge):** the ingest script's
+`metrics_poller` VU samples `/metrics` every 10 s and records
+`cmtrace_parse_worker_queue_depth`. Paste the max value seen per backend:
+
+| Backend | Max queue depth | Notes |
+|---|---|---|
+| SQLite + local-FS | _fill in_ | |
+| Postgres + local-FS | _fill in_ | |
+| SQLite + Azure Blob | _fill in_ | |
+| Postgres + Azure Blob | _fill in_ | |
+
+---
+
+## 7. Raw k6 output
 
 Paste or attach the full `k6 run` terminal output for each scenario/backend
-combination here (or link to CI artifacts if run in a pipeline):
+combination here (or link to the timestamped files in `tests/load/results/`
+produced by `run-all-backends.sh`):
 
 ```
 # Example placeholder — replace with actual output

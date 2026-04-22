@@ -8,6 +8,7 @@
  *   - bundle_finalize_duration  p50 / p95 / p99
  *   - bundle_error_rate
  *   - http_req_duration per stage (init / chunk / finalize)
+ *   - parse_queue_depth  (polled from /metrics every 10 s by a dedicated VU)
  *
  * Usage:
  *   BASE_URL=http://localhost:8080 k6 run tests/load/k6-bundle-ingest.js
@@ -19,8 +20,9 @@
  */
 
 import { check, sleep } from "k6";
+import crypto from "k6/crypto";
 import http from "k6/http";
-import { Counter, Rate, Trend } from "k6/metrics";
+import { Counter, Gauge, Rate, Trend } from "k6/metrics";
 import { uuidv4 } from "https://jslib.k6.io/k6-utils/1.4.0/index.js";
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,10 @@ const initLatency = new Trend("bundle_init_duration", true);
 const chunkLatency = new Trend("bundle_chunk_duration", true);
 const bundleErrors = new Counter("bundle_errors_total");
 const bundleErrorRate = new Rate("bundle_error_rate");
+// Parse-worker queue depth scraped from /metrics by the dedicated poller VU.
+const parseQueueDepth = new Gauge("parse_queue_depth");
+// SQLite pool saturation — polled from /metrics by the dedicated poller VU.
+const sqlitePoolSize = new Gauge("sqlite_pool_size");
 
 // ---------------------------------------------------------------------------
 // k6 options
@@ -54,6 +60,14 @@ export const options = {
       executor: "constant-vus",
       vus: DEVICES,
       duration: DURATION,
+    },
+    // A single extra VU polls /metrics every 10 s so queue depth + pool
+    // saturation are captured in the k6 summary alongside latency numbers.
+    metrics_poller: {
+      executor: "constant-vus",
+      vus: 1,
+      duration: DURATION,
+      exec: "pollMetrics",
     },
   },
   thresholds: {
@@ -69,27 +83,79 @@ export const options = {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a deterministic-ish fake SHA-256 hex string from a seed string.
- * We use a trivial XOR-based digest — good enough to pass the server's
- * 64-char hex validation without importing a real crypto library.
- *
- * WARNING: This is NOT cryptographically secure and must only be used for
- * load-testing purposes. It does not produce a real SHA-256 digest and
- * would be trivially collide-able in production.
+ * Generate a chunk payload of the requested size (repeated ASCII).
+ * Returns both the string body and its real SHA-256 hex digest so that
+ * the same hash can be supplied to init's `sha256` field and finalize's
+ * `finalSha256` field, matching what the server recomputes over the staged
+ * bytes.
  */
-function fakeSha256(seed) {
-  let h = new Array(32).fill(0);
-  for (let i = 0; i < seed.length; i++) {
-    h[i % 32] ^= seed.charCodeAt(i);
-  }
-  return h.map((b) => b.toString(16).padStart(2, "0")).join("");
+function makeChunkWithHash(size) {
+  const body = "A".repeat(size);
+  // k6/crypto.sha256 hashes the UTF-8 encoded bytes of the string — identical
+  // to what the server stages when it receives the raw octets over the wire.
+  const sha = crypto.sha256(body, "hex");
+  return { body, sha };
 }
 
 /**
- * Generate a chunk payload of the requested size (repeated ASCII).
+ * Extract a named gauge value from a plain-text Prometheus /metrics scrape.
+ * Returns NaN if the metric is absent.
  */
-function makeChunk(size) {
-  return "A".repeat(size);
+function extractGauge(metricsText, name) {
+  const re = new RegExp(`^${name}\\s+(\\S+)`, "m");
+  const m = metricsText.match(re);
+  return m ? parseFloat(m[1]) : NaN;
+}
+
+// ---------------------------------------------------------------------------
+// Metrics-poller VU — runs in parallel with device VUs
+// ---------------------------------------------------------------------------
+
+export function pollMetrics() {
+  const res = http.get(`${BASE_URL}/metrics`, {
+    tags: { stage: "metrics_poll" },
+  });
+  if (res.status === 200) {
+    const depth = extractGauge(
+      res.body,
+      "cmtrace_parse_worker_queue_depth",
+    );
+    if (!isNaN(depth)) {
+      parseQueueDepth.add(depth);
+    }
+    // Also log pool saturation for manual inspection of the k6 output.
+    const poolSize = extractGauge(res.body, "cmtrace_sqlite_pool_size");
+    if (!isNaN(poolSize)) {
+      // Recorded as a gauge so the max across the run is visible in the summary.
+      sqlitePoolSize.add(poolSize);
+    }
+  }
+  sleep(10);
+}
+
+// ---------------------------------------------------------------------------
+// setup / teardown — snapshot /metrics before and after the run
+// ---------------------------------------------------------------------------
+
+export function setup() {
+  const res = http.get(`${BASE_URL}/metrics`);
+  if (res.status !== 200) {
+    return { metricsAvailable: false };
+  }
+  return { metricsAvailable: true, before: res.body };
+}
+
+export function teardown(data) {
+  if (!data || !data.metricsAvailable) return;
+  const res = http.get(`${BASE_URL}/metrics`);
+  if (res.status === 200) {
+    // Both snapshots are emitted to stdout so they can be captured in the
+    // test run output and pasted into 17-capacity-results.md.
+    console.log("=== /metrics BEFORE ===");
+    console.log(data.before);
+    console.log("=== /metrics AFTER ===");
+    console.log(res.body);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,8 +169,7 @@ export default function () {
   // Fresh bundle-id per iteration so re-runs don't collide on idempotency.
   const bundleId = uuidv4();
 
-  const chunkPayload = makeChunk(CHUNK_SIZE);
-  const sha = fakeSha256(`${deviceId}-${bundleId}-${chunkPayload}`);
+  const { body: chunkPayload, sha } = makeChunkWithHash(CHUNK_SIZE);
 
   const headers = {
     "Content-Type": "application/json",
@@ -112,12 +177,14 @@ export default function () {
   };
 
   // ---- init ----------------------------------------------------------------
+  // Field names must match BundleInitRequest's camelCase wire shape
+  // (common-wire/src/lib.rs: #[serde(rename_all = "camelCase")]).
   const initPayload = JSON.stringify({
-    bundle_id: bundleId,
+    bundleId,
     sha256: sha,
-    size_bytes: CHUNK_SIZE,
-    content_kind: "raw-file",
-    device_hint: deviceId,
+    sizeBytes: CHUNK_SIZE,
+    contentKind: "raw-file",
+    deviceHint: deviceId,
   });
 
   const initStart = Date.now();
@@ -130,9 +197,9 @@ export default function () {
 
   const initOk = check(initRes, {
     "init 200": (r) => r.status === 200,
-    "init has upload_id": (r) => {
+    "init has uploadId": (r) => {
       try {
-        return JSON.parse(r.body).upload_id !== undefined;
+        return JSON.parse(r.body).uploadId !== undefined;
       } catch (_) {
         return false;
       }
@@ -145,7 +212,7 @@ export default function () {
     return;
   }
 
-  const uploadId = JSON.parse(initRes.body).upload_id;
+  const uploadId = JSON.parse(initRes.body).uploadId;
 
   // ---- chunk ---------------------------------------------------------------
   const chunkStart = Date.now();
@@ -173,7 +240,8 @@ export default function () {
   }
 
   // ---- finalize ------------------------------------------------------------
-  const finalizePayload = JSON.stringify({ final_sha256: sha });
+  // `finalSha256` is the camelCase wire name for BundleFinalizeRequest.final_sha256.
+  const finalizePayload = JSON.stringify({ finalSha256: sha });
 
   const finalizeStart = Date.now();
   const finalizeRes = http.post(
@@ -186,9 +254,9 @@ export default function () {
 
   const finalizeOk = check(finalizeRes, {
     "finalize 200": (r) => r.status === 200,
-    "finalize has session_id": (r) => {
+    "finalize has sessionId": (r) => {
       try {
-        return JSON.parse(r.body).session_id !== undefined;
+        return JSON.parse(r.body).sessionId !== undefined;
       } catch (_) {
         return false;
       }
@@ -206,5 +274,8 @@ export default function () {
   // Pace to approximately one bundle per minute per device.
   // k6's constant-vus executor runs iterations back-to-back; sleeping here
   // keeps the rate at ~1 req/min/VU without needing the ramping executor.
-  sleep(60);
+  // A small ±5 s jitter spreads the 100-VU wave across the minute so all
+  // devices don't hit init simultaneously at t=0, t=60, t=120 … — a
+  // uniform distribution better matches real fleet behaviour.
+  sleep(55 + Math.random() * 10);
 }

@@ -152,6 +152,39 @@ Run each scenario against the backends listed in the issue to populate
 3. **SQLite + Azure Blob** (set `CMTRACE_BLOB_STORE=azure` + Azure connection string)
 4. **Postgres + Azure Blob** (combination of above)
 
+### Automated multi-backend run
+
+`run-all-backends.sh` cycles through all four combinations automatically,
+restarting the Compose stack between each run and saving timestamped output
+files under `tests/load/results/`:
+
+```bash
+# From the repo root — runs both scenarios × 4 backends
+bash tests/load/run-all-backends.sh
+
+# Override duration / scale for a quick check
+DURATION=1m DEVICES=10 bash tests/load/run-all-backends.sh
+
+# Run against BigMac26
+BASE_URL=http://bigmac26.local:8080 bash tests/load/run-all-backends.sh
+```
+
+> **Note:** The Azure Blob backend requires `AZURE_STORAGE_CONNECTION_STRING`
+> (or equivalent) to be set in the shell before running the script; the
+> Compose stack passes it through to the api-server container automatically.
+
+---
+
+## HTTP protocol note
+
+k6 negotiates HTTP/2 by default when the server advertises ALPN `h2`. The
+api-server (axum/hyper) currently only advertises HTTP/1.1 unless TLS
+termination is in front of it, so in practice all connections use HTTP/1.1
+with head-of-line blocking. Record the actual protocol negotiated in
+`docs/wave4/17-capacity-results.md §6` — it affects p99 latency materially
+when 100 VUs share a connection pool. To force HTTP/1.1 explicitly, pass
+`--http-debug` to k6 and confirm `h2` never appears in the request log.
+
 ---
 
 ## Troubleshooting
@@ -160,5 +193,7 @@ Run each scenario against the backends listed in the issue to populate
 |---|---|---|
 | `ECONNREFUSED` on all requests | Server not running | `docker compose up --build` |
 | `401 Unauthorized` on init | Auth mode not disabled | Set `CMTRACE_AUTH_MODE=disabled` in compose |
+| `400 Bad Request` on init | Payload field-name mismatch | Confirm you are running the latest script; fields must be camelCase (`bundleId`, `sizeBytes`, `contentKind`) |
+| `400 Bad Request` on finalize with `Sha256Mismatch` | Script using fake hash | Confirm you are running the latest script; it uses `k6/crypto.sha256()` for a real digest |
 | High `bundle_error_rate` with 413 | Chunk size too large | Reduce `CHUNK_SIZE` (default 4096 is well under limit) |
 | `database is locked` in server logs | SQLite write contention | Expected under high concurrency; document in capacity results |
