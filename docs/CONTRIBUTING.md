@@ -321,6 +321,18 @@ pointer has actually changed; if an open bump PR already exists the
 workflow skips to avoid duplicates. You can also trigger it on-demand
 via **Actions → Bump cmtraceopen submodule → Run workflow**.
 
+> **Prerequisites:** the workflow requires a `PAT_TOKEN` repository
+> secret (a Personal Access Token with `repo` scope). Without it the
+> workflow fails immediately with an actionable error message. Add it
+> under **Settings → Secrets and variables → Actions → New repository
+> secret**.
+
+> **If a duplicate bump PR appears** (e.g. after a reviewer
+> renames/rebases the branch), close or merge the stale PR and re-run
+> the workflow. The idempotent guard matches on the branch name
+> `chore/bump-cmtraceopen-submodule`; any PR on a different branch will
+> not be detected as a duplicate.
+
 Each bump is a discrete commit so it's easy to revert if the parser
 introduces a regression. The CI parser-regression canary
 ([`scripts/wasm-smoke.mjs`](../scripts/wasm-smoke.mjs)) catches drift
