@@ -58,10 +58,10 @@ jobs:
         #   - p/security-audit  (OWASP + CWE coverage)
         #   - p/secrets         (committed key / token detection)
         #   - language-specific packs (rust, javascript, typescript)
-        # `--error` makes the CLI exit non-zero on any ERROR-level finding,
-        # which fails the job and (combined with the ruleset's
+        # `semgrep ci` exits non-zero on any blocking-severity finding by
+        # default, which fails the job and (combined with the ruleset's
         # required-status-checks) blocks merge to main.
-        run: semgrep ci --error
+        run: semgrep ci
         env:
           # Annotate the PR with inline findings via the Checks API. No
           # SARIF upload (would need GitHub Advanced Security on private
