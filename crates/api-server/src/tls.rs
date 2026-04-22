@@ -244,10 +244,9 @@ fn load_key_from_pem(path: &Path) -> Result<PrivateKeyDer<'static>, TlsBringupEr
     })?;
     let mut reader = bytes.as_slice();
     // Tolerate any of the standard PKCS#1 / PKCS#8 / SEC1 layouts. We pick
-    // the first key that parses; if the file has multiple, that's almost
-    // always operator error — log a warn and use the first.
-    let mut keys = rustls_pemfile::read_all(&mut reader).filter_map(Result::ok);
-    while let Some(item) = keys.next() {
+    // the first key that parses; later keys in the same file are ignored
+    // (a multi-key PEM here is almost always operator error).
+    for item in rustls_pemfile::read_all(&mut reader).filter_map(Result::ok) {
         match item {
             rustls_pemfile::Item::Pkcs1Key(k) => return Ok(PrivateKeyDer::Pkcs1(k)),
             rustls_pemfile::Item::Pkcs8Key(k) => return Ok(PrivateKeyDer::Pkcs8(k)),
