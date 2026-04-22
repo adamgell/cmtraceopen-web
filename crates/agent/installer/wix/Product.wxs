@@ -74,12 +74,6 @@
     <Property Id="CMTRACE_PROGRAMDATA" Value="" />
 
     <!--
-      WIXUI_INSTALLDIR — required by the WixUI_InstallDir dialog set (if used).
-      Points to the directory Id defined in Files.wxs.
-    -->
-    <Property Id="WIXUI_INSTALLDIR" Value="AgentInstallDir" />
-
-    <!--
       Minimum OS: Windows 10 or later (VersionNT >= 1000 in the MSI property
       table, where 1000 maps to version 10.0 / build 10240+).
       The agent uses Windows APIs that don't exist on earlier versions.
@@ -94,31 +88,36 @@
       CertCheck custom action — see design §6.
 
       CertCheck.ps1 is installed to AgentInstallDir by Files.wxs (CertCheckComponent).
-      We use the WiX util extension's WixQuietExec64 to run PowerShell
+      We use the WiX v4 util extension's WixQuietExec64 to run PowerShell
       non-interactively with -ExecutionPolicy Bypass so the script runs even
       if the machine policy is Restricted.
 
-      WixQuietExec64 reads its command from the property with the same name as
-      the CA (WiX convention for passing CustomActionData to deferred CAs).
-      The SetProperty below feeds the command line into that property before the
-      deferred CA runs.
+      WiX v4 convention: WixQuietExec64 reads its command line from the
+      property `WixQuietExec64CmdLine` (NOT from a property named after the
+      CA — that was the v3 QtExec convention). The SetProperty below
+      populates WixQuietExec64CmdLine before the immediate CA runs.
+
+      Execute="immediate" — the CA runs during the InstallExecuteSequence at
+      our scheduled slot (After="InstallFiles"). We don't need "deferred" +
+      Impersonate="no" because we're only invoking a read-only cert lookup,
+      not mutating the system, and the immediate context lets us use the
+      property-reference command line directly.
 
       Always Return="ignore" — a missing cert is a warning, not a failure.
       See design §6 for the rationale.
     -->
     <SetProperty
-        Id="CertCheck"
+        Id="WixQuietExec64CmdLine"
         Value='"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NonInteractive -NoProfile -ExecutionPolicy Bypass -File "[AgentInstallDir]CertCheck.ps1"'
-        Before="CertCheck"
+        Before="WixQuietExec64"
         Sequence="execute" />
 
     <CustomAction
-        Id="CertCheck"
+        Id="WixQuietExec64"
         BinaryRef="Wix4UtilCA_X64"
         DllEntry="WixQuietExec64"
-        Execute="deferred"
-        Return="ignore"
-        Impersonate="no" />
+        Execute="immediate"
+        Return="ignore" />
 
     <!--
       Set CMTRACE_PROGRAMDATA only when a full purge is requested on uninstall.
@@ -137,7 +136,7 @@
 
     <InstallExecuteSequence>
       <!-- Run the cert check after files are laid down, before services start. -->
-      <Custom Action="CertCheck" After="InstallFiles" />
+      <Custom Action="WixQuietExec64" After="InstallFiles" />
     </InstallExecuteSequence>
 
     <!--

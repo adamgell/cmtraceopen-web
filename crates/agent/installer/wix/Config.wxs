@@ -56,6 +56,19 @@
         Permanent="yes": MSI does not remove the file on uninstall. Operators
         who want a full clean-up pass KEEP_USER_DATA=0 (handled in Product.wxs
         via util:RemoveFolderEx).
+
+        ====================================================================
+        WARNING — DO NOT REMOVE Permanent="yes" WITHOUT MIGRATION PLANNING.
+        ====================================================================
+        Permanent="yes" is load-bearing across upgrade chains. If a future
+        version drops it, MajorUpgrade Schedule="afterInstallExecute" will
+        delete the operator's edited config.toml during the old-version
+        cleanup phase: the new component is NeverOverwrite="yes" (which
+        suppresses the *write* but NOT the *remove*), so the file would
+        vanish silently. Pair any change here with a migration CA that
+        backs up + restores the operator's config, or a release-notes
+        callout that operators must back up config.toml before upgrade.
+        See design §7 for the upgrade-sequence walkthrough.
       -->
       <Component
           Id="ConfigTomlComponent"

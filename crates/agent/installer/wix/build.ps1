@@ -10,7 +10,6 @@
     Prerequisite: WiX v4 dotnet tool installed globally.
         dotnet tool install --global wix
         wix extension add WixToolset.Util.wixext
-        wix extension add WixToolset.UI.wixext
 
 .PARAMETER ReleaseBinary
     Path to the compiled cmtraceopen-agent.exe. Must exist before this script
@@ -128,7 +127,6 @@ if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
 wix.exe not found. Install WiX v4 with:
     dotnet tool install --global wix
     wix extension add WixToolset.Util.wixext
-    wix extension add WixToolset.UI.wixext
 '@
 }
 
