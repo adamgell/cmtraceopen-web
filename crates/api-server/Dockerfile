@@ -35,12 +35,18 @@ WORKDIR /workspace
 # now configured with rustls + aws-lc-rs (matches the agent in PR #37 and
 # the Wave 3 mTLS stack), so we no longer need `libssl-dev` (PR #39's
 # native-tls hotfix is reverted by the same migration).
+#
+# `clang` is required by `ring`'s C/asm build script — pulled in transitively
+# by `object_store/azure` (the `cloud` feature hard-deps `ring`). Once
+# object_store grows a pluggable-crypto knob we should drop this; tracked
+# in the Azure-blob feature PR body.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
       ca-certificates \
       cmake \
       nasm \
+      clang \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy the workspace. .dockerignore keeps the context tight (no node_modules,

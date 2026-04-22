@@ -1,8 +1,38 @@
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use crate::auth::{AuthMode, EntraConfig};
+
+/// Which blob-storage backend the api-server uses for finalized bundles.
+///
+/// `Local` is the dev / test default — bundles land on the local filesystem
+/// under `<CMTRACE_DATA_DIR>/blobs/<session_id>`. `Azure` ships them to a
+/// configured Azure Blob Storage container; required for cloud deployments
+/// where the corpus outgrows a single host's disk.
+///
+/// Future variants (S3, GCS, ...) plug in here behind matching cargo
+/// features in `Cargo.toml`. Keep this enum exhaustive so the factory in
+/// `main.rs` is forced to handle every case.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BlobBackend {
+    #[default]
+    Local,
+    Azure,
+}
+
+impl FromStr for BlobBackend {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "local" | "fs" | "filesystem" => Ok(Self::Local),
+            "azure" | "azure-blob" | "azureblob" => Ok(Self::Azure),
+            other => Err(ConfigError::InvalidBlobBackend(other.to_string())),
+        }
+    }
+}
 
 /// Runtime configuration, populated from environment variables.
 ///
@@ -101,6 +131,32 @@ pub struct Config {
     ///   Never flip this on without a compensating control (short-lived
     ///   leaf cert TTL, allow-listed device IDs, etc.).
     pub crl_fail_open: bool,
+
+    /// Selected blob backend. Env: `CMTRACE_BLOB_BACKEND` (`Local` | `Azure`).
+    /// Default: `Local`. See [`BlobBackend`] for the full enum.
+    pub blob_backend: BlobBackend,
+
+    /// Azure storage account name (the `<account>` in
+    /// `<account>.blob.core.windows.net`). Env:
+    /// `CMTRACE_AZURE_STORAGE_ACCOUNT`. Required when `blob_backend = Azure`.
+    pub blob_azure_account: Option<String>,
+
+    /// Azure container the api-server writes finalized bundles into. Env:
+    /// `CMTRACE_AZURE_STORAGE_CONTAINER`. Required when `blob_backend = Azure`.
+    /// Container must already exist — provisioning is a deploy-time concern.
+    pub blob_azure_container: Option<String>,
+
+    /// Azure storage-account shared key. Env:
+    /// `CMTRACE_AZURE_STORAGE_ACCOUNT_KEY`. **DEV ONLY** — production
+    /// deployments should leave this unset and use managed identity instead.
+    /// When both this and the managed-identity flag are set, `from_env`
+    /// rejects the config rather than silently picking one.
+    pub blob_azure_account_key: Option<String>,
+
+    /// Toggle managed-identity auth. Env:
+    /// `CMTRACE_AZURE_USE_MANAGED_IDENTITY`. Default `false`. Required-true
+    /// in prod; mutually exclusive with `blob_azure_account_key`.
+    pub blob_azure_use_managed_identity: bool,
 }
 
 /// TLS-termination + mTLS client-cert verification. Populated from
@@ -192,6 +248,33 @@ pub enum ConfigError {
 
     #[error("invalid CMTRACE_CRL_FAIL_OPEN: {0} (expected true/false/1/0)")]
     InvalidCrlFailOpen(String),
+
+    #[error(
+        "invalid CMTRACE_BLOB_BACKEND: {0} (expected one of: Local, Azure)"
+    )]
+    InvalidBlobBackend(String),
+
+    #[error("invalid CMTRACE_AZURE_USE_MANAGED_IDENTITY: {0} (expected true/false/1/0)")]
+    InvalidAzureManagedIdentity(String),
+
+    #[error(
+        "CMTRACE_BLOB_BACKEND=Azure requires CMTRACE_AZURE_STORAGE_ACCOUNT and \
+         CMTRACE_AZURE_STORAGE_CONTAINER to be set"
+    )]
+    MissingAzureConfig,
+
+    #[error(
+        "CMTRACE_BLOB_BACKEND=Azure needs exactly one of \
+         CMTRACE_AZURE_STORAGE_ACCOUNT_KEY (DEV only) or \
+         CMTRACE_AZURE_USE_MANAGED_IDENTITY=true; got both or neither"
+    )]
+    AmbiguousAzureAuth,
+
+    #[error(
+        "CMTRACE_BLOB_BACKEND=Azure but the api-server was built without the \
+         `azure` cargo feature; rebuild with `--features azure` (the default)"
+    )]
+    AzureFeatureMissing,
 }
 
 impl Config {
@@ -278,6 +361,42 @@ impl Config {
             Err(_) => false,
         };
 
+        let blob_backend = match env::var("CMTRACE_BLOB_BACKEND") {
+            Ok(v) => v.parse()?,
+            Err(_) => BlobBackend::default(),
+        };
+
+        let blob_azure_account = env::var("CMTRACE_AZURE_STORAGE_ACCOUNT")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let blob_azure_container = env::var("CMTRACE_AZURE_STORAGE_CONTAINER")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let blob_azure_account_key = env::var("CMTRACE_AZURE_STORAGE_ACCOUNT_KEY")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let blob_azure_use_managed_identity = match env::var("CMTRACE_AZURE_USE_MANAGED_IDENTITY")
+        {
+            Ok(v) => parse_bool(&v).ok_or(ConfigError::InvalidAzureManagedIdentity(v))?,
+            Err(_) => false,
+        };
+
+        // Validate Azure config is complete + unambiguous if Azure is the
+        // selected backend. Catching this at startup rather than first
+        // request keeps misconfigured deployments from silently swallowing
+        // ingest traffic until the first finalize fails on a 401.
+        if matches!(blob_backend, BlobBackend::Azure) {
+            if blob_azure_account.is_none() || blob_azure_container.is_none() {
+                return Err(ConfigError::MissingAzureConfig);
+            }
+            let has_key = blob_azure_account_key.is_some();
+            let has_mi = blob_azure_use_managed_identity;
+            if has_key == has_mi {
+                // Both true OR both false -> ambiguous.
+                return Err(ConfigError::AmbiguousAzureAuth);
+            }
+        }
+
         Ok(Self {
             listen_addr,
             data_dir,
@@ -290,6 +409,11 @@ impl Config {
             crl_urls,
             crl_refresh_secs,
             crl_fail_open,
+            blob_backend,
+            blob_azure_account,
+            blob_azure_container,
+            blob_azure_account_key,
+            blob_azure_use_managed_identity,
         })
     }
 }

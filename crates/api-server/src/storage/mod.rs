@@ -15,11 +15,219 @@ use uuid::Uuid;
 
 pub mod blob_fs;
 pub mod blob_object_store;
+#[cfg(feature = "azure")]
+pub mod blob_azure;
 pub mod meta_sqlite;
 
 pub use blob_fs::LocalFsBlobStore;
 pub use blob_object_store::ObjectStoreBlobStore;
 pub use meta_sqlite::SqliteMetadataStore;
+
+use std::sync::Arc;
+
+use crate::config::{BlobBackend, Config};
+
+/// Build the right [`BlobStore`] implementation for `config` and return it
+/// as a trait-object Arc so callers (the Axum AppState, integration tests)
+/// can store it without caring which backend is in use.
+///
+/// Selection rules:
+///   - `BlobBackend::Local` → [`LocalFsBlobStore`] rooted at
+///     `config.data_dir`. No network deps.
+///   - `BlobBackend::Azure` → [`blob_azure::build`] using the validated
+///     `blob_azure_*` fields on `config`. Requires the `azure` cargo
+///     feature; without it the factory returns
+///     [`crate::config::ConfigError::AzureFeatureMissing`] so the operator
+///     gets a clear "rebuild with --features azure" message instead of a
+///     compile error mid-deploy.
+///
+/// This is the *only* place the codebase chooses a backend. Adding S3 / GCS
+/// later means: new feature flag in `Cargo.toml`, new `BlobBackend`
+/// variant, new arm here, new factory module — handlers and tests don't
+/// move.
+pub async fn build_blob_store(
+    config: &Config,
+) -> Result<Arc<dyn BlobStore>, BuildBlobStoreError> {
+    match config.blob_backend {
+        BlobBackend::Local => {
+            let store = LocalFsBlobStore::new(&config.data_dir).await?;
+            Ok(Arc::new(store))
+        }
+        BlobBackend::Azure => build_azure_blob_store(config).await,
+    }
+}
+
+#[cfg(feature = "azure")]
+async fn build_azure_blob_store(
+    config: &Config,
+) -> Result<Arc<dyn BlobStore>, BuildBlobStoreError> {
+    use blob_azure::{AzureAuth, AzureBlobConfig};
+
+    // Config::from_env already validated that both account + container are
+    // present and that exactly one auth mode is set when blob_backend ==
+    // Azure, so the unwraps below are infallible at this point. We still
+    // map errors through BuildBlobStoreError rather than `expect()` so a
+    // mis-call from a test that bypasses Config::from_env produces a clean
+    // error instead of a panic.
+    let account = config
+        .blob_azure_account
+        .clone()
+        .ok_or(BuildBlobStoreError::MissingAzureField("account"))?;
+    let container = config
+        .blob_azure_container
+        .clone()
+        .ok_or(BuildBlobStoreError::MissingAzureField("container"))?;
+
+    let auth = if let Some(key) = config.blob_azure_account_key.clone() {
+        AzureAuth::AccountKey(key)
+    } else if config.blob_azure_use_managed_identity {
+        AzureAuth::ManagedIdentity
+    } else {
+        return Err(BuildBlobStoreError::MissingAzureField("auth"));
+    };
+
+    let staging_root = config.data_dir.join("staging");
+    let azure_cfg = AzureBlobConfig {
+        account_name: account,
+        container_name: container,
+        staging_root,
+        auth,
+    };
+    let store = blob_azure::build(azure_cfg).await?;
+    Ok(Arc::new(store))
+}
+
+#[cfg(not(feature = "azure"))]
+async fn build_azure_blob_store(
+    _config: &Config,
+) -> Result<Arc<dyn BlobStore>, BuildBlobStoreError> {
+    // The `azure` cargo feature is off but the operator selected Azure at
+    // runtime. Bail out loudly rather than silently falling back to local.
+    Err(BuildBlobStoreError::AzureFeatureMissing)
+}
+
+/// Errors surfaced by [`build_blob_store`]. Distinct from
+/// [`crate::config::ConfigError`] so this stays runtime-only — env-time
+/// validation and runtime construction can fail differently and we want the
+/// operator-facing messages to reflect that.
+#[derive(Debug, Error)]
+pub enum BuildBlobStoreError {
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error(
+        "blob backend Azure was selected at runtime but a required field is \
+         missing from Config: {0}. Most likely Config was built without going \
+         through Config::from_env."
+    )]
+    MissingAzureField(&'static str),
+
+    #[error(
+        "blob backend Azure was selected at runtime but the api-server was \
+         built without the `azure` cargo feature. Rebuild with \
+         `--features azure` (the default)."
+    )]
+    AzureFeatureMissing,
+}
+
+#[cfg(test)]
+mod build_blob_store_tests {
+    //! Tests for the backend-selection factory. We don't need a full
+    //! `Config::from_env` run here; constructing `Config` literals lets the
+    //! factory's branching get exercised in isolation. Real network
+    //! round-trips against Azure live in
+    //! `tests/azure_blob_integration.rs`, gated on
+    //! `CMTRACE_AZURE_STORAGE_ACCOUNT` being set in the environment.
+
+    use super::*;
+    use crate::auth::AuthMode;
+    use crate::config::{BlobBackend, Config};
+    use std::net::SocketAddr;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn base_config(data_dir: PathBuf) -> Config {
+        Config {
+            listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            data_dir: data_dir.clone(),
+            sqlite_path: ":memory:".to_string(),
+            auth_mode: AuthMode::Disabled,
+            entra: None,
+            allowed_origins: vec![],
+            allow_credentials: false,
+            blob_backend: BlobBackend::Local,
+            blob_azure_account: None,
+            blob_azure_container: None,
+            blob_azure_account_key: None,
+            blob_azure_use_managed_identity: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn factory_picks_local_for_default_backend() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = base_config(tmp.path().to_path_buf());
+        let store = build_blob_store(&cfg)
+            .await
+            .expect("local backend should always build");
+
+        // Smoke-test the trait contract on the returned Arc<dyn BlobStore>:
+        // create_staging then discard. If we got the wrong backend back the
+        // staging path wouldn't land under the tempdir.
+        let upload_id = uuid::Uuid::now_v7();
+        store.create_staging(upload_id).await.unwrap();
+        let staging = store.staging_path(upload_id);
+        assert!(
+            staging.starts_with(tmp.path()),
+            "staging path {staging:?} should be under tempdir {:?}",
+            tmp.path()
+        );
+        store.discard_staging(upload_id).await.unwrap();
+    }
+
+    #[cfg(feature = "azure")]
+    #[tokio::test]
+    async fn factory_picks_azure_for_azure_backend() {
+        // No real network call here — we only verify the factory dispatches
+        // to the Azure path and the resulting object_store client builds
+        // (the MicrosoftAzureBuilder validation is local).
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = base_config(tmp.path().to_path_buf());
+        cfg.blob_backend = BlobBackend::Azure;
+        cfg.blob_azure_account = Some("devstoreaccount1".to_string());
+        cfg.blob_azure_container = Some("test-bucket".to_string());
+        cfg.blob_azure_account_key = Some(
+            "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6\
+             IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+                .to_string(),
+        );
+
+        let store = build_blob_store(&cfg).await.expect("azure backend builds");
+
+        // Confirm staging dir was created at the expected location (the
+        // Azure backend still stages locally before shipping to the cloud).
+        let upload_id = uuid::Uuid::now_v7();
+        store.create_staging(upload_id).await.unwrap();
+        let staging = store.staging_path(upload_id);
+        assert!(staging.starts_with(tmp.path().join("staging")));
+        store.discard_staging(upload_id).await.unwrap();
+    }
+
+    #[cfg(not(feature = "azure"))]
+    #[tokio::test]
+    async fn factory_rejects_azure_when_feature_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = base_config(tmp.path().to_path_buf());
+        cfg.blob_backend = BlobBackend::Azure;
+        // `Arc<dyn BlobStore>` doesn't implement Debug, so expect_err
+        // doesn't compile here — match the result manually instead.
+        match build_blob_store(&cfg).await {
+            Ok(_) => panic!("azure backend should fail when feature disabled"),
+            Err(BuildBlobStoreError::AzureFeatureMissing) => {}
+            Err(other) => panic!("expected AzureFeatureMissing, got {other:?}"),
+        }
+    }
+}
 
 /// Opaque handle returned by [`BlobStore::finalize`]. For the local-fs impl
 /// this is a `file://` URI; for a future S3 impl it would be `s3://…`.
