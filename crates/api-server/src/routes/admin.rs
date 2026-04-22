@@ -33,10 +33,14 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
 use chrono::{DateTime, Utc};
+use common_wire::Paginated;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::auth::{AdminTag, RequireRole};
+use crate::error::AppError;
 use crate::middleware::audit::audit_middleware;
+use crate::routes::{decode_cursor, encode_cursor};
 use crate::state::AppState;
 use crate::storage::AuditFilters;
 
@@ -84,11 +88,16 @@ async fn disable_device(
 // ---------------------------------------------------------------------------
 
 /// Query parameters accepted by `GET /v1/admin/audit`.
+///
+/// Pagination uses an opaque `cursor` token returned by the previous
+/// page's `next_cursor` field — see [`AuditFilters::cursor_before`] for
+/// the keyset semantics. Clients should treat the cursor as opaque and
+/// pass it back verbatim.
 #[derive(Debug, Deserialize)]
 pub struct AuditQuery {
-    /// ISO-8601 timestamp lower bound (exclusive). Returns rows with
-    /// `ts_utc > after_ts`. Omit to start from the most recent rows.
-    pub after_ts: Option<DateTime<Utc>>,
+    /// Opaque cursor from a previous page's `next_cursor`. Omit to start
+    /// from the most recent rows.
+    pub cursor: Option<String>,
     /// Filter to a specific `principal_id` (JWT `sub`).
     pub principal: Option<String>,
     /// Filter to a specific action string (e.g. `device.disable`).
@@ -118,27 +127,66 @@ pub struct AuditRowDto {
     pub request_id: Option<String>,
 }
 
-/// `GET /v1/admin/audit` — paginated, reverse-chronological audit history.
+/// `GET /v1/admin/audit` — keyset-paginated, reverse-chronological audit
+/// history.
 ///
 /// Callers must hold the `CmtraceOpen.Admin` role.  Query parameters:
-///   - `after_ts`  — ISO-8601 exclusive lower bound on `ts_utc`
+///   - `cursor`    — opaque cursor from a previous page's `next_cursor`
 ///   - `principal` — filter to a specific principal_id
 ///   - `action`    — filter to a specific action string
 ///   - `limit`     — max rows (1–1 000; default 100)
+///
+/// Returns `{ items: [...], next_cursor: "..." | null }` — clients pass
+/// `next_cursor` back as `cursor=` to fetch the next page. Matches the
+/// pagination convention used by `routes/sessions.rs`.
 async fn list_audit(
     _principal: RequireRole<AdminTag>,
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuditQuery>,
-) -> Result<Json<serde_json::Value>, crate::error::AppError> {
+) -> Result<Json<Paginated<AuditRowDto>>, AppError> {
     let limit = params.limit.unwrap_or(100).clamp(1, 1000);
+
+    // Decode the opaque cursor into the (ts, id) keyset pair the storage
+    // layer expects. Cursor format: base64("<rfc3339>|<uuid>") — same
+    // shape as routes/sessions.rs uses.
+    let cursor_before = params
+        .cursor
+        .as_deref()
+        .map(|c| {
+            let decoded = decode_cursor(c)?;
+            let (ts_str, id_str) = decoded
+                .split_once('|')
+                .ok_or_else(|| AppError::BadRequest("invalid audit cursor payload".into()))?;
+            let ts = DateTime::parse_from_rfc3339(ts_str)
+                .map_err(|_| AppError::BadRequest("invalid audit cursor timestamp".into()))?
+                .with_timezone(&Utc);
+            let id = Uuid::parse_str(id_str)
+                .map_err(|_| AppError::BadRequest("invalid audit cursor uuid".into()))?;
+            Ok::<_, AppError>((ts, id))
+        })
+        .transpose()?;
+
     let filters = AuditFilters {
-        after_ts: params.after_ts,
+        cursor_before,
         principal: params.principal,
         action: params.action,
     };
 
-    let rows = state.audit.list_audit_rows(&filters, limit).await?;
-    let count = rows.len();
+    // Over-fetch by 1 so we can detect "more rows available" → emit a
+    // next_cursor. Same trick routes/sessions.rs uses.
+    let mut rows = state
+        .audit
+        .list_audit_rows(&filters, limit + 1)
+        .await?;
+
+    let next_cursor = if rows.len() as u32 > limit {
+        rows.truncate(limit as usize);
+        rows.last().map(|r| {
+            encode_cursor(&format!("{}|{}", r.ts_utc.to_rfc3339(), r.id))
+        })
+    } else {
+        None
+    };
 
     let items: Vec<AuditRowDto> = rows
         .into_iter()
@@ -159,9 +207,5 @@ async fn list_audit(
         })
         .collect();
 
-    let body = serde_json::json!({
-        "items": items,
-        "count": count,
-    });
-    Ok(Json(body))
+    Ok(Json(Paginated { items, next_cursor }))
 }

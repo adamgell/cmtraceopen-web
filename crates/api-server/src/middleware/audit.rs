@@ -27,9 +27,12 @@
 use std::sync::Arc;
 
 use axum::extract::{FromRequestParts, MatchedPath, State};
+use axum::http::header::AUTHORIZATION;
 use axum::http::{Method, Request};
 use axum::middleware::Next;
 use axum::response::Response;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use chrono::Utc;
 use tracing::warn;
 use uuid::Uuid;
@@ -81,6 +84,35 @@ fn principal_kind(p: &OperatorPrincipal) -> &'static str {
     }
 }
 
+/// Best-effort extraction of the `sub` (subject) claim from a Bearer JWT
+/// **without verifying the signature**.
+///
+/// Used only to enrich the audit row when authentication failed — so an
+/// attacker probing for valid users (token-guessing, replay of expired
+/// tokens, etc.) leaves a trail with the *attempted* subject rather than
+/// just `principal_id=""`. The returned value is **never** acted on for
+/// any authorization decision: it is purely log/audit metadata.
+///
+/// Returns `None` if the header is missing/malformed, the token doesn't
+/// have three dot-separated segments, or the payload doesn't decode as
+/// JSON containing a string `sub` field.
+fn unverified_sub_from_authorization(
+    auth_header: Option<&axum::http::HeaderValue>,
+) -> Option<String> {
+    let token = auth_header?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")?
+        .trim();
+    // JWTs are <header>.<payload>.<signature>. We want the payload only.
+    let payload_b64 = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload_b64.trim_end_matches('='))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("sub")?.as_str().map(|s| s.to_string())
+}
+
 /// Axum middleware that appends one [`audit_log`] row per request.
 ///
 /// Apply to admin sub-routers via
@@ -108,8 +140,11 @@ pub async fn audit_middleware(
 
     // Try to extract the principal from the request parts.  We decompose
     // the request only to read headers, then reassemble it so the handler
-    // still sees the full request.
+    // still sees the full request. Snapshot the Authorization header up
+    // front so we can recover the *attempted* `sub` claim on the rejected-
+    // auth path — needed for brute-force / token-guessing audit trails.
     let (mut parts, body) = request.into_parts();
+    let authz_snapshot = parts.headers.get(AUTHORIZATION).cloned();
     let principal = OperatorPrincipal::from_request_parts(&mut parts, &state)
         .await
         .ok();
@@ -130,7 +165,15 @@ pub async fn audit_middleware(
             p.subject.clone(),
             p.name.clone(),
         ),
-        None => ("anonymous".to_string(), String::new(), None),
+        None => {
+            // Authentication failed (or no token) — record the attempted
+            // `sub` claim if we can recover it from the (unverified) Bearer
+            // token, so brute-force / token-guessing leaves a trail. The
+            // value is purely audit metadata; no authorization decision is
+            // ever made on it.
+            let attempted = unverified_sub_from_authorization(authz_snapshot.as_ref());
+            ("anonymous".to_string(), attempted.unwrap_or_default(), None)
+        }
     };
 
     let action = route_to_action(&method, matched.as_deref());
@@ -198,5 +241,53 @@ mod tests {
         let (kind, id) = route_to_target(Some("/v1/admin/audit"), "/v1/admin/audit");
         assert!(kind.is_none());
         assert!(id.is_none());
+    }
+
+    fn b64url(s: &str) -> String {
+        URL_SAFE_NO_PAD.encode(s.as_bytes())
+    }
+
+    #[test]
+    fn unverified_sub_extracts_subject_from_well_formed_jwt() {
+        // Synthetic JWT: header is irrelevant for unverified-sub; payload
+        // contains {"sub":"alice@example.com"}; signature is gibberish.
+        let header = b64url(r#"{"alg":"RS256","typ":"JWT"}"#);
+        let payload = b64url(r#"{"sub":"alice@example.com","aud":"x"}"#);
+        let sig = "deadbeef";
+        let token = format!("{header}.{payload}.{sig}");
+        let hv: axum::http::HeaderValue =
+            format!("Bearer {token}").parse().unwrap();
+        assert_eq!(
+            unverified_sub_from_authorization(Some(&hv)),
+            Some("alice@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn unverified_sub_returns_none_for_missing_header() {
+        assert_eq!(unverified_sub_from_authorization(None), None);
+    }
+
+    #[test]
+    fn unverified_sub_returns_none_for_non_bearer() {
+        let hv: axum::http::HeaderValue = "Basic Zm9vOmJhcg==".parse().unwrap();
+        assert_eq!(unverified_sub_from_authorization(Some(&hv)), None);
+    }
+
+    #[test]
+    fn unverified_sub_returns_none_for_malformed_token() {
+        // Only one segment.
+        let hv: axum::http::HeaderValue = "Bearer notajwt".parse().unwrap();
+        assert_eq!(unverified_sub_from_authorization(Some(&hv)), None);
+    }
+
+    #[test]
+    fn unverified_sub_returns_none_when_payload_has_no_sub() {
+        let header = b64url(r#"{"alg":"none"}"#);
+        let payload = b64url(r#"{"aud":"x"}"#); // no sub
+        let token = format!("{header}.{payload}.sig");
+        let hv: axum::http::HeaderValue =
+            format!("Bearer {token}").parse().unwrap();
+        assert_eq!(unverified_sub_from_authorization(Some(&hv)), None);
     }
 }

@@ -743,21 +743,43 @@ pub struct NewAuditRow {
     pub request_id: Option<Uuid>,
 }
 
-/// Optional filters for [`AuditStore::list_audit_rows`].
+/// Optional filters + keyset cursor for [`AuditStore::list_audit_rows`].
+///
+/// Pagination uses a **keyset cursor** — the caller passes back the
+/// `(ts_utc, id)` of the last row from the previous page as
+/// [`Self::cursor_before`], and the next page returns rows with
+/// `(ts_utc, id) < (cursor_ts, cursor_id)` in lexicographic order. This
+/// matches the convention used by `routes/sessions.rs` and avoids the
+/// "two rows in the same `ts_utc` second tie and pagination drops or
+/// duplicates them" bug that an offset/limit or `after_ts`-only scheme
+/// suffers under high write volume.
 ///
 /// All fields default to `None`, meaning "no filter applied".
 #[derive(Debug, Clone, Default)]
 pub struct AuditFilters {
-    /// Include only rows with `ts_utc > after_ts` (exclusive lower bound).
-    pub after_ts: Option<DateTime<Utc>>,
+    /// Keyset cursor: include only rows where
+    /// `(ts_utc, id) < (cursor_ts, cursor_id)` (strict lexicographic
+    /// comparison). The composite-comparison form means rows tied on
+    /// `ts_utc` to the same second are still strictly ordered by `id` (UUID
+    /// v7 — time-sortable insertion order), so paging never drops or
+    /// duplicates rows.
+    pub cursor_before: Option<(DateTime<Utc>, Uuid)>,
     /// Include only rows whose `principal_id` equals this value.
     pub principal: Option<String>,
     /// Include only rows whose `action` equals this value.
     pub action: Option<String>,
 }
 
-/// Append-only audit log. Implementations MUST never update or delete rows —
-/// the table is a tamper-evident record of admin/operator actions.
+/// Insert-only audit log of admin/operator actions.
+///
+/// Implementations MUST never update or delete rows. This is a trait-level
+/// contract enforced by the SQLite/Postgres impls' API surface — they do
+/// not expose UPDATE or DELETE methods on this trait. **Note**: this is an
+/// application-layer guarantee only; the underlying database has no
+/// constraint that prevents a DBA / compromised process from mutating
+/// rows. Cryptographic tamper evidence (hash chain + verifier endpoint)
+/// is tracked as a follow-up — see issue #110 and
+/// `docs/adr/0001-postgres-storage-types.md`.
 #[async_trait]
 pub trait AuditStore: Send + Sync + 'static {
     /// Append one audit row. Called by the audit middleware after every

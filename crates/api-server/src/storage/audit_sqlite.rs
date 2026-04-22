@@ -90,19 +90,35 @@ impl AuditStore for AuditSqliteStore {
         // Cap at 1000 so a misconfigured caller can't pull the whole table in
         // one shot.
         let effective_limit = limit.min(1000) as i64;
-        let after_ts_s = filters.after_ts.as_ref().map(|dt| dt.to_rfc3339());
+
+        // Pre-stringify the cursor pieces so the QueryBuilder bindings have a
+        // stable lifetime tied to this function scope.
+        let cursor_strings = filters
+            .cursor_before
+            .as_ref()
+            .map(|(ts, id)| (ts.to_rfc3339(), id.to_string()));
 
         // Build the query dynamically using QueryBuilder so we avoid
-        // replicating the SELECT / ORDER BY / LIMIT clause eight times across
-        // every combination of optional filters.
+        // replicating the SELECT / ORDER BY / LIMIT clause across every
+        // combination of optional filters.
+        //
+        // Pagination uses a keyset cursor on (ts_utc, id):
+        //   `(ts_utc, id) < (cursor_ts, cursor_id)`
+        // SQLite supports row-value comparison directly. The composite
+        // comparison means rows tied on `ts_utc` are still strictly ordered
+        // by `id` (UUID v7 = time-sortable insertion order), so paging
+        // never drops or duplicates rows.
         let mut qb = QueryBuilder::new(
             "SELECT id, ts_utc, principal_kind, principal_id, principal_display, \
              action, target_kind, target_id, result, details_json, request_id \
              FROM audit_log WHERE 1=1",
         );
-        if let Some(ref after) = after_ts_s {
-            qb.push(" AND ts_utc > ");
-            qb.push_bind(after.as_str());
+        if let Some((ref cursor_ts_s, ref cursor_id_s)) = cursor_strings {
+            qb.push(" AND (ts_utc, id) < (");
+            qb.push_bind(cursor_ts_s.as_str());
+            qb.push(", ");
+            qb.push_bind(cursor_id_s.as_str());
+            qb.push(")");
         }
         if let Some(ref principal) = filters.principal {
             qb.push(" AND principal_id = ");
@@ -112,7 +128,9 @@ impl AuditStore for AuditSqliteStore {
             qb.push(" AND action = ");
             qb.push_bind(action.as_str());
         }
-        qb.push(" ORDER BY ts_utc DESC LIMIT ");
+        // Composite ORDER matches the cursor comparison so rows are returned
+        // in the same total order the cursor walks.
+        qb.push(" ORDER BY ts_utc DESC, id DESC LIMIT ");
         qb.push_bind(effective_limit);
 
         let rows = qb.build().fetch_all(&self.pool).await?;

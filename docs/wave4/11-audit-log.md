@@ -4,8 +4,18 @@
 
 ## 1  Goal
 
-Every admin/operator action against the api-server lands in a tamper-evident
-audit log.  Compliance gate for SOC 2 / SOX / HIPAA-style asks.
+Every admin/operator action against the api-server lands in an
+**insert-only** audit log.  Compliance gate foundation for
+SOC 2 / SOX / HIPAA-style asks.
+
+> **Tamper evidence: deferred to follow-up.**
+> The trait contract documents that rows are never updated or deleted, but
+> nothing in the schema or write path enforces that against a compromised
+> DBA / process.  Hash-chain tamper evidence (`prev_hash` + `row_hash`
+> columns + verifier endpoint) is tracked separately —
+> see [issue #110](https://github.com/adamgell/cmtraceopen-web/issues/110)
+> and the related Postgres-storage-types ADR
+> [`docs/adr/0001-postgres-storage-types.md`](../adr/0001-postgres-storage-types.md).
 
 ## 2  Schema
 
@@ -115,7 +125,7 @@ code had to change.
 
 ```
 GET /v1/admin/audit
-  ?after_ts=<ISO-8601>    exclusive lower bound on ts_utc
+  ?cursor=<opaque>        from a previous page's nextCursor; omit for page 1
   ?principal=<sub>        filter to a specific principal_id
   ?action=device.disable  filter to a specific action string
   ?limit=100              max rows (1–1 000; default 100)
@@ -138,12 +148,21 @@ Returns:
       "result": "failure"
     }
   ],
-  "count": 1
+  "nextCursor": "MjAyNS0w..."
 }
 ```
 
-Results are ordered `ts_utc DESC` (most recent first).  Pagination via the
-`after_ts` lower bound.
+Results are ordered `(ts_utc DESC, id DESC)`. Pagination uses an opaque
+**keyset cursor** — clients pass `nextCursor` from the previous page back
+as `?cursor=` to fetch the next page; `nextCursor: null` means no more
+rows.
+
+The composite `(ts_utc, id)` cursor matters: under high write volume two
+rows in the same `ts_utc` second would tie under a `ts_utc`-only seek and
+either drop or duplicate on page boundaries. The `id` tie-breaker
+(UUID v7, time-sortable) gives a strict total order that prevents both.
+
+This matches the pagination convention used by `routes/sessions.rs`.
 
 Role required: `CmtraceOpen.Admin`.
 

@@ -198,7 +198,8 @@ async fn audit_endpoint_returns_rows_reverse_chronological_with_limit() {
     );
     assert_eq!(items[1]["target_id"].as_str(), Some("device-a"));
 
-    // Fetch with limit=1 — should return only one row.
+    // Fetch with limit=1 — should return only one row, plus a cursor
+    // for the next page (since there are still 2 rows total, more remain).
     let limited = client
         .get(format!("{}/v1/admin/audit?limit=1", server.base))
         .send()
@@ -209,7 +210,37 @@ async fn audit_endpoint_returns_rows_reverse_chronological_with_limit() {
         .expect("json");
     let limited_items = limited["items"].as_array().expect("items");
     assert_eq!(limited_items.len(), 1);
-    assert_eq!(limited["count"].as_u64(), Some(1));
+    let cursor = limited["nextCursor"]
+        .as_str()
+        .expect("nextCursor should be present when more rows remain");
+    assert!(!cursor.is_empty(), "nextCursor must be a non-empty string");
+
+    // Fetch the next page using the cursor — should yield the second row,
+    // and that page's nextCursor should be null (no more rows after).
+    let page2 = client
+        .get(format!(
+            "{}/v1/admin/audit?limit=1&cursor={}",
+            server.base, cursor
+        ))
+        .send()
+        .await
+        .expect("send")
+        .json::<Value>()
+        .await
+        .expect("json");
+    let page2_items = page2["items"].as_array().expect("items");
+    assert_eq!(page2_items.len(), 1);
+    // The two pages must have returned different rows (no duplicate, no skip).
+    assert_ne!(
+        page2_items[0]["id"].as_str(),
+        limited_items[0]["id"].as_str(),
+        "second page must not duplicate the first page's row"
+    );
+    assert!(
+        page2["nextCursor"].is_null(),
+        "nextCursor should be null when no more rows remain; got: {}",
+        page2["nextCursor"]
+    );
 }
 
 /// The `action` query parameter filters the result correctly.
@@ -241,7 +272,7 @@ async fn audit_endpoint_action_filter() {
         .await
         .expect("json");
     assert_eq!(
-        result["count"].as_u64(),
+        result["items"].as_array().map(|a| a.len()),
         Some(0),
         "wrong-action filter should return zero rows"
     );
@@ -259,7 +290,7 @@ async fn audit_endpoint_action_filter() {
         .await
         .expect("json");
     assert_eq!(
-        result2["count"].as_u64(),
+        result2["items"].as_array().map(|a| a.len()),
         Some(1),
         "correct-action filter should return one row"
     );

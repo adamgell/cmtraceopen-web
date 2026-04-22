@@ -1,10 +1,12 @@
--- Operator / admin audit log.  Append-only; rows are NEVER updated or deleted.
+-- Operator / admin audit log.  Insert-only by trait contract; rows are
+-- never updated or deleted.  Note that "insert-only" is enforced at the
+-- application layer (the AuditStore trait + AuditSqliteStore impl), not
+-- by the schema itself — a DBA or compromised process can still UPDATE
+-- this table.  True tamper evidence (hash chain + verifier endpoint) is
+-- tracked as a follow-up; see issue #110 and ADR 0001.
 --
 -- One row is written per auditable admin action (device disable/enable,
--- session reparse, bundle delete, etc.).  Tamper-evidence via hash chaining
--- is designed-but-not-yet-shipped (P2); the current schema carries the
--- columns that will support it so a future migration can back-fill without a
--- full table rebuild.
+-- session reparse, bundle delete, etc.).
 --
 -- Column notes:
 --   id             – UUID v7 (time-sortable for cheap "last N" scans).
