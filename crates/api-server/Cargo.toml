@@ -80,6 +80,13 @@ rustls-webpki = { version = "0.103", default-features = false, features = ["std"
 # directly — we re-parse the leaf DER with x509-parser to pull the URI
 # from the SAN.
 x509-parser = { version = "0.16", optional = true }
+# tls.rs imports these directly. They're transitively pulled by axum +
+# rustls + axum-server, but Rust requires explicit deps for direct `use`
+# statements. Optional + mtls-gated to keep the no-mtls build slim.
+# `tokio-rustls` itself is declared once below in [dependencies.tokio-rustls]
+# (shared between `mtls` and `test-mtls` feature gates).
+http = { version = "1", optional = true }
+rustls-pki-types = { version = "1", optional = true }
 
 [features]
 default = ["mtls"]
@@ -94,6 +101,9 @@ mtls = [
     "dep:rustls-pemfile",
     "dep:rustls-webpki",
     "dep:x509-parser",
+    "dep:http",
+    "dep:rustls-pki-types",
+    "dep:tokio-rustls",
 ]
 # Optional integration tests that mint a self-signed CA + leaf with
 # `rcgen`, spin up the TLS-terminating server, and drive a real mTLS
