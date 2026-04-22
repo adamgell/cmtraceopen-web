@@ -55,7 +55,14 @@ const TREES: &[(&str, &str)] = &[
 /// `CMTRACE_DATABASE_URL=postgres://...` won't get audit logging until
 /// the Postgres translation lands; that's intentionally documented as a
 /// known limitation. Once the migration lands, drop the entry.
-const ALLOW_DIVERGENT_TABLES: &[&str] = &["audit_log"];
+const ALLOW_DIVERGENT_TABLES: &[&str] = &[
+    // PR #79 — Postgres translation deferred per ADR 0001 (issue #110).
+    "audit_log",
+    // PR #106 (server-side config push) — Postgres translation deferred,
+    // same Wave 4 follow-up batch as audit_log.
+    "default_config_override",
+    "device_config_overrides",
+];
 
 /// Indexes attached to tables in `ALLOW_DIVERGENT_TABLES`. Same rationale.
 fn is_index_on_divergent_table(name: &str) -> bool {
