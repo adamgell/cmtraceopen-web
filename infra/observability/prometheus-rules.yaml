@@ -1,0 +1,147 @@
+# cmtrace-api — Prometheus alerting rules
+#
+# Plain Prometheus rules format (compatible with `promtool check rules`).
+#
+# Kubernetes / kube-prometheus-stack deployment
+# ─────────────────────────────────────────────
+# Wrap this file in a PrometheusRule CRD:
+#
+#   apiVersion: monitoring.coreos.com/v1
+#   kind: PrometheusRule
+#   metadata:
+#     name: cmtrace-api-alerts
+#     namespace: monitoring
+#     labels:
+#       app: cmtrace-api
+#       prometheus: kube-prometheus
+#       role: alert-rules
+#   spec:
+#     <paste the groups block below>
+#
+# Then: kubectl apply -f your-prometheusrule.yaml
+#
+# Standalone Prometheus
+# ─────────────────────
+# Validate:  promtool check rules infra/observability/prometheus-rules.yaml
+# Reload:    POST http://localhost:9090/-/reload
+
+groups:
+  - name: cmtrace-api.rules
+    interval: 60s
+    rules:
+
+      # ── Sev 2 ─────────────────────────────────────────────────────────────
+      # Bundle ingest failure ratio exceeds 5 % over the last 5 minutes.
+      - alert: BundleIngestFailureRateHigh
+        expr: >
+          (
+            rate(cmtrace_ingest_bundles_finalized_total{status="failed"}[5m])
+            /
+            rate(cmtrace_ingest_bundles_finalized_total[5m])
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: "2"
+          team: platform
+        annotations:
+          summary: "Bundle ingest failure rate is above 5 %"
+          description: >
+            {{ $value | humanizePercentage }} of bundle finalize attempts have
+            status="failed" over the last 5 minutes (threshold 5 %).
+            Check parse-worker logs and disk / database health.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#bundleingestfailureratehigh"
+
+      # ── Sev 1 ─────────────────────────────────────────────────────────────
+      # No bundles initiated for 30 minutes — ingest pipeline stalled.
+      #
+      # The `absent()` clause catches the case where the metric is not
+      # exported at all (fresh deploy with no devices yet, broken scrape
+      # target, relabel-drop, etc.). Without it, `rate(...) == 0` returns
+      # an empty vector when the series is missing and the alert silently
+      # fails to fire.
+      - alert: IngestStalled
+        expr: >
+          (rate(cmtrace_ingest_bundles_initiated_total[15m]) == 0)
+          or absent(cmtrace_ingest_bundles_initiated_total)
+        for: 30m
+        labels:
+          severity: "1"
+          team: platform
+          job: cmtrace-api
+        annotations:
+          summary: "No bundle ingest activity for 30 minutes"
+          description: >
+            cmtrace_ingest_bundles_initiated_total has not incremented for at
+            least 30 minutes (or the metric is absent entirely). Either no
+            agents are running, the ingest endpoint is unreachable, or the
+            api-server has not been deployed.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#ingeststalled"
+
+      # ── Sev 2 ─────────────────────────────────────────────────────────────
+      # Parse-worker failure rate exceeds 0.1 runs/s over the last 10 minutes.
+      - alert: ParseWorkerFailing
+        expr: rate(cmtrace_parse_worker_runs_total{result="failed"}[10m]) > 0.1
+        for: 15m
+        labels:
+          severity: "2"
+          team: platform
+        annotations:
+          summary: "Parse worker is producing failures above threshold"
+          description: >
+            Parse-worker failure rate is {{ $value | humanize }} runs/s
+            (threshold 0.1 runs/s) over the last 10 minutes.
+            Check worker logs for schema or database errors.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#parseworkerfailing"
+
+      # ── Sev 1 ─────────────────────────────────────────────────────────────
+      # api-server is not reachable by the Prometheus scraper.
+      - alert: HealthzDown
+        expr: up{job="cmtrace-api"} == 0
+        for: 5m
+        labels:
+          severity: "1"
+          team: platform
+        annotations:
+          summary: "cmtrace-api is down (Prometheus scrape failing)"
+          description: >
+            The Prometheus scrape target for job="cmtrace-api" has been
+            unreachable for 5 minutes.  The api-server process may have
+            crashed or the network path to port 8080 is broken.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#healthzdown"
+
+      # ── Sev 3 (leading) ────────────────────────────────────────────────────
+      # Pool utilisation above 70 % for 5 minutes — leading indicator that
+      # gives operators a chance to act before connections actually run out.
+      - alert: DbPoolNearExhaustion
+        expr: >
+          (cmtrace_db_connections_in_use / cmtrace_db_pool_max) > 0.7
+        for: 5m
+        labels:
+          severity: "3"
+          team: platform
+        annotations:
+          summary: "Database connection pool is over 70 % utilised (leading indicator)"
+          description: >
+            DB pool utilisation is {{ $value | humanizePercentage }}
+            (threshold 70 %).  Pool not yet exhausted but trending toward
+            saturation.  Consider increasing pool_max or investigating
+            long-running queries before DbPoolExhausted (Sev 2) fires.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#dbpoolnearexhaustion"
+
+      # ── Sev 2 (lagging) ────────────────────────────────────────────────────
+      # Pool utilisation above 90 % — pool is effectively exhausted, requests
+      # are queueing, latency is degrading.
+      - alert: DbPoolExhausted
+        expr: >
+          (cmtrace_db_connections_in_use / cmtrace_db_pool_max) > 0.9
+        for: 5m
+        labels:
+          severity: "2"
+          team: platform
+        annotations:
+          summary: "Database connection pool is over 90 % utilised"
+          description: >
+            DB pool utilisation is {{ $value | humanizePercentage }}
+            (threshold 90 %).  Connection waits are degrading request
+            latency.  Increase pool_max or reduce query concurrency now.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#dbpoolexhausted"

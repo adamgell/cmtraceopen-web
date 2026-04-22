@@ -1,0 +1,130 @@
+# =========================================================================
+# AlertManager configuration — TEMPLATE FILE, NOT READY TO LOAD AS-IS
+# =========================================================================
+# This file uses shell-style ${VAR} placeholders for secrets (e.g.
+# ${SLACK_WEBHOOK_URL}). AlertManager does NOT perform environment-variable
+# substitution on its config, so loading this file directly with
+# `--config.file=<this>` will leave the literal string "${SLACK_WEBHOOK_URL}"
+# in the api_url and Slack notifications will fail.
+#
+# Process this template before starting AlertManager:
+#
+#   envsubst < infra/observability/alertmanager-config.yaml \
+#     > /etc/alertmanager/config.yaml
+#   amtool check-config /etc/alertmanager/config.yaml
+#   alertmanager --config.file=/etc/alertmanager/config.yaml
+#
+# Or, when running under the kube-prometheus operator on Kubernetes,
+# reference the secret via the operator's `secret:` syntax instead of
+# baking the URL into this file. See docs/wave4/12-alerting.md §3 for
+# both deployment paths.
+# =========================================================================
+
+global:
+  # Resolve an alert as resolved after 5 minutes of no further fires.
+  resolve_timeout: 5m
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+templates: []
+
+# ---------------------------------------------------------------------------
+# Routing tree
+# ---------------------------------------------------------------------------
+route:
+  # Default receiver for anything that does not match a child route.
+  receiver: slack-platform
+
+  # Group alerts by alert name so each distinct alert fires one message.
+  group_by: ["alertname", "severity"]
+
+  # Wait up to 30 s to batch alerts that arrive together.
+  group_wait: 30s
+
+  # After the first notification, wait 5 m before sending another for the
+  # same group (avoids flood during a noisy incident).
+  group_interval: 5m
+
+  # Re-notify every 4 h if an alert is still firing (reminds on-call that it
+  # is not resolved).
+  repeat_interval: 4h
+
+  routes:
+    # Sev 1 — critical, page immediately, repeat hourly.
+    - matchers:
+        - severity = "1"
+      receiver: slack-platform
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: false
+
+    # Sev 2 — high, normal batching, repeat every 4 h.
+    - matchers:
+        - severity = "2"
+      receiver: slack-platform
+      repeat_interval: 4h
+      continue: false
+
+    # Sev 3 — medium, wider batching, repeat every 12 h.
+    - matchers:
+        - severity = "3"
+      receiver: slack-platform
+      group_wait: 2m
+      repeat_interval: 12h
+      continue: false
+
+# ---------------------------------------------------------------------------
+# Inhibition rules
+# ---------------------------------------------------------------------------
+inhibit_rules:
+  # If the API is completely down (HealthzDown / Sev 1), suppress lower-severity
+  # alerts that are almost certainly caused by the same outage.
+  #
+  # ASSUMPTION: every alert emitted by `prometheus-rules.yaml` carries a
+  # `job` label that resolves to "cmtrace-api" (Prometheus attaches this
+  # automatically from the scrape config — see
+  # docs/wave4/12-alerting.md §3 for the verification steps with `amtool`).
+  # If any future alert is added that does NOT carry the job label, this
+  # inhibit rule will silently fail to suppress it; verify with:
+  #   amtool config routes test --config.file=/etc/alertmanager/config.yaml \
+  #     alertname=BundleIngestFailureRateHigh job=cmtrace-api severity=2
+  - source_matchers:
+      - alertname = "HealthzDown"
+    target_matchers:
+      - severity =~ "2|3"
+    equal: ["job"]
+
+# ---------------------------------------------------------------------------
+# Receivers
+# ---------------------------------------------------------------------------
+receivers:
+  - name: slack-platform
+    slack_configs:
+      - api_url: "${SLACK_WEBHOOK_URL}"
+        channel: "#cmtrace-alerts"
+        send_resolved: true
+
+        # ── Title ──────────────────────────────────────────────────────────
+        title: >-
+          [{{ .Status | toUpper }}{{ if eq .Status "firing" }} :fire:{{ else }} :white_check_mark:{{ end }}]
+          {{ range .Alerts }}{{ .Labels.alertname }}{{ end }}
+          (Sev {{ range .Alerts }}{{ .Labels.severity }}{{ end }})
+
+        # ── Body ───────────────────────────────────────────────────────────
+        text: >-
+          {{ range .Alerts -}}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url -}}
+          *Runbook:* <{{ .Annotations.runbook_url }}|View runbook>
+          {{- end }}
+          {{ end }}
+
+        # Colour the sidebar by severity.
+        color: >-
+          {{ if eq (index .Alerts 0).Labels.severity "1" }}danger
+          {{- else if eq (index .Alerts 0).Labels.severity "2" }}warning
+          {{- else }}good{{ end }}
