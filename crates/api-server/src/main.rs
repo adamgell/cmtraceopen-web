@@ -146,11 +146,12 @@ async fn main() -> ExitCode {
         }
     };
 
-    // The audit store shares the same SQLite pool as `meta_store`. Now that
-    // audit_store() is on the MetadataStore trait (see this PR), the call
-    // returns Arc<dyn AuditStore> directly — no extra Arc wrap. Done before
-    // the trait-object coercions below so the concrete type is available.
-    let audit = meta_store.audit_store();
+    // The audit store shares the same SQLite pool as `meta_store`. The
+    // inherent `SqliteMetadataStore::audit_store()` returns `AuditSqliteStore`
+    // (concrete) and shadows the `MetadataStore` trait method here, so wrap
+    // explicitly in `Arc<dyn AuditStore>` for the AppState constructor.
+    let audit: Arc<dyn api_server::storage::AuditStore> =
+        Arc::new(meta_store.audit_store());
 
     let meta: Arc<dyn api_server::storage::MetadataStore> = meta_store.clone();
     let configs: Arc<dyn ConfigStore> = meta_store;
