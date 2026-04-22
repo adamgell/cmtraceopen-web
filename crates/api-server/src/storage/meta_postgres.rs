@@ -141,7 +141,7 @@ impl MetadataStore for PgMetadataStore {
         .bind(i64::from(batch_size))
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| StorageError::Backend(e.to_string()))?;
+        ?;
         Ok(rows)
     }
 
@@ -154,26 +154,26 @@ impl MetadataStore for PgMetadataStore {
             .pool
             .begin()
             .await
-            .map_err(|e| StorageError::Backend(e.to_string()))?;
+            ?;
         let entries_deleted = sqlx::query("DELETE FROM entries WHERE session_id = $1")
             .bind(session_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| StorageError::Backend(e.to_string()))?
+            ?
             .rows_affected();
         sqlx::query("DELETE FROM files WHERE session_id = $1")
             .bind(session_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| StorageError::Backend(e.to_string()))?;
+            ?;
         sqlx::query("DELETE FROM sessions WHERE session_id = $1")
             .bind(session_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| StorageError::Backend(e.to_string()))?;
+            ?;
         tx.commit()
             .await
-            .map_err(|e| StorageError::Backend(e.to_string()))?;
+            ?;
         Ok(entries_deleted)
     }
 
