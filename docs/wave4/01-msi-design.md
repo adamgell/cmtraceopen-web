@@ -507,6 +507,8 @@ if ($SignCertThumbprint) {
 (The exe inside the MSI gets signed earlier in CI, before WiX picks it up
 — see section 10.)
 
+> See `02a-sign-every-component.md` for the per-artifact signing flow (every EXE / DLL / PS / MSI gets signed in the right order).
+
 ---
 
 ## 10. CI build
