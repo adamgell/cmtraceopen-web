@@ -14,12 +14,12 @@
         3. Downloads the latest actions/runner release for win-x64.
         4. Configures the runner against the cmtraceopen-web repo with
            labels self-hosted,windows,cmtrace-build (runner name defaults
-           to the machine's own hostname — no rename needed).
+           to the machine's own hostname - no rename needed).
         5. Installs the runner as a Windows service and starts it.
         6. Grants NETWORK SERVICE read access to the code-signing cert's
            private key so signtool can use it from CI.
 
-    Idempotent where possible — re-running after a successful install
+    Idempotent where possible - re-running after a successful install
     skips the download + config steps.
 
 .PARAMETER Token
@@ -52,7 +52,7 @@
     jobs will fail until the certs arrive).
 
 .EXAMPLE
-    # Precheck only — no token needed, no install performed.
+    # Precheck only - no token needed, no install performed.
     .\Install-CmtraceRunner.ps1 -PrecheckOnly
 
 .EXAMPLE
@@ -60,9 +60,14 @@
     .\Install-CmtraceRunner.ps1 -Token 'AAA...XYZ'
 
 .NOTES
-    Does NOT do Entra join or Intune enrollment — those are portal /
+    Does NOT do Entra join or Intune enrollment - those are portal /
     Settings-app tasks. Does not configure the cmtrace agent itself.
+
+    Runs on Windows PowerShell 5.1 and PowerShell 7+. ASCII-only on
+    purpose (PS 5.1 reads .ps1 files as the system code page by default,
+    so non-ASCII dashes break the parser).
 #>
+#Requires -Version 5.1
 [CmdletBinding()]
 param(
     [string]  $Token,
@@ -80,6 +85,16 @@ if (-not $PrecheckOnly -and -not $Token) {
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+# Windows PowerShell 5.1 defaults SecurityProtocol to Ssl3/Tls - GitHub
+# and most modern endpoints require TLS 1.2+. PowerShell 7 is already
+# fine, but setting it unconditionally is harmless.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+    # Some .NET profiles may not expose Tls12; Invoke-RestMethod will
+    # surface a clearer error below.
+}
 
 # ------------------------------------------------------------------------
 # Sanity: elevated?
@@ -158,11 +173,11 @@ function Invoke-CmtracePrecheck {
     # combined profile, but EKU-filtered lookups still have to find it).
     $clientCert = Get-CmtraceCert -EkuOid $EkuClientAuth
     if (-not $clientCert) {
-        throw "Client-auth cert (EKU $EkuClientAuth) not found in LocalMachine\My. If you expect a combined profile, it should carry both EKUs — check the 'Gell - SCEP Cert' profile's Extended Key Usage list."
+        throw "Client-auth cert (EKU $EkuClientAuth) not found in LocalMachine\My. If you expect a combined profile, it should carry both EKUs - check the 'Gell - SCEP Cert' profile's Extended Key Usage list."
     }
     Write-Host ("  Client-auth cert    : OK  ({0}, exp {1:yyyy-MM-dd})" -f $clientCert.Thumbprint, $clientCert.NotAfter) -ForegroundColor Green
 
-    # Chain build — implicit trust-anchor check (means the 'Gell - Root
+    # Chain build - implicit trust-anchor check (means the 'Gell - Root
     # Trusted Cert' config actually landed in LocalMachine\Root).
     $chain = Test-CertChain -Cert $clientCert
     if (-not $chain.Ok) {
@@ -170,7 +185,7 @@ function Invoke-CmtracePrecheck {
     }
     Write-Host "  Cert chain builds   : OK  ($($chain.Chain))" -ForegroundColor Green
 
-    # SAN URI — api-server's identity parser reads device://<tenant>/<aad-device-id>.
+    # SAN URI - api-server's identity parser reads device://<tenant>/<aad-device-id>.
     $uris = @(Get-SanUris -Cert $clientCert)
     $deviceUris = @($uris | Where-Object { $_ -match '^device://[^/]+/[^/]+$' })
     if ($deviceUris.Count -eq 0) {
@@ -210,7 +225,7 @@ if (-not (Test-Path -LiteralPath $InstallDir)) {
 Push-Location $InstallDir
 
 if (Test-Path -LiteralPath (Join-Path $InstallDir 'config.cmd')) {
-    Write-Host "Runner already extracted at $InstallDir — skipping download." -ForegroundColor DarkGray
+    Write-Host "Runner already extracted at $InstallDir - skipping download." -ForegroundColor DarkGray
 } else {
     Write-Host 'Resolving latest actions/runner release ...' -ForegroundColor Cyan
     $release = Invoke-RestMethod 'https://api.github.com/repos/actions/runner/releases/latest' `
@@ -228,7 +243,7 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir 'config.cmd')) {
 # 4) Configure runner
 # ------------------------------------------------------------------------
 if (Test-Path -LiteralPath (Join-Path $InstallDir '.runner')) {
-    Write-Host 'Runner already configured — skipping config.cmd.' -ForegroundColor DarkGray
+    Write-Host 'Runner already configured - skipping config.cmd.' -ForegroundColor DarkGray
 } else {
     Write-Host "Registering runner '$RunnerName' against $Repo ..." -ForegroundColor Cyan
     & .\config.cmd --unattended `
@@ -284,7 +299,7 @@ if ($signCert) {
                     Write-Warning "CNG key file not found for thumbprint $($signCert.Thumbprint). Grant manually via certlm.msc."
                 }
             } else {
-                Write-Warning 'Legacy CAPI key detected — use certlm.msc > Manage Private Keys to grant NETWORK SERVICE read.'
+                Write-Warning 'Legacy CAPI key detected - use certlm.msc > Manage Private Keys to grant NETWORK SERVICE read.'
             }
         }
     } catch {
@@ -294,4 +309,4 @@ if ($signCert) {
 
 Write-Host ''
 Write-Host 'Runner install complete.' -ForegroundColor Green
-Write-Host "Confirm at $Repo/settings/actions/runners — '$RunnerName' should show Idle with labels [$Labels]."
+Write-Host "Confirm at $Repo/settings/actions/runners - '$RunnerName' should show Idle with labels [$Labels]."

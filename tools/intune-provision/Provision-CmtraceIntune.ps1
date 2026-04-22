@@ -27,7 +27,7 @@
 
         4. Prints a summary + a reminder to confirm the SAN URI on the
            SCEP profile (required by the api-server's mTLS identity
-           parser — path B asks you to add this in the portal once).
+           parser - path B asks you to add this in the portal once).
 
     Idempotent: safe to rerun.
 
@@ -51,7 +51,7 @@
 .EXAMPLE
     pwsh ./tools/intune-provision/Provision-CmtraceIntune.ps1
 
-    Uses all defaults — expects 'Gell - SCEP Cert' and
+    Uses all defaults - expects 'Gell - SCEP Cert' and
     'Gell - Root Trusted Cert' to already exist in the tenant.
 
 .EXAMPLE
@@ -129,7 +129,7 @@ function Get-OrCreateSecurityGroup {
                        -MailEnabled:$false `
                        -MailNickname ($DisplayName -replace '[^a-zA-Z0-9]', '') `
                        -SecurityEnabled:$true `
-                       -Description "cmtraceopen Intune provisioning — $DisplayName"
+                       -Description "cmtraceopen Intune provisioning - $DisplayName"
 }
 
 function Get-DeviceConfigByName {
@@ -212,7 +212,7 @@ Write-Host 'REMINDER: Confirm the SCEP profile has a URI SAN before relying on m
 Write-Host "  Intune portal > Devices > Configuration > '$SharedCertProfileName' >" -ForegroundColor Yellow
 Write-Host '  Subject alternative name > Attribute=URI, Value:' -ForegroundColor Yellow
 Write-Host "    device://$($ctx.TenantId)/{{AAD_Device_ID}}" -ForegroundColor Yellow
-Write-Host '  (Intune rejects {{TenantId}} as a variable — hardcode the tenant GUID; {{AAD_Device_ID}} is the only template.)' -ForegroundColor DarkGray
+Write-Host '  (Intune rejects {{TenantId}} as a variable - hardcode the tenant GUID; {{AAD_Device_ID}} is the only template.)' -ForegroundColor DarkGray
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Yellow
 Write-Host "  1. Entra-join + Intune-enroll your Windows box."
