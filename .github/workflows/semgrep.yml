@@ -1,0 +1,69 @@
+name: "cmtraceopen-web: Semgrep"
+
+# Static analysis via Semgrep — replaces the GitHub Code Scanning slot
+# (CodeQL needs GitHub Advanced Security on private repos; Semgrep is free).
+#
+# Coverage:
+#   - Rust + JavaScript/TypeScript (cross-language: untrusted-input flow,
+#     hardcoded secrets, dangerous regex, command injection, etc.)
+#   - OWASP top 10 + CWE top 25 + framework-specific (axum, react, tokio)
+#   - Secrets detection (private keys, API tokens accidentally committed)
+#
+# The job fails on any finding at severity ERROR. Lower severities (WARNING /
+# INFO) surface as PR comments via Semgrep's GitHub annotations but do not
+# block merge — operator discretion.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Mon 13:30 UTC — between cargo-audit (13:00) and CodeQL's
+    # canonical 14:00 slot. Rotates load across the morning so cron jams
+    # don't drop runs.
+    - cron: "30 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # PR annotations need write access to the Checks API.
+  checks: write
+  pull-requests: write
+
+jobs:
+  semgrep:
+    name: Semgrep scan
+    runs-on: ubuntu-latest
+    # Skip on Dependabot PRs (it pins all deps; the `auto` ruleset would
+    # spuriously flag transitive vulns we already track via cargo-audit).
+    if: (github.actor != 'dependabot[bot]')
+    container:
+      # Pinned Semgrep release — bump via Dependabot once the docker
+      # ecosystem entry in .github/dependabot.yml picks up new tags.
+      image: semgrep/semgrep:1.97.0
+    steps:
+      # `submodules: true` because Rust crates path-dep on
+      # ./cmtraceopen/crates/cmtraceopen-parser; without the submodule
+      # Semgrep flags missing-import false positives across the workspace.
+      # Matches ci.yml + audit.yml for consistency.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      - name: Run Semgrep
+        # `semgrep ci` auto-detects the rule set. Without SEMGREP_APP_TOKEN
+        # it falls back to the public `auto` config which pulls:
+        #   - p/security-audit  (OWASP + CWE coverage)
+        #   - p/secrets         (committed key / token detection)
+        #   - language-specific packs (rust, javascript, typescript)
+        # `--error` makes the CLI exit non-zero on any ERROR-level finding,
+        # which fails the job and (combined with the ruleset's
+        # required-status-checks) blocks merge to main.
+        run: semgrep ci --error
+        env:
+          # Annotate the PR with inline findings via the Checks API. No
+          # SARIF upload (would need GitHub Advanced Security on private
+          # repos — same gate that ruled out CodeQL).
+          SEMGREP_GHA_NO_SARIF: "1"
