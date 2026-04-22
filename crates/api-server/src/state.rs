@@ -175,6 +175,15 @@ impl RateLimiter {
     }
 
     /// Number of live keys in the map. Useful for logging + metrics.
+    ///
+    /// Clippy's `len-without-is-empty` lint asks for an `is_empty`
+    /// companion because a public `len` traditionally implies a
+    /// collection-like API. `RateLimiter` is intentionally not a
+    /// collection in that sense (the key set is an internal
+    /// implementation detail that callers shouldn't iterate); silencing
+    /// the lint is the right call rather than exposing emptiness as
+    /// part of the API surface.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.windows.len()
     }
@@ -543,6 +552,12 @@ impl AppState {
     /// CRL cache. Kept as a separate constructor to avoid disturbing
     /// existing test call sites that already pass through
     /// [`AppState::with_cors`] / [`AppState::new`].
+    ///
+    /// Eight positional args is one over clippy's `too-many-arguments`
+    /// lint threshold. Refactoring to a builder would touch every call
+    /// site (production `main.rs` + every integration test) for a
+    /// constructor that only `main.rs` actually uses; silencing the
+    /// lint locally is the lower-cost choice.
     #[cfg(feature = "crl")]
     #[allow(clippy::too_many_arguments)]
     pub fn with_cors_and_crl(
