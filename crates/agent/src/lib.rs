@@ -20,6 +20,9 @@
 pub mod collectors;
 pub mod config;
 pub mod queue;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod service;
 pub mod tls;
 pub mod uploader;
 

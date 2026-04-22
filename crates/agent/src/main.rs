@@ -2,27 +2,27 @@
 //
 // Wave 2 M1 shape: runs as a foreground daemon (or a `--oneshot` mode
 // for testing) that collects evidence, enqueues it, and drains the
-// queue to the api-server. The Windows-service registration is still a
-// TODO — see the block comment in `run`.
+// queue to the api-server. On Windows the binary also registers as a
+// proper SCM service via `crates/agent/src/service.rs`; when invoked
+// from a console it falls through to CLI/daemon mode automatically.
 //
 // Planned follow-up work:
 //
-//   1. **TODO (Wave 2 M2):** Windows service registration via
-//      `windows_service::service_dispatcher::start`. The service should
-//      report status back to the SCM (StartPending → Running →
-//      StopPending → Stopped) and hook SERVICE_CONTROL_STOP into a
-//      graceful `CancellationToken`. For now the binary is a foreground
-//      daemon — `sc.exe create` + `sc.exe start` works for hand-testing.
-//   2. mTLS client cert loading from `Cert:\LocalMachine\My` (or a
+//   1. mTLS client cert loading from `Cert:\LocalMachine\My` (or a
 //      provisioned PFX under `%ProgramData%\CMTraceOpen\Agent`). Until
 //      that lands, identity comes from the `X-Device-Id` header via the
 //      `CMTRACE_DEVICE_ID` config knob.
-//   3. Collection scheduler (cron-like from `config.evidence_schedule`).
+//   2. Collection scheduler (cron-like from `config.evidence_schedule`).
 //      MVP loop runs on a simple `tokio::time::interval` and the
 //      `--oneshot` flag skips the loop entirely.
-//   4. HKLM registry overrides + ADMX policy ingestion.
+//   3. HKLM registry overrides + ADMX policy ingestion.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid`: the Windows service module
+// (`crates/agent/src/service.rs`) expands the `define_windows_service!`
+// macro which contains an `extern "system"` FFI trampoline. That module
+// carries its own `#[allow(unsafe_code)]`; the rest of the crate still
+// has unsafe forbidden via `deny`.
+#![deny(unsafe_code)]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -56,6 +56,16 @@ const QUEUE_FAIL_BACKOFF: Duration = Duration::from_secs(300);
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // On Windows: try to connect to the SCM first. If we are running as a
+    // service the dispatcher takes over and this call never returns until the
+    // service stops. If we are running from a console
+    // (ERROR_FAILED_SERVICE_CONTROLLER_CONNECT), it returns `None` and we fall
+    // through to CLI mode below.
+    #[cfg(windows)]
+    if let Some(exit_code) = cmtraceopen_agent::service::try_run_as_service() {
+        return exit_code;
+    }
+
     // Minimal arg parse — one flag, no need for a full arg crate.
     let oneshot = std::env::args().any(|a| a == "--oneshot");
 
