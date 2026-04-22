@@ -13,11 +13,11 @@ production.
 |---|---|
 | **mTLS cert path** | Ingest with device leaf cert uses cert-derived identity (SAN URI parsed → `device_id`) |
 | **mTLS extractor rejection** (`require_on_ingest=false`) | Ingest without cert + without `X-Device-Id` header → 401 from the application-layer `DeviceIdentity` extractor |
-| **mTLS handshake rejection** (`require_on_ingest=true`) | A bare TLS client without a client cert fails at the rustls handshake — the application is never reached. Asserted in `wave4_mtls_handshake_rejects_unauthenticated_client`. |
+| **mTLS handshake rejection** (`require_on_ingest=true`) | A bare TLS client without a client cert is blocked: either the rustls handshake itself rejects (connect() fails) or — due to TLS 1.3 post-handshake cert verification timing — the subsequent HTTP request returns 401 from the `DeviceIdentity` extractor. Both outcomes prevent ingest. Asserted in `wave4_mtls_handshake_rejects_unauthenticated_client`. |
 | **JWT validation** | Query routes require a valid Entra RS256 bearer token |
 | **JWT rejection** | Query routes without a bearer token → 401 |
 | **RBAC happy-path** | Token carrying `scp=CmtraceOpen.Query` gains access to device/session/entries |
-| **RBAC negative-path** | Token without `CmtraceOpen.Query` (valid signature + audience but missing scope) → 403 from query routes. Asserted in `wave4_query_rejects_token_without_query_scope`. |
+| **RBAC negative-path** | Token without `CmtraceOpen.Query` (valid signature + audience but missing scope) → **401** (`InsufficientScope`) from query routes. Re-authentication with the correct scope is required; this is distinct from 403 (`ForbiddenRole`) which fires when a principal *has* a valid role but accesses a route that requires a higher role. Asserted in `wave4_query_rejects_token_without_query_scope`. |
 | **Ingest pipeline** | Full init → chunk → finalize flow with an evidence-zip payload |
 | **Parse worker** | Background parse flips `parse_state` to `ok` and populates entries |
 | **Query layer** | Device appears in registry; session tied to that device; entries with correct severity distribution |
