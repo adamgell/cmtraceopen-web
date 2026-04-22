@@ -453,7 +453,7 @@ function ConfirmModal({
               fontSize: 12,
             }}
           >
-            POST /v1/admin/devices/{truncateDeviceId(device.deviceId)}/disable
+            {`POST /v1/admin/devices/${truncateDeviceId(device.deviceId)}/disable`}
           </code>{" "}
           using your operator bearer token.
         </p>
