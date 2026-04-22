@@ -58,13 +58,24 @@
     client-auth certs that we must ignore. Default matches the Gell lab
     Cloud PKI issuing CA; override for other deployments.
 
-.EXAMPLE
-    # Precheck only - no token needed, no install performed.
-    .\Install-CmtraceRunner.ps1 -PrecheckOnly
+.PARAMETER ServiceAccount
+    Local Windows account the runner service runs as. Must be a real
+    account with a profile - NOT NT AUTHORITY\NETWORK SERVICE (see
+    below). Default: cmtraceopen-runner, a local account the script
+    creates on first run with a randomly generated password.
 
-.EXAMPLE
-    # Full install once the precheck passes.
-    .\Install-CmtraceRunner.ps1 -Token 'AAA...XYZ'
+    Why not NETWORK SERVICE? It has no USERPROFILE / HOME, so git can't
+    find .gitconfig / credential helpers / SSH known_hosts, and
+    Intune-style credential-helper prompts fail in non-interactive
+    contexts. A dedicated local account gets a real profile and "just
+    works" for git + submodules + signtool.
+
+.PARAMETER ServicePassword
+    SecureString password for the service account. If omitted and the
+    account doesn't exist yet, a random 24-char password is generated.
+    You don't normally need to reuse it - once config.cmd --runasservice
+    has registered the service, the password lives in the LSA secret
+    store and isn't referenced again.
 
 .NOTES
     Does NOT do Entra join or Intune enrollment - those are portal /
@@ -84,7 +95,9 @@ param(
     [string]  $RunnerName = $env:COMPUTERNAME,
     [switch]  $PrecheckOnly,
     [switch]  $SkipCertCheck,
-    [string]  $IssuerPattern = 'issuing\.gell\.internal\.cdw\.lab'
+    [string]  $IssuerPattern = 'issuing\.gell\.internal\.cdw\.lab',
+    [string]  $ServiceAccount = 'cmtraceopen-runner',
+    [securestring] $ServicePassword
 )
 
 if (-not $PrecheckOnly -and -not $Token) {
@@ -111,6 +124,82 @@ $currentPrincipal = New-Object System.Security.Principal.WindowsPrincipal(
     [System.Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'This script must be run in an elevated PowerShell (Run as Administrator).'
+}
+
+# ------------------------------------------------------------------------
+# Local service account helpers
+# ------------------------------------------------------------------------
+function New-RandomPassword {
+    param([int] $Length = 24)
+    # Mix of upper/lower/digit/symbol, length 24 -- comfortably meets any
+    # local password policy without needing runtime tuning.
+    $upper = [char[]](65..90)
+    $lower = [char[]](97..122)
+    $digit = [char[]](48..57)
+    $sym   = [char[]]'!@#$%^&*()-_=+[]{}'
+    $all   = $upper + $lower + $digit + $sym
+    $rng   = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $bytes = New-Object byte[] $Length
+    $rng.GetBytes($bytes)
+    # Require at least one of each class to satisfy complexity policies.
+    $chars = @(
+        $upper[$bytes[0] % $upper.Length],
+        $lower[$bytes[1] % $lower.Length],
+        $digit[$bytes[2] % $digit.Length],
+        $sym[  $bytes[3] % $sym.Length]
+    )
+    for ($i = 4; $i -lt $Length; $i++) {
+        $chars += $all[$bytes[$i] % $all.Length]
+    }
+    ($chars | Sort-Object { Get-Random }) -join ''
+}
+
+function Initialize-CmtraceServiceAccount {
+    param(
+        [Parameter(Mandatory)] [string] $AccountName,
+        [securestring] $Password
+    )
+    $existing = Get-LocalUser -Name $AccountName -ErrorAction SilentlyContinue
+    if ($existing) {
+        Write-Host "Service account '$AccountName' exists; reusing." -ForegroundColor DarkGray
+        # We don't know the existing password. If the caller didn't pass
+        # one either, they'll need to rerun with -ServicePassword OR
+        # reset the password here. For idempotency we reset to a new
+        # random value so the install always succeeds.
+        if (-not $Password) {
+            $pt  = New-RandomPassword
+            $Password = ConvertTo-SecureString -String $pt -AsPlainText -Force
+            Set-LocalUser -Name $AccountName -Password $Password
+            Write-Host "  Password rotated (ephemeral -- used only for service install)." -ForegroundColor DarkGray
+        }
+    } else {
+        if (-not $Password) {
+            $pt = New-RandomPassword
+            $Password = ConvertTo-SecureString -String $pt -AsPlainText -Force
+        }
+        Write-Host "Creating local account '$AccountName' ..." -ForegroundColor Green
+        New-LocalUser -Name $AccountName `
+                      -Password $Password `
+                      -FullName 'CMTraceOpen GitHub Runner' `
+                      -Description 'Service account for the cmtraceopen-web self-hosted GitHub Actions runner.' `
+                      -PasswordNeverExpires `
+                      -AccountNeverExpires `
+                      -UserMayNotChangePassword | Out-Null
+    }
+    # Ensure the account is a member of the built-in Users group so it
+    # has a profile directory and basic read access to its own files.
+    # Also add to Administrators? No -- signtool + code-signing cert
+    # access only needs ACLs on the specific private key, not admin.
+    try {
+        Add-LocalGroupMember -Group 'Users' -Member $AccountName -ErrorAction Stop
+    } catch [Microsoft.PowerShell.Commands.MemberExistsException] {
+        # already a member -- ok
+    } catch {
+        # On domain-joined boxes Add-LocalGroupMember can throw NotFound
+        # if the group name is localized. Best-effort; carry on.
+        Write-Warning "Could not add $AccountName to Users group: $($_.Exception.Message)"
+    }
+    return $Password
 }
 
 # ------------------------------------------------------------------------
@@ -289,9 +378,14 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir 'config.cmd')) {
 # ------------------------------------------------------------------------
 if (Test-Path -LiteralPath (Join-Path $InstallDir '.runner')) {
     Write-Host 'Runner already configured - skipping config.cmd.' -ForegroundColor DarkGray
-    Write-Host '  (If the previous config was done without --runasservice and the' -ForegroundColor DarkGray
-    Write-Host '   service wont start, run: .\config.cmd remove  then rerun this script.)' -ForegroundColor DarkGray
+    Write-Host '  (To reconfigure: .\config.cmd remove  then rerun this script.)' -ForegroundColor DarkGray
 } else {
+    Write-Host "Ensuring local service account '$ServiceAccount' exists ..." -ForegroundColor Cyan
+    $ServicePassword = Initialize-CmtraceServiceAccount -AccountName $ServiceAccount -Password $ServicePassword
+    $ptPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ServicePassword)
+    )
+
     Write-Host "Registering runner '$RunnerName' against $Repo ..." -ForegroundColor Cyan
     & .\config.cmd --unattended `
         --url $Repo `
@@ -300,8 +394,12 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir '.runner')) {
         --labels $Labels `
         --replace `
         --runasservice `
-        --windowslogonaccount 'NT AUTHORITY\NETWORK SERVICE'
-    if ($LASTEXITCODE -ne 0) { throw "config.cmd failed with exit code $LASTEXITCODE." }
+        --windowslogonaccount ".\$ServiceAccount" `
+        --windowslogonpassword $ptPassword
+    $cfgExit = $LASTEXITCODE
+    # Wipe the plaintext password from memory ASAP regardless of outcome.
+    $ptPassword = $null
+    if ($cfgExit -ne 0) { throw "config.cmd failed with exit code $cfgExit." }
 }
 
 # ------------------------------------------------------------------------
@@ -328,10 +426,11 @@ if ($svc.Status -ne 'Running') {
 Pop-Location
 
 # ------------------------------------------------------------------------
-# 6) Grant NETWORK SERVICE read on the code-signing cert's private key
+# 6) Grant the service account read on the code-signing cert's private key
 # ------------------------------------------------------------------------
 if ($signCert) {
-    Write-Host 'Granting NETWORK SERVICE read access to the code-signing private key ...' -ForegroundColor Cyan
+    $aclPrincipal = ".\$ServiceAccount"
+    Write-Host "Granting $aclPrincipal read access to the code-signing private key ..." -ForegroundColor Cyan
     try {
         $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($signCert)
         if ($null -eq $rsa) {
@@ -342,20 +441,20 @@ if ($signCert) {
                 $keyName = $rsa.Key.UniqueName
                 $keyPath = Join-Path $env:ProgramData 'Microsoft\Crypto\Keys' $keyName
                 if (-not (Test-Path -LiteralPath $keyPath)) {
-                    $keyPath = Join-Path $env:ProgramData "Microsoft\Crypto\SystemKeys" $keyName
+                    $keyPath = Join-Path $env:ProgramData 'Microsoft\Crypto\SystemKeys' $keyName
                 }
                 if (Test-Path -LiteralPath $keyPath) {
                     $acl = Get-Acl -Path $keyPath
                     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                        'NT AUTHORITY\NETWORK SERVICE', 'Read', 'Allow')
+                        $aclPrincipal, 'Read', 'Allow')
                     $acl.AddAccessRule($rule)
                     Set-Acl -Path $keyPath -AclObject $acl
-                    Write-Host "  Granted NETWORK SERVICE read on $keyPath." -ForegroundColor Green
+                    Write-Host "  Granted $aclPrincipal read on $keyPath." -ForegroundColor Green
                 } else {
                     Write-Warning "CNG key file not found for thumbprint $($signCert.Thumbprint). Grant manually via certlm.msc."
                 }
             } else {
-                Write-Warning 'Legacy CAPI key detected - use certlm.msc > Manage Private Keys to grant NETWORK SERVICE read.'
+                Write-Warning 'Legacy CAPI key detected - use certlm.msc > Manage Private Keys to grant the service account read access.'
             }
         }
     } catch {
