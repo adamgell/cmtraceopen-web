@@ -80,7 +80,7 @@ name = "redact-preview"
 path = "src/main.rs"
 
 [dependencies]
-cmtraceopen_agent = { path = "AGENT_CRATE_PATH", package = "agent" }
+agent = { path = "AGENT_CRATE_PATH" }
 TOML
 # Substitute the real path (sed avoids issues with special chars in the path).
 sed -i "s|AGENT_CRATE_PATH|${AGENT_CRATE}|g" "${WORK_DIR}/Cargo.toml"
@@ -92,6 +92,7 @@ cat >"${WORK_DIR}/src/main.rs" <<'RUST'
 //! the result to stdout. Exit code 0 means success.
 
 use std::io::{self, Read};
+// The lib crate name is `cmtraceopen_agent` (see [lib] section in agent/Cargo.toml).
 use cmtraceopen_agent::config::AgentConfig;
 use cmtraceopen_agent::redact::Redactor;
 

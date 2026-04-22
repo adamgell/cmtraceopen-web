@@ -75,7 +75,7 @@ pub fn default_rules() -> Vec<RedactionRule> {
         },
         RedactionRule {
             name: "email".into(),
-            regex: r"\b[\w._%+\-]+@[\w.\-]+\.[a-z]{2,}\b".into(),
+            regex: r"\b[\w._%+\-]+@[\w.\-]+\.[a-zA-Z]{2,}\b".into(),
             replacement: "<EMAIL>".into(),
         },
         RedactionRule {

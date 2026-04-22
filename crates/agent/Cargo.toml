@@ -98,9 +98,10 @@ windows-service = "0.8"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_EventLog", "Win32_System_SystemInformation"] }
 
 [features]
-# Enable the agent-side redaction layer and its integration tests.
-# Without this feature the redaction config types are still present (so TOML
-# round-trips work), but the Redactor regex engine is always compiled in as
-# regex is a hard dependency. The feature flag exists so the integration test
-# suite can be clearly opted-in via `cargo test --features redaction`.
+# The `redaction` feature gates the integration test suite in
+# `tests/redact_integration.rs`. The `regex` crate is a hard dependency
+# (always compiled) because redaction is on by default and the config
+# structs must deserialise regardless of feature flags. The flag exists so
+# CI can explicitly opt-in to the full integration test run via
+# `cargo test --features redaction`.
 redaction = []

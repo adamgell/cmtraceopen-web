@@ -74,12 +74,9 @@ pub async fn build_components(
         .unwrap_or_else(|| PathBuf::from("./work"));
     tokio::fs::create_dir_all(&work_root).await?;
 
-    // Build the redactor; a misconfigured regex is a fatal startup error so
-    // the operator is alerted immediately rather than silently shipping PII.
-    let redactor = Redactor::from_config(config).unwrap_or_else(|e| {
-        warn!(error = %e, "redaction rule failed to compile; falling back to no-op");
-        Redactor::noop()
-    });
+    // A misconfigured regex is a fatal startup error: silently falling back to
+    // a no-op redactor would leave PII unredacted without any visible signal.
+    let redactor = Redactor::from_config(config)?;
     let orchestrator = EvidenceOrchestrator::new(
         LogsCollector::new(config.log_paths.clone()),
         EventLogsCollector::with_defaults(),

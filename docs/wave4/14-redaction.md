@@ -63,7 +63,7 @@ enabled = true          # set false to forward raw data (e.g. forensic mode)
 # defaults-only behaviour that covers most fleets.
 [[redaction.patterns]]
 name        = "hostname"
-regex       = '\bWIN-[A-Z0-9]{6,}\b'
+regex       = 'WIN-[A-Z0-9]{6,}'
 replacement = "<HOSTNAME>"
 ```
 
@@ -116,7 +116,7 @@ Add a `[[redaction.patterns]]` entry to the agent's `config.toml`:
 ```toml
 [[redaction.patterns]]
 name        = "asset_tag"
-regex       = '\bASSET-\d{6}\b'
+regex       = "ASSET-\\d{6}"
 replacement = "<ASSET_TAG>"
 ```
 
