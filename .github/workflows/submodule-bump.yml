@@ -1,0 +1,145 @@
+name: "Bump cmtraceopen submodule"
+
+on:
+  schedule:
+    - cron: "0 14 * * 2" # weekly, Tuesday 14:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: Bump cmtraceopen submodule
+    runs-on: ubuntu-latest
+    steps:
+      # --- Prerequisite: PAT_TOKEN is required --------------------------------
+      # GITHUB_TOKEN-authored pushes don't trigger workflow runs on the
+      # resulting PR, so CI would never run — half-broken automation is worse
+      # than none. Fail fast here so the gap is visible immediately rather
+      # than silently producing un-CI'd PRs.
+      - name: Verify PAT_TOKEN secret is set
+        env:
+          TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          if [ -z "${TOKEN}" ]; then
+            echo "::error::PAT_TOKEN secret is not set. This workflow requires a PAT \
+with 'repo' scope so the bump PR triggers CI. Add PAT_TOKEN in \
+Settings → Secrets and variables → Actions → New repository secret."
+            exit 1
+          fi
+
+      # --- Checkout ----------------------------------------------------------
+      # Needs submodules so we can record the old SHA and compute the
+      # changelog. PAT_TOKEN is required (verified above) so the resulting
+      # PR triggers CI workflows; GitHub blocks workflow runs from events
+      # authored by the default GITHUB_TOKEN to prevent infinite loops.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+          token: ${{ secrets.PAT_TOKEN }}
+
+      # --- Guard: skip when a bump PR is already waiting for review ----------
+      - name: Check for existing open bump PR
+        id: pr-check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          open=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head chore/bump-cmtraceopen-submodule \
+            --state open \
+            --json number \
+            --jq 'length')
+          echo "open_count=${open}" >> "$GITHUB_OUTPUT"
+          if [ "$open" -gt 0 ]; then
+            echo "::notice::An open bump PR already exists — skipping."
+          fi
+
+      # --- Record old SHA before update -------------------------------------
+      - name: Record current submodule SHA
+        if: steps.pr-check.outputs.open_count == '0'
+        id: old
+        run: |
+          sha=$(git -C cmtraceopen rev-parse HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "short=$(git -C cmtraceopen rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # --- Bump -------------------------------------------------------------
+      # .gitmodules sets branch = main, so --remote always tracks the right
+      # branch even if cmtraceopen's upstream default-branch name ever changes.
+      - name: Update submodule to upstream main
+        if: steps.pr-check.outputs.open_count == '0'
+        run: git submodule update --remote cmtraceopen
+
+      # --- Record new SHA after update -------------------------------------
+      - name: Record updated submodule SHA
+        if: steps.pr-check.outputs.open_count == '0'
+        id: new
+        run: |
+          sha=$(git -C cmtraceopen rev-parse HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "short=$(git -C cmtraceopen rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # --- Report no-op when submodule is already at upstream HEAD ----------
+      - name: Report no-op
+        if: steps.pr-check.outputs.open_count == '0' && steps.old.outputs.sha == steps.new.outputs.sha
+        run: echo "::notice::cmtraceopen is already at upstream main — nothing to bump."
+
+      # --- Build changelog --------------------------------------------------
+      - name: Build changelog
+        if: steps.pr-check.outputs.open_count == '0' && steps.old.outputs.sha != steps.new.outputs.sha
+        id: changelog
+        run: |
+          log=$(git -C cmtraceopen log \
+            "${{ steps.old.outputs.sha }}..${{ steps.new.outputs.sha }}" \
+            --oneline)
+          {
+            echo "log<<EOF"
+            echo "${log}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # --- Stage gitlink and sanity-check -----------------------------------
+      # Explicitly stage only the submodule gitlink so that no unrelated
+      # working-tree changes (e.g. from future steps) can sneak into the PR.
+      # The porcelain check gives a clear error message if the stage is empty.
+      - name: Stage submodule gitlink
+        if: steps.pr-check.outputs.open_count == '0' && steps.old.outputs.sha != steps.new.outputs.sha
+        run: |
+          git add cmtraceopen
+          staged=$(git status --porcelain cmtraceopen)
+          if [ -z "${staged}" ]; then
+            echo "::error::git add cmtraceopen produced no staged change — this is unexpected."
+            exit 1
+          fi
+
+      # --- Open PR ----------------------------------------------------------
+      - name: Open bump PR
+        if: steps.pr-check.outputs.open_count == '0' && steps.old.outputs.sha != steps.new.outputs.sha
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7.0.11
+        with:
+          token: ${{ secrets.PAT_TOKEN }}
+          branch: chore/bump-cmtraceopen-submodule
+          commit-message: "chore: bump cmtraceopen submodule to ${{ steps.new.outputs.short }}"
+          title: "chore: bump cmtraceopen submodule from ${{ steps.old.outputs.short }} to ${{ steps.new.outputs.short }}"
+          add-paths: cmtraceopen
+          body: |
+            Automated weekly submodule bump via the [submodule-bump workflow][wf].
+
+            ## Changelog (`cmtraceopen` · `${{ steps.old.outputs.short }}` → `${{ steps.new.outputs.short }}`)
+
+            ```
+            ${{ steps.changelog.outputs.log }}
+            ```
+
+            ---
+            If the **wasm parser smoke test** fails after this bump, the parser's
+            output format has changed — update the expected counts in
+            `scripts/wasm-smoke.mjs` before merging.
+
+            [wf]: .github/workflows/submodule-bump.yml
+          labels: dependencies
+          assignees: adamgell

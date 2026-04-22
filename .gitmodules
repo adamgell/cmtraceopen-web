@@ -1,3 +1,4 @@
 [submodule "cmtraceopen"]
 	path = cmtraceopen
 	url = https://github.com/adamgell/cmtraceopen.git
+	branch = main
