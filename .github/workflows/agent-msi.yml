@@ -61,6 +61,34 @@ jobs:
 
     steps:
       # -----------------------------------------------------------------------
+      # Diag: prove git is visible to the runner process (actions/checkout
+      # falls back to the REST download path -- which doesn't support
+      # `submodules: true` -- if it can't find git on PATH). Running this
+      # BEFORE checkout means we still see the output even when the
+      # checkout step itself errors out.
+      # -----------------------------------------------------------------------
+      - name: Diag — runner environment
+        shell: pwsh
+        run: |
+          Write-Host '=== whoami ==='
+          whoami
+          Write-Host ''
+          Write-Host '=== PATH (as seen by this step) ==='
+          $env:PATH -split ';' | ForEach-Object { "  $_" }
+          Write-Host ''
+          Write-Host '=== Git lookup ==='
+          $g = Get-Command git -ErrorAction SilentlyContinue
+          if ($g) {
+            "git: $($g.Source)"
+            git --version
+          } else {
+            'git: NOT FOUND on PATH'
+          }
+          Write-Host ''
+          Write-Host '=== Machine PATH (what services inherit) ==='
+          [Environment]::GetEnvironmentVariable('Path','Machine') -split ';' | ForEach-Object { "  $_" }
+
+      # -----------------------------------------------------------------------
       # Checkout
       # submodules: true because the root workspace path-depends on
       # cmtraceopen/crates/cmtraceopen-parser (same rationale as ci.yml).
