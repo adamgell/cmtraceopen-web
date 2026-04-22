@@ -15,6 +15,9 @@ pub mod routes;
 pub mod state;
 pub mod storage;
 
+#[cfg(feature = "mtls")]
+pub mod tls;
+
 use std::sync::Arc;
 
 use axum::http::{

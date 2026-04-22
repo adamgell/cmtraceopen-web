@@ -4,7 +4,7 @@ use std::sync::Arc;
 use api_server::auth::{AuthMode, AuthState, JwksCache};
 use api_server::config::Config;
 use api_server::router;
-use api_server::state::{AppState, CorsConfig};
+use api_server::state::{AppState, CorsConfig, MtlsRuntimeConfig};
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -30,9 +30,25 @@ async fn main() -> ExitCode {
         sqlite_path = %config.sqlite_path,
         cors_origins = ?config.allowed_origins,
         cors_credentials = config.allow_credentials,
+        tls_enabled = config.tls.enabled,
+        mtls_required_on_ingest = config.tls.require_on_ingest,
+        san_uri_scheme = %config.tls.expected_san_uri_scheme,
         version = env!("CARGO_PKG_VERSION"),
         "starting cmtraceopen-api"
     );
+
+    // Warn loudly when CMTRACE_TLS_ENABLED is set but the binary was built
+    // without the `mtls` feature (e.g. on a dev box with no cmake/NASM).
+    // The config layer parses the var unconditionally; only the bring-up
+    // path below decides whether to honor it.
+    #[cfg(not(feature = "mtls"))]
+    if config.tls.enabled {
+        warn!(
+            "CMTRACE_TLS_ENABLED=true but binary was built without the `mtls` \
+             feature; falling back to plaintext HTTP. Rebuild with \
+             `--features mtls` to enable TLS termination."
+        );
+    }
 
     let blobs = match LocalFsBlobStore::new(&config.data_dir).await {
         Ok(b) => Arc::new(b),
@@ -85,15 +101,39 @@ async fn main() -> ExitCode {
         allowed_origins: config.allowed_origins.clone(),
         allow_credentials: config.allow_credentials,
     };
-    let state = AppState::with_cors(
+    let mtls = MtlsRuntimeConfig {
+        require_on_ingest: config.tls.require_on_ingest,
+        expected_san_uri_scheme: config.tls.expected_san_uri_scheme.clone(),
+    };
+    let state = AppState::full(
         meta,
         blobs,
         config.listen_addr.to_string(),
         auth_state,
         cors,
+        mtls,
     );
 
     let app = router(state).layer(TraceLayer::new_for_http());
+
+    // Serve path: TLS-terminating axum-server when `tls_enabled` is true and
+    // the `mtls` Cargo feature is on; plain `axum::serve` otherwise. The
+    // TLS branch is feature-gated so dev boxes without cmake/NASM (and the
+    // aws-lc-sys C build) can still build the binary and run it in plaintext
+    // mode.
+    #[cfg(feature = "mtls")]
+    if config.tls.enabled {
+        match api_server::tls::serve_tls(config.listen_addr, app, &config.tls).await {
+            Ok(()) => {
+                info!("cmtraceopen-api stopped cleanly (tls)");
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                eprintln!("fatal: tls server error: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    }
 
     let listener = match TcpListener::bind(config.listen_addr).await {
         Ok(l) => l,
