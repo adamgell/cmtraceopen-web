@@ -4,19 +4,30 @@ Browser-based log viewer for [CMTrace Open](https://github.com/adamgell/cmtraceo
 
 ## Status
 
-Phase 2 of the platform split: scaffold + Rust→WASM wrapper. No viewer UI yet — the current build is a hello-world page that loads the WASM parser and confirms it's callable from the browser. Real viewer UI lands in a follow-up.
+Walking skeleton is live. `cmtraceopen-web` ships:
+
+- **Viewer** — drag-drop WASM mode and API-fetch mode (device → session → entries) over the api-server.
+- **API server** — Axum + SQLite + local-FS blob store; chunked resumable bundle ingest, parse-on-ingest, entries/files queries.
+- **Agent** (Windows) — collectors for logs / event logs / dsregcmd, queues bundles, ships over HTTPS.
+- **Dev stack** — `docker compose up` brings up api-server + Postgres + Adminer; `dev/bigmac-runner-kit/scripts/redeploy.sh` one-command deploys to the always-on Mac runner.
+
+Wave 2/3 in flight: operator OAuth (Entra), real CORS, mTLS termination, RBAC, CRL polling, Azure Blob, Prometheus metrics, GHCR publish.
+
+See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the full developer workflow.
 
 ## Prerequisites
 
 - Node.js 20+ (developed on Node 24)
 - pnpm 10+ — `corepack enable && corepack prepare pnpm@latest --activate`
-- Rust 1.77+ with the `wasm32-unknown-unknown` target — `rustup target add wasm32-unknown-unknown`
-- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) — `cargo install wasm-pack`
-- A local checkout of [`cmtraceopen`](https://github.com/adamgell/cmtraceopen) as a **sibling directory** (this project depends on `cmtraceopen/crates/cmtraceopen-parser` via a relative path). Both repos live side-by-side, e.g.:
+- Rust toolchain — managed by `rust-toolchain.toml` (currently pins `1.90`; rustup auto-installs on first build). Add the WASM target manually: `rustup target add wasm32-unknown-unknown`.
+- [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) — prefer the prebuilt installer (`cargo install` rebuilds from source and is slow). On Windows: `winget install rustwasm.wasm-pack`. Cross-platform script: `curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh`.
+- The [`cmtraceopen`](https://github.com/adamgell/cmtraceopen) submodule. Cloning fresh:
+  ```bash
+  git clone --recursive https://github.com/adamgell/cmtraceopen-web.git
   ```
-  F:\Repo\
-  ├── cmtraceopen\        (the Tauri desktop app + parser crate)
-  └── cmtraceopen-web\    (this repo)
+  Or in an existing checkout:
+  ```bash
+  git submodule update --init --recursive
   ```
 
 ## Commands
@@ -34,18 +45,20 @@ pnpm typecheck       # tsc --noEmit only
 
 ```
 cmtraceopen-web/
-├── Cargo.toml             Rust workspace (member: cmtrace-wasm)
+├── Cargo.toml             Rust workspace (cmtrace-wasm + crates/api-server + crates/agent + crates/common-wire)
+├── rust-toolchain.toml    pins Rust 1.90 across host + Docker builds
+├── cmtraceopen/           submodule — Tauri app + cmtraceopen-parser crate
 ├── cmtrace-wasm/          cdylib crate, wraps cmtraceopen-parser with wasm-bindgen
+├── crates/
+│   ├── api-server/        Axum HTTP API (ingest, query, status page)
+│   ├── agent/             Windows service: collect → queue → ship
+│   └── common-wire/       shared DTOs (ingest envelopes, query types)
 ├── pkg/                   wasm-pack output (gitignored)
-├── package.json
-├── vite.config.ts
-├── tsconfig.json
-├── index.html
-└── src/
-    ├── main.tsx
-    ├── App.tsx
-    └── lib/
-        └── wasm-bridge.ts  lazy WASM init + typed parse() wrapper
+├── docker-compose.yml     dev stack: api-server + Postgres + Adminer
+├── dev/bigmac-runner-kit/ Ansible kit + redeploy.sh for the BigMac26 runner
+├── tools/                 ship-bundle.sh + query.sh + fixtures/build.sh
+├── docs/                  CONTRIBUTING + provisioning runbooks + release.md
+└── src/                   Vite + React 19 viewer (drag-drop WASM + API-fetch modes)
 ```
 
 ## Dev status pages
