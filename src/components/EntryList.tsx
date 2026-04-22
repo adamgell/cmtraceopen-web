@@ -14,6 +14,16 @@ export interface EntryListProps {
   filters?: Filters;
 }
 
+/**
+ * Match span used by the row renderer to wrap the search needle in a
+ * `<mark>` element. UTF-16 code-unit offsets, half-open `[start, end)` —
+ * matches `String.slice` semantics. Empty list = render as plain text.
+ */
+interface HighlightSpan {
+  start: number;
+  end: number;
+}
+
 const ROW_HEIGHT = 24;
 
 const SEVERITY_COLORS: Record<Severity, { bg: string; fg: string; label: string }> = {
@@ -36,6 +46,14 @@ export function EntryList({ entries, filters }: EntryListProps) {
   const displayEntries = useMemo(
     () => (filters ? applyFilters(entries, filters) : entries),
     [entries, filters],
+  );
+
+  // Lowercased search needle used by the per-row highlighter. We compute
+  // it once here (rather than per-row) so 50k rendered rows don't each
+  // pay for a `.toLowerCase()`. Empty needle disables highlighting.
+  const searchNeedle = useMemo(
+    () => filters?.search.trim().toLowerCase() ?? "",
+    [filters?.search],
   );
 
   const virtualizer = useVirtualizer({
@@ -83,6 +101,7 @@ export function EntryList({ entries, filters }: EntryListProps) {
                 entry={entry}
                 top={vi.start}
                 height={ROW_HEIGHT}
+                searchNeedle={searchNeedle}
               />
             );
           })}
@@ -139,9 +158,14 @@ interface RowProps {
   entry: LogEntry;
   top: number;
   height: number;
+  /**
+   * Pre-lowercased search needle. Empty string means "don't highlight" —
+   * the row renders as a plain text node, no `<mark>` wrapping.
+   */
+  searchNeedle: string;
 }
 
-function Row({ entry, top, height }: RowProps) {
+function Row({ entry, top, height, searchNeedle }: RowProps) {
   const sev = SEVERITY_COLORS[entry.severity];
   const cell: React.CSSProperties = {
     padding: "0 8px",
@@ -190,8 +214,64 @@ function Row({ entry, top, height }: RowProps) {
         style={{ ...cell, borderRight: "none", color: "#222" }}
         title={entry.message}
       >
-        {entry.message}
+        {searchNeedle
+          ? renderHighlighted(entry.message, searchNeedle)
+          : entry.message}
       </div>
     </div>
   );
+}
+
+/**
+ * Render `text` with each occurrence of `needle` (case-insensitive)
+ * wrapped in a `<mark>`. Returns the bare string when there's no match
+ * so the common case stays a single text node — important for the row
+ * virtualizer, which mounts/unmounts hundreds of rows on scroll.
+ *
+ * Allocation strategy: build the match-span list first, then walk it
+ * in one pass. We avoid `String.matchAll` because the needle isn't a
+ * regex and escaping it just to call a regex method is wasteful.
+ */
+function renderHighlighted(text: string, needle: string): React.ReactNode {
+  const spans = collectMatches(text, needle);
+  if (spans.length === 0) return text;
+
+  const out: React.ReactNode[] = [];
+  let cursor = 0;
+  for (let i = 0; i < spans.length; i++) {
+    const { start, end } = spans[i]!;
+    if (start > cursor) {
+      out.push(text.slice(cursor, start));
+    }
+    out.push(
+      <mark
+        key={i}
+        style={{
+          background: "#fde68a",
+          color: "inherit",
+          padding: 0,
+          borderRadius: 2,
+        }}
+      >
+        {text.slice(start, end)}
+      </mark>,
+    );
+    cursor = end;
+  }
+  if (cursor < text.length) out.push(text.slice(cursor));
+  return out;
+}
+
+function collectMatches(text: string, lowerNeedle: string): HighlightSpan[] {
+  if (!lowerNeedle) return [];
+  const haystack = text.toLowerCase();
+  const out: HighlightSpan[] = [];
+  let from = 0;
+  while (from <= haystack.length) {
+    const idx = haystack.indexOf(lowerNeedle, from);
+    if (idx === -1) break;
+    out.push({ start: idx, end: idx + lowerNeedle.length });
+    from = idx + lowerNeedle.length;
+  }
+  return out;
 }
