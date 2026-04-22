@@ -233,7 +233,7 @@ async fn main() -> ExitCode {
         require_on_ingest: config.tls.require_on_ingest,
         expected_san_uri_scheme: config.tls.expected_san_uri_scheme.clone(),
         peer_cert_header: config.tls.peer_cert_header.clone(),
-        trusted_proxy_cidr: config.tls.trusted_proxy_cidr.clone(),
+        trusted_proxy_cidr: config.tls.trusted_proxy_cidr,
         trusted_ca_ders,
     };
 
