@@ -1,6 +1,6 @@
 # Wave 4 — Alerting Runbook
 
-> **Audience:** on-call operator. This document covers the five Prometheus
+> **Audience:** on-call operator. This document covers the six Prometheus
 > alerts shipped in `infra/observability/prometheus-rules.yaml` and what to
 > do when each fires.  All alerts deliver notifications to Slack via the
 > Alertmanager configuration in `infra/observability/alertmanager-config.yaml`.
@@ -15,6 +15,7 @@
    - [IngestStalled](#ingeststalled)
    - [ParseWorkerFailing](#parseworkerfailing)
    - [HealthzDown](#healthzdown)
+   - [DbPoolNearExhaustion](#dbpoolnearexhaustion)
    - [DbPoolExhausted](#dbpoolexhausted)
 3. [Alertmanager configuration](#3-alertmanager-configuration)
 4. [Grafana dashboard](#4-grafana-dashboard)
@@ -27,10 +28,11 @@
 | Alert | Severity | Condition | For | Incident playbook |
 |---|---|---|---|---|
 | [BundleIngestFailureRateHigh](#bundleingestfailureratehigh) | 2 (High) | Failure ratio > 5 % | 10 m | [C — Bundle ingest failure rate spike](04-day2-operations.md#c-bundle-ingest-failure-rate-spike) |
-| [IngestStalled](#ingeststalled) | 1 (Critical) | Zero bundles initiated | 30 m | [A — All devices stopped checking in](04-day2-operations.md#a-all-devices-stopped-checking-in) |
+| [IngestStalled](#ingeststalled) | 1 (Critical) | Zero bundles initiated OR metric absent | 30 m | [A — All devices stopped checking in](04-day2-operations.md#a-all-devices-stopped-checking-in) |
 | [ParseWorkerFailing](#parseworkerfailing) | 2 (High) | Failure rate > 0.1 runs/s | 15 m | [C — Bundle ingest failure rate spike](04-day2-operations.md#c-bundle-ingest-failure-rate-spike) |
 | [HealthzDown](#healthzdown) | 1 (Critical) | Scrape target unreachable | 5 m | [D — api-server crashlooping](04-day2-operations.md#d-api-server-crashlooping) |
-| [DbPoolExhausted](#dbpoolexhausted) | 3 (Medium) | Pool utilisation > 90 % | 5 m | [D — api-server crashlooping](04-day2-operations.md#d-api-server-crashlooping) |
+| [DbPoolNearExhaustion](#dbpoolnearexhaustion) | 3 (Medium, leading) | Pool utilisation > 70 % | 5 m | [D — api-server crashlooping](04-day2-operations.md#d-api-server-crashlooping) |
+| [DbPoolExhausted](#dbpoolexhausted) | 2 (High, lagging) | Pool utilisation > 90 % | 5 m | [D — api-server crashlooping](04-day2-operations.md#d-api-server-crashlooping) |
 
 Slack channel: **#cmtrace-alerts**  
 Repeat interval: Sev 1 → 1 h, Sev 2 → 4 h, Sev 3 → 12 h
@@ -86,15 +88,19 @@ or a corrupt/malformed bundle from an agent.
 **Expression:**
 
 ```promql
-rate(cmtrace_ingest_bundles_initiated_total[15m]) == 0
+(rate(cmtrace_ingest_bundles_initiated_total[15m]) == 0)
+or absent(cmtrace_ingest_bundles_initiated_total)
 ```
 
 **For:** 30 minutes
 
 **What it means:**  
-No devices have initiated a new bundle upload in the last 30 minutes. Either
-all agents are offline, or the ingest endpoint (`/v1/ingest/bundles`) is not
-reachable from the agents.
+No devices have initiated a new bundle upload in the last 30 minutes, OR the
+metric is not being exported at all. Either all agents are offline, the
+ingest endpoint (`/v1/ingest/bundles`) is not reachable, or the api-server
+has not been deployed / the scrape target is misconfigured. The `absent()`
+clause catches the "fresh deploy with no devices yet" + "broken scrape"
+cases that the bare `rate(...) == 0` would silently miss.
 
 **Immediate actions:**
 
@@ -198,9 +204,40 @@ OOM-killed, or the network path to port 8080 is broken.
 
 ---
 
+### DbPoolNearExhaustion
+
+**Severity:** 3 (Medium — leading indicator)
+
+**Expression:**
+
+```promql
+(cmtrace_db_connections_in_use / cmtrace_db_pool_max) > 0.7
+```
+
+**For:** 5 minutes
+
+**What it means:**  
+The SQLx database connection pool is over 70 % utilised — *not yet
+exhausted*, but trending toward saturation. This is a deliberate leading
+indicator that gives operators a chance to act (raise `pool_max`,
+investigate slow queries, throttle a noisy client) before
+`DbPoolExhausted` fires and request latency starts climbing.
+
+**Immediate actions:**
+
+1. Check the **DB Pool Utilisation** gauge on the Grafana dashboard.
+2. Check whether the rise correlates with a deploy, a new device wave, or
+   a known noisy query.
+3. If sustained, raise `CMTRACE_DB_POOL_MAX` proactively rather than
+   waiting for the Sev-2 to fire.
+
+**Cross-reference:** [D — api-server crashlooping](04-day2-operations.md#d-api-server-crashlooping)
+
+---
+
 ### DbPoolExhausted
 
-**Severity:** 3 (Medium)
+**Severity:** 2 (High — lagging indicator)
 
 **Expression:**
 
@@ -214,7 +251,9 @@ OOM-killed, or the network path to port 8080 is broken.
 The SQLx database connection pool is over 90 % utilised. New requests that
 need a database connection will queue (or time out if the pool is 100 % busy).
 Left unaddressed this leads to slow query responses and eventually HTTP 500
-errors on ingest and query endpoints.
+errors on ingest and query endpoints. By the time this alert fires, the
+preceding `DbPoolNearExhaustion` Sev-3 should already have flagged the
+trend — if it didn't, treat that as a configuration bug.
 
 **Immediate actions:**
 

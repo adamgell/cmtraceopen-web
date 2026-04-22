@@ -1,3 +1,25 @@
+# =========================================================================
+# AlertManager configuration — TEMPLATE FILE, NOT READY TO LOAD AS-IS
+# =========================================================================
+# This file uses shell-style ${VAR} placeholders for secrets (e.g.
+# ${SLACK_WEBHOOK_URL}). AlertManager does NOT perform environment-variable
+# substitution on its config, so loading this file directly with
+# `--config.file=<this>` will leave the literal string "${SLACK_WEBHOOK_URL}"
+# in the api_url and Slack notifications will fail.
+#
+# Process this template before starting AlertManager:
+#
+#   envsubst < infra/observability/alertmanager-config.yaml \
+#     > /etc/alertmanager/config.yaml
+#   amtool check-config /etc/alertmanager/config.yaml
+#   alertmanager --config.file=/etc/alertmanager/config.yaml
+#
+# Or, when running under the kube-prometheus operator on Kubernetes,
+# reference the secret via the operator's `secret:` syntax instead of
+# baking the URL into this file. See docs/wave4/12-alerting.md §3 for
+# both deployment paths.
+# =========================================================================
+
 global:
   # Resolve an alert as resolved after 5 minutes of no further fires.
   resolve_timeout: 5m
@@ -58,6 +80,15 @@ route:
 inhibit_rules:
   # If the API is completely down (HealthzDown / Sev 1), suppress lower-severity
   # alerts that are almost certainly caused by the same outage.
+  #
+  # ASSUMPTION: every alert emitted by `prometheus-rules.yaml` carries a
+  # `job` label that resolves to "cmtrace-api" (Prometheus attaches this
+  # automatically from the scrape config — see
+  # docs/wave4/12-alerting.md §3 for the verification steps with `amtool`).
+  # If any future alert is added that does NOT carry the job label, this
+  # inhibit rule will silently fail to suppress it; verify with:
+  #   amtool config routes test --config.file=/etc/alertmanager/config.yaml \
+  #     alertname=BundleIngestFailureRateHigh job=cmtrace-api severity=2
   - source_matchers:
       - alertname = "HealthzDown"
     target_matchers:

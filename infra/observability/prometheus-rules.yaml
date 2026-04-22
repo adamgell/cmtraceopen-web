@@ -53,18 +53,28 @@ groups:
 
       # ── Sev 1 ─────────────────────────────────────────────────────────────
       # No bundles initiated for 30 minutes — ingest pipeline stalled.
+      #
+      # The `absent()` clause catches the case where the metric is not
+      # exported at all (fresh deploy with no devices yet, broken scrape
+      # target, relabel-drop, etc.). Without it, `rate(...) == 0` returns
+      # an empty vector when the series is missing and the alert silently
+      # fails to fire.
       - alert: IngestStalled
-        expr: rate(cmtrace_ingest_bundles_initiated_total[15m]) == 0
+        expr: >
+          (rate(cmtrace_ingest_bundles_initiated_total[15m]) == 0)
+          or absent(cmtrace_ingest_bundles_initiated_total)
         for: 30m
         labels:
           severity: "1"
           team: platform
+          job: cmtrace-api
         annotations:
           summary: "No bundle ingest activity for 30 minutes"
           description: >
             cmtrace_ingest_bundles_initiated_total has not incremented for at
-            least 30 minutes.  Either no agents are running, or the ingest
-            endpoint is unreachable.
+            least 30 minutes (or the metric is absent entirely). Either no
+            agents are running, the ingest endpoint is unreachable, or the
+            api-server has not been deployed.
           runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#ingeststalled"
 
       # ── Sev 2 ─────────────────────────────────────────────────────────────
@@ -99,19 +109,39 @@ groups:
             crashed or the network path to port 8080 is broken.
           runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#healthzdown"
 
-      # ── Sev 3 ─────────────────────────────────────────────────────────────
-      # Database connection pool utilisation above 90 %.
-      - alert: DbPoolExhausted
+      # ── Sev 3 (leading) ────────────────────────────────────────────────────
+      # Pool utilisation above 70 % for 5 minutes — leading indicator that
+      # gives operators a chance to act before connections actually run out.
+      - alert: DbPoolNearExhaustion
         expr: >
-          (cmtrace_db_connections_in_use / cmtrace_db_pool_max) > 0.9
+          (cmtrace_db_connections_in_use / cmtrace_db_pool_max) > 0.7
         for: 5m
         labels:
           severity: "3"
           team: platform
         annotations:
+          summary: "Database connection pool is over 70 % utilised (leading indicator)"
+          description: >
+            DB pool utilisation is {{ $value | humanizePercentage }}
+            (threshold 70 %).  Pool not yet exhausted but trending toward
+            saturation.  Consider increasing pool_max or investigating
+            long-running queries before DbPoolExhausted (Sev 2) fires.
+          runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#dbpoolnearexhaustion"
+
+      # ── Sev 2 (lagging) ────────────────────────────────────────────────────
+      # Pool utilisation above 90 % — pool is effectively exhausted, requests
+      # are queueing, latency is degrading.
+      - alert: DbPoolExhausted
+        expr: >
+          (cmtrace_db_connections_in_use / cmtrace_db_pool_max) > 0.9
+        for: 5m
+        labels:
+          severity: "2"
+          team: platform
+        annotations:
           summary: "Database connection pool is over 90 % utilised"
           description: >
             DB pool utilisation is {{ $value | humanizePercentage }}
-            (threshold 90 %).  Connection waits will begin degrading request
-            latency.  Consider increasing pool_max or reducing query concurrency.
+            (threshold 90 %).  Connection waits are degrading request
+            latency.  Increase pool_max or reduce query concurrency now.
           runbook_url: "https://github.com/adamgell/cmtraceopen-web/blob/main/docs/wave4/12-alerting.md#dbpoolexhausted"
