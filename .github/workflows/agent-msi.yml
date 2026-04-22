@@ -49,6 +49,14 @@ permissions:
 jobs:
   build-sign-publish:
     name: Build, sign, and publish agent MSI
+    # Defense-in-depth against the public-repo + self-hosted-runner attack
+    # surface. Today's triggers (`push: tags: agent-v*` + `workflow_dispatch`)
+    # can't be fired by a fork PR, but this guard keeps the self-hosted step
+    # from ever running against fork-owned refs even if someone adds a
+    # pull_request trigger later. Pair this with the repo-level setting:
+    # Settings > Actions > General > Fork pull request workflows from
+    # outside collaborators => "Require approval for all outside collaborators".
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, windows, cmtrace-build]
 
     steps:

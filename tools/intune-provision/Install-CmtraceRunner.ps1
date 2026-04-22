@@ -304,15 +304,16 @@ $svcName     = "actions.runner.$repoSegment.$RunnerName"
 $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
 if (-not $svc) {
     Write-Host "Creating Windows service '$svcName' ..." -ForegroundColor Cyan
-    $binQuoted = '"' + (Join-Path $InstallDir 'bin\Runner.Listener.exe') + '"'
-    # sc.exe arg syntax: `key= value` (space after =). Run via cmd /c to
-    # survive PowerShell's arg parsing of the `=` literals.
-    $scCmd = "sc.exe create `"$svcName`" binPath= $binQuoted` run start= auto obj= `"NT AUTHORITY\NETWORK SERVICE`""
+    # sc.exe wants binPath= as a single quoted token that includes both
+    # the executable path AND any arguments. Build the full command line
+    # and hand it to cmd.exe so the quoting survives.
+    $runnerExe    = Join-Path $InstallDir 'bin\Runner.Listener.exe'
+    $binPathValue = "$runnerExe run"
+    $scCmd = 'sc.exe create "' + $svcName + '" binPath= "' + $binPathValue + '" start= auto obj= "NT AUTHORITY\NETWORK SERVICE"'
     cmd.exe /c $scCmd | Write-Host
     if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed with exit code $LASTEXITCODE." }
-    # Friendly display name + description (cosmetic).
-    cmd.exe /c "sc.exe config `"$svcName`" DisplayName= `"GitHub Actions Runner ($RunnerName)`"" | Out-Null
-    cmd.exe /c "sc.exe description `"$svcName`" `"cmtraceopen self-hosted GitHub Actions runner`"" | Out-Null
+    cmd.exe /c ('sc.exe config "' + $svcName + '" DisplayName= "GitHub Actions Runner (' + $RunnerName + ')"') | Out-Null
+    cmd.exe /c ('sc.exe description "' + $svcName + '" "cmtraceopen self-hosted GitHub Actions runner"') | Out-Null
     $svc = Get-Service -Name $svcName -ErrorAction Stop
 } else {
     Write-Host "Service '$svcName' already exists." -ForegroundColor DarkGray
