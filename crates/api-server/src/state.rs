@@ -19,7 +19,7 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 #[cfg(feature = "crl")]
 use crate::auth::CrlCache;
-use crate::storage::{BlobStore, MetadataStore};
+use crate::storage::{AuditStore, BlobStore, MetadataStore, NoopAuditStore};
 
 /// Subset of [`crate::config::TlsConfig`] the request-handling layer needs
 /// at runtime: which scheme to expect on the SAN URI and whether ingest
@@ -90,6 +90,10 @@ pub const MAX_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 pub struct AppState {
     pub meta: Arc<dyn MetadataStore>,
     pub blobs: Arc<dyn BlobStore>,
+    /// Append-only audit log for admin/operator actions. The production
+    /// binary wires in an [`AuditSqliteStore`][crate::storage::AuditSqliteStore];
+    /// tests that don't exercise audit use a [`NoopAuditStore`].
+    pub audit: Arc<dyn AuditStore>,
     /// Monotonic start time; used by the status page for uptime math.
     pub started_at: Instant,
     /// Per-route HTTP request count since process start, keyed by the Axum
@@ -196,6 +200,10 @@ impl AppState {
     /// Build the shared state with explicit CORS + mTLS knobs. The full
     /// constructor used by `main.rs`; tests usually go through `new` /
     /// `with_cors` and pick up the default (mTLS off) variant.
+    ///
+    /// Defaults to [`NoopAuditStore`] — production callers that need a real
+    /// audit log should pass an [`AuditSqliteStore`][crate::storage::AuditSqliteStore]
+    /// via the `audit` parameter.
     pub fn full(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
@@ -204,9 +212,24 @@ impl AppState {
         cors: CorsConfig,
         mtls: MtlsRuntimeConfig,
     ) -> Arc<Self> {
+        Self::full_with_audit(meta, blobs, listen_addr, auth, cors, mtls, Arc::new(NoopAuditStore))
+    }
+
+    /// Like [`AppState::full`] but with an explicit [`AuditStore`] backend.
+    /// Used by `main.rs` and audit integration tests to wire in a real store.
+    pub fn full_with_audit(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        auth: AuthState,
+        cors: CorsConfig,
+        mtls: MtlsRuntimeConfig,
+        audit: Arc<dyn AuditStore>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             meta,
             blobs,
+            audit,
             started_at: Instant::now(),
             request_counts: Arc::new(DashMap::new()),
             listen_addr,
@@ -234,9 +257,32 @@ impl AppState {
         mtls: MtlsRuntimeConfig,
         crl_cache: Option<Arc<CrlCache>>,
     ) -> Arc<Self> {
+        Self::with_cors_crl_and_audit(meta, blobs, listen_addr, auth, cors, mtls, crl_cache, Arc::new(NoopAuditStore))
+    }
+
+    /// Full constructor including CRL cache and an explicit [`AuditStore`].
+    /// Used by `main.rs` in production.
+    ///
+    /// Eight positional args is one over clippy's `too-many-arguments`
+    /// threshold. Refactoring to a builder would touch every call site
+    /// for a constructor only `main.rs` actually uses; silencing the
+    /// lint locally is the lower-cost choice.
+    #[cfg(feature = "crl")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_cors_crl_and_audit(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        listen_addr: String,
+        auth: AuthState,
+        cors: CorsConfig,
+        mtls: MtlsRuntimeConfig,
+        crl_cache: Option<Arc<CrlCache>>,
+        audit: Arc<dyn AuditStore>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             meta,
             blobs,
+            audit,
             started_at: Instant::now(),
             request_counts: Arc::new(DashMap::new()),
             listen_addr,

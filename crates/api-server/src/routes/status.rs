@@ -452,6 +452,7 @@ mod tests {
         AppState {
             meta,
             blobs,
+            audit: Arc::new(crate::storage::NoopAuditStore),
             started_at: Instant::now(),
             request_counts: Arc::new(DashMap::new()),
             listen_addr: listen.to_string(),

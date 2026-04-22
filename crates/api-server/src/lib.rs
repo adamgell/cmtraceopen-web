@@ -10,6 +10,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod extract;
+pub mod middleware;
 pub mod pipeline;
 pub mod routes;
 pub mod state;
@@ -24,7 +25,8 @@ use axum::http::{
     header::{AUTHORIZATION, CONTENT_TYPE},
     HeaderName, HeaderValue, Method,
 };
-use axum::{middleware, Router};
+use axum::middleware::from_fn_with_state;
+use axum::Router;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 pub use state::AppState;
@@ -65,7 +67,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(routes::files::router(state.clone()))
         .merge(routes::entries::router(state.clone()))
         .merge(routes::admin::router(state.clone()))
-        .layer(middleware::from_fn_with_state(
+        .layer(from_fn_with_state(
             state,
             routes::status::request_counter_middleware,
         ))

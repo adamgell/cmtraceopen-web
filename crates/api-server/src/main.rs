@@ -108,6 +108,10 @@ async fn main() -> ExitCode {
         }
     };
 
+    // The audit store shares the same SQLite pool as `meta` — calling
+    // `audit_store()` is a cheap Arc clone, not a new connection.
+    let audit = Arc::new(meta.audit_store());
+
     // Build the auth state. In production the JWKS cache is pre-warmed on
     // startup so the first real request doesn't pay for the discovery-URI
     // round-trip; refresh failures here are logged but not fatal (the cache
@@ -210,7 +214,7 @@ async fn main() -> ExitCode {
     };
 
     #[cfg(feature = "crl")]
-    let state = AppState::with_cors_and_crl(
+    let state = AppState::with_cors_crl_and_audit(
         meta,
         blobs,
         config.listen_addr.to_string(),
@@ -218,15 +222,17 @@ async fn main() -> ExitCode {
         cors,
         mtls,
         crl_cache,
+        audit,
     );
     #[cfg(not(feature = "crl"))]
-    let state = AppState::full(
+    let state = AppState::full_with_audit(
         meta,
         blobs,
         config.listen_addr.to_string(),
         auth_state,
         cors,
         mtls,
+        audit,
     );
 
     let app = router(state).layer(TraceLayer::new_for_http());
