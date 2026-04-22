@@ -78,14 +78,14 @@ async fn start_server() -> TestServer {
             .await
             .expect("blob store"),
     );
-    // Keep a typed handle to the SQLite store so the test can query
-    // entries/files directly. The router only needs the trait object.
     let meta = Arc::new(
         SqliteMetadataStore::connect(":memory:")
             .await
             .expect("sqlite"),
     );
-    let state = AppState::new_auth_disabled(meta.clone(), blobs, "127.0.0.1:0".to_string());
+    // Keep a typed handle to the SQLite store so the test can query
+    // entries/files directly. The router only needs the trait object.
+    let state = AppState::new_auth_disabled(meta.clone(), blobs, meta.clone(), "127.0.0.1:0".to_string());
     let app = router(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

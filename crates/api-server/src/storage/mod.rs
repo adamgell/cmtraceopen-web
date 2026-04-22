@@ -531,8 +531,44 @@ pub trait BlobStore: Send + Sync + 'static {
     async fn delete_blob(&self, uri: &str) -> Result<(), StorageError>;
 }
 
-/// Relational metadata operations. Split out so handlers can be unit-tested
-/// against an in-memory SQLite or a future mock without mocking HTTP.
+use common_wire::AgentConfigOverride;
+
+/// Config-override storage operations used by the server-side config push
+/// feature (Wave 4).  Split out as its own trait so it can be layered on
+/// top of any [`MetadataStore`] implementation without widening the base
+/// interface.
+#[async_trait]
+pub trait ConfigStore: Send + Sync + 'static {
+    /// Return the per-device config override for `device_id`, or `None` if no
+    /// override has been set for that device.
+    async fn get_device_config(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<AgentConfigOverride>, StorageError>;
+
+    /// Upsert the per-device config override for `device_id`.
+    async fn set_device_config(
+        &self,
+        device_id: &str,
+        config: &AgentConfigOverride,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+
+    /// Remove any per-device config override for `device_id`.  Returns `Ok`
+    /// even if no row existed.
+    async fn delete_device_config(&self, device_id: &str) -> Result<(), StorageError>;
+
+    /// Return the tenant-wide default config override, or `None` if not set.
+    async fn get_default_config(&self) -> Result<Option<AgentConfigOverride>, StorageError>;
+
+    /// Upsert the tenant-wide default config override.
+    async fn set_default_config(
+        &self,
+        config: &AgentConfigOverride,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError>;
+}
+
 #[async_trait]
 pub trait MetadataStore: Send + Sync + 'static {
     /// Snapshot of the underlying connection pool's health.

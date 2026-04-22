@@ -19,6 +19,7 @@
 
 pub mod collectors;
 pub mod config;
+pub mod config_sync;
 pub mod queue;
 pub mod redact;
 pub mod runtime;

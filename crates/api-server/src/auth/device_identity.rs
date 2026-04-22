@@ -910,7 +910,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let blobs = Arc::new(LocalFsBlobStore::new(tmp.path()).await.unwrap());
         let meta = Arc::new(SqliteMetadataStore::connect(":memory:").await.unwrap());
-        let state = AppState::new_auth_disabled(meta, blobs, "127.0.0.1:0".to_string());
+        let state = AppState::new_auth_disabled(meta.clone(), blobs, meta, "127.0.0.1:0".to_string());
 
         // Forge a request with the X-Device-Id header set.
         let req = axum::http::Request::builder()
@@ -1138,8 +1138,9 @@ mod tests {
             ..Default::default()
         };
         let state = AppState::full(
-            meta,
+            meta.clone(),
             blobs,
+            meta,
             "127.0.0.1:0".to_string(),
             auth,
             crate::state::CorsConfig::default(),

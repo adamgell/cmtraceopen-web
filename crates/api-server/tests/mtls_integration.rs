@@ -151,8 +151,9 @@ async fn start_tls_server(
         ..Default::default()
     };
     let state = AppState::full(
-        meta,
+        meta.clone(),
         blobs,
+        meta,
         "127.0.0.1:0".to_string(),
         auth,
         Default::default(),

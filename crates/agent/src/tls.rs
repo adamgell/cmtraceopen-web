@@ -140,6 +140,28 @@ pub fn build_client_config(opts: &TlsClientOptions) -> Result<ClientConfig, TlsC
     Ok(config)
 }
 
+/// Build a `reqwest::Client` configured with the given TLS options.
+///
+/// The resulting client uses the same rustls `ClientConfig` as the
+/// `Uploader`, so cert validation settings are consistent across all
+/// outbound HTTP calls (config-sync + bundle upload).
+///
+/// Caller must have invoked [`install_default_crypto_provider`] first.
+pub fn build_reqwest_client(opts: TlsClientOptions) -> Result<reqwest::Client, TlsConfigError> {
+    install_default_crypto_provider();
+    let tls_config = build_client_config(&opts)?;
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(tls_config)
+        .build()
+        // reqwest::Error is not easily convertible here; wrap as Io.
+        .map_err(|e| TlsConfigError::Io {
+            path: "<reqwest client>".into(),
+            source: std::io::Error::other(e.to_string()),
+        })?;
+    Ok(client)
+}
+
+
 /// Build the trust anchor set. If a CA bundle is provided we use *only*
 /// those roots; otherwise we load the OS native trust store.
 fn build_root_store(ca_bundle: Option<&Path>) -> Result<RootCertStore, TlsConfigError> {

@@ -21,7 +21,7 @@ use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 #[cfg(feature = "crl")]
 use crate::auth::CrlCache;
 use crate::config::RateLimitConfig;
-use crate::storage::{AuditStore, BlobStore, MetadataStore, NoopAuditStore};
+use crate::storage::{AuditStore, BlobStore, ConfigStore, MetadataStore, NoopAuditStore};
 
 // ---------------------------------------------------------------------------
 // Rate limiting
@@ -371,6 +371,8 @@ pub struct AppState {
     /// binary wires in an [`AuditSqliteStore`][crate::storage::AuditSqliteStore];
     /// tests that don't exercise audit use a [`NoopAuditStore`].
     pub audit: Arc<dyn AuditStore>,
+    /// Config-override store for the server-side config push feature (Wave 4).
+    pub configs: Arc<dyn ConfigStore>,
     /// Monotonic start time; used by the status page for uptime math.
     pub started_at: Instant,
     /// Per-route HTTP request count since process start, keyed by the Axum
@@ -460,16 +462,18 @@ impl AppState {
     pub fn new(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         auth: AuthState,
     ) -> Arc<Self> {
-        Self::with_cors(meta, blobs, listen_addr, auth, CorsConfig::default())
+        Self::with_cors(meta, blobs, configs, listen_addr, auth, CorsConfig::default())
     }
 
     /// Same as [`AppState::new`] but with an explicit CORS config.
     pub fn with_cors(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         auth: AuthState,
         cors: CorsConfig,
@@ -477,6 +481,7 @@ impl AppState {
         Self::full(
             meta,
             blobs,
+            configs,
             listen_addr,
             auth,
             cors,
@@ -499,6 +504,7 @@ impl AppState {
     pub fn full(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         auth: AuthState,
         cors: CorsConfig,
@@ -508,6 +514,7 @@ impl AppState {
         Self::full_with_audit(
             meta,
             blobs,
+            configs,
             listen_addr,
             auth,
             cors,
@@ -523,6 +530,7 @@ impl AppState {
     pub fn full_with_audit(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         auth: AuthState,
         cors: CorsConfig,
@@ -534,6 +542,7 @@ impl AppState {
             meta,
             blobs,
             audit,
+            configs,
             started_at: Instant::now(),
             request_counts: Arc::new(DashMap::new()),
             listen_addr,
@@ -563,6 +572,7 @@ impl AppState {
     pub fn with_cors_and_crl(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         auth: AuthState,
         cors: CorsConfig,
@@ -573,6 +583,7 @@ impl AppState {
         Self::with_cors_crl_and_audit(
             meta,
             blobs,
+            configs,
             listen_addr,
             auth,
             cors,
@@ -595,6 +606,7 @@ impl AppState {
     pub fn with_cors_crl_and_audit(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         auth: AuthState,
         cors: CorsConfig,
@@ -607,6 +619,7 @@ impl AppState {
             meta,
             blobs,
             audit,
+            configs,
             started_at: Instant::now(),
             request_counts: Arc::new(DashMap::new()),
             listen_addr,
@@ -626,6 +639,7 @@ impl AppState {
     pub fn new_auth_disabled(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
     ) -> Arc<Self> {
         let auth = AuthState {
@@ -635,7 +649,7 @@ impl AppState {
                 "http://127.0.0.1:1/unused".to_string(),
             )),
         };
-        Self::new(meta, blobs, listen_addr, auth)
+        Self::new(meta, blobs, configs, listen_addr, auth)
     }
 
     /// Test helper: build state with auth disabled and explicit rate-limit
@@ -670,6 +684,7 @@ impl AppState {
     pub fn new_with_auth(
         meta: Arc<dyn MetadataStore>,
         blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
         listen_addr: String,
         entra: EntraConfig,
         jwks: Arc<JwksCache>,
@@ -679,7 +694,7 @@ impl AppState {
             entra: Some(entra),
             jwks,
         };
-        Self::new(meta, blobs, listen_addr, auth)
+        Self::new(meta, blobs, configs, listen_addr, auth)
     }
 }
 

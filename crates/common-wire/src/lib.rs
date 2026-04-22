@@ -171,6 +171,101 @@ pub mod query {
     }
 }
 
+pub mod config {
+    //! Server-side config push (Wave 4).
+    //!
+    //! [`AgentConfigOverride`] is the subset of agent config fields that are
+    //! safe to override from the server — fields that could brick the agent on
+    //! mis-config (`api_endpoint`, TLS cert paths) are deliberately excluded.
+    //!
+    //! Flow:
+    //!   1. Operator issues `PUT /v1/admin/devices/{device_id}/config` or
+    //!      `PUT /v1/admin/config/default` with a JSON body of this shape.
+    //!   2. Agent fetches `GET /v1/config/{device_id}` at startup, every 6 h,
+    //!      and after each successful upload.
+    //!   3. Agent merges the returned overrides on top of its local config.
+    //!   4. If the agent fails to connect for 24 h after applying an override,
+    //!      it reverts to the last-known-good local config.
+    use serde::{Deserialize, Serialize};
+
+    /// Operator-managed config overrides pushed to a device (or all devices).
+    ///
+    /// All fields are `Option<_>` so a partial override payload only touches
+    /// the keys that are present; missing keys leave the local-config value
+    /// intact.
+    ///
+    /// **Not overridable (safety boundary):** `api_endpoint`, TLS cert/key/CA
+    /// paths — changing those remotely could permanently disconnect the agent.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct AgentConfigOverride {
+        /// `tracing` filter directive, e.g. `"debug"` or `"info"`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub log_level: Option<String>,
+
+        /// HTTP request timeout in seconds (must be ≥ 1).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub request_timeout_secs: Option<u64>,
+
+        /// Cron expression for the evidence collector, e.g. `"0 3 * * *"`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub evidence_schedule: Option<String>,
+
+        /// Maximum bundles the on-disk upload queue will hold (must be ≥ 1).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub queue_max_bundles: Option<usize>,
+
+        /// Log paths the `logs` collector will walk. Replaces the full list
+        /// when set.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub log_paths: Option<Vec<String>>,
+    }
+
+    impl AgentConfigOverride {
+        /// Returns `true` if every field is `None` (i.e. a no-op override).
+        pub fn is_empty(&self) -> bool {
+            self.log_level.is_none()
+                && self.request_timeout_secs.is_none()
+                && self.evidence_schedule.is_none()
+                && self.queue_max_bundles.is_none()
+                && self.log_paths.is_none()
+        }
+
+        /// Validate that overridable numeric fields are within acceptable
+        /// bounds.  Returns `Err` with a human-readable message for the
+        /// first failing field, `Ok(())` if everything looks sane.
+        pub fn validate(&self) -> Result<(), String> {
+            if let Some(t) = self.request_timeout_secs {
+                if t == 0 {
+                    return Err(
+                        "request_timeout_secs must be ≥ 1; zero would immediately time out every request".into(),
+                    );
+                }
+                if t > 3600 {
+                    return Err(format!(
+                        "request_timeout_secs {t} exceeds the safety cap of 3600 s"
+                    ));
+                }
+            }
+            if let Some(q) = self.queue_max_bundles {
+                if q == 0 {
+                    return Err(
+                        "queue_max_bundles must be ≥ 1; zero would discard every bundle immediately".into(),
+                    );
+                }
+                if q > 10_000 {
+                    return Err(format!(
+                        "queue_max_bundles {q} exceeds the safety cap of 10 000"
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+pub use config::AgentConfigOverride;
+
 /// Generic keyset-paginated envelope. `next_cursor` is an opaque, base64 token
 /// that clients pass back verbatim to fetch the next page. `None` means no
 /// more results.
@@ -315,6 +410,68 @@ mod tests {
         let back: ErrorBody = serde_json::from_str(&s).unwrap();
         assert_eq!(back.error, "bad_request");
         assert_eq!(back.message, "missing X-Device-Id header");
+    }
+
+    #[test]
+    fn agent_config_override_camel_case_and_validate() {
+        let over = AgentConfigOverride {
+            log_level: Some("debug".into()),
+            request_timeout_secs: Some(30),
+            evidence_schedule: Some("0 6 * * *".into()),
+            queue_max_bundles: Some(20),
+            log_paths: Some(vec!["C:\\Logs\\**\\*.log".into()]),
+        };
+        let v = serde_json::to_value(&over).unwrap();
+        assert!(v.get("logLevel").is_some(), "camelCase logLevel missing");
+        assert!(v.get("requestTimeoutSecs").is_some());
+        assert!(v.get("evidenceSchedule").is_some());
+        assert!(v.get("queueMaxBundles").is_some());
+        assert!(v.get("logPaths").is_some());
+        // snake_case must not appear
+        assert!(v.get("log_level").is_none());
+
+        let back: AgentConfigOverride = serde_json::from_value(v).unwrap();
+        assert_eq!(back, over);
+        assert!(over.validate().is_ok());
+    }
+
+    #[test]
+    fn agent_config_override_is_empty() {
+        assert!(AgentConfigOverride::default().is_empty());
+        let non_empty = AgentConfigOverride {
+            log_level: Some("info".into()),
+            ..AgentConfigOverride::default()
+        };
+        assert!(!non_empty.is_empty());
+    }
+
+    #[test]
+    fn agent_config_override_validate_rejects_bad_values() {
+        let bad_timeout = AgentConfigOverride {
+            request_timeout_secs: Some(0),
+            ..AgentConfigOverride::default()
+        };
+        assert!(bad_timeout.validate().is_err());
+
+        let bad_queue = AgentConfigOverride {
+            queue_max_bundles: Some(0),
+            ..AgentConfigOverride::default()
+        };
+        assert!(bad_queue.validate().is_err());
+    }
+
+    #[test]
+    fn agent_config_override_skip_none_fields() {
+        // Only set one field; the JSON should only contain that field.
+        let over = AgentConfigOverride {
+            log_level: Some("warn".into()),
+            ..AgentConfigOverride::default()
+        };
+        let v = serde_json::to_value(&over).unwrap();
+        assert!(v.get("logLevel").is_some());
+        // Fields that are None should be omitted from JSON (skip_serializing_if)
+        assert!(v.get("requestTimeoutSecs").is_none());
+        assert!(v.get("queueMaxBundles").is_none());
     }
 
     #[test]

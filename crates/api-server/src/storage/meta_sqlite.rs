@@ -15,8 +15,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::{
-    DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile, NewUpload,
-    PoolStats, SessionRow, StorageError, UploadRow,
+    ConfigStore, DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile,
+    NewUpload, PoolStats, SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the migration directory into the binary. Path is relative to this
@@ -818,7 +818,7 @@ impl MetadataStore for SqliteMetadataStore {
         }
         let rows = q.fetch_all(&self.pool).await?;
 
-        let mut out = Vec::with_capacity(rows.len());
+    let mut out = Vec::with_capacity(rows.len());
         for r in rows {
             out.push(EntryRow {
                 entry_id: r.get::<i64, _>("entry_id"),
@@ -909,6 +909,118 @@ impl MetadataStore for SqliteMetadataStore {
     }
 }
 
+// ----- ConfigStore impl -----
+
+#[async_trait]
+impl ConfigStore for SqliteMetadataStore {
+    async fn get_device_config(
+        &self,
+        device_id: &str,
+    ) -> Result<Option<common_wire::AgentConfigOverride>, StorageError> {
+        let row = sqlx::query(
+            "SELECT config_json FROM device_config_overrides WHERE device_id = ?",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|r| {
+            let json: String = r.get("config_json");
+            serde_json::from_str(&json).map_err(|e| {
+                StorageError::Sqlx(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid config_json for device {device_id}: {e}"),
+                ))))
+            })
+        })
+        .transpose()
+    }
+
+    async fn set_device_config(
+        &self,
+        device_id: &str,
+        config: &common_wire::AgentConfigOverride,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(config).map_err(|e| {
+            StorageError::Sqlx(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to serialize config override: {e}"),
+            ))))
+        })?;
+        sqlx::query(
+            r#"
+            INSERT INTO device_config_overrides (device_id, config_json, updated_utc)
+            VALUES (?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                config_json = excluded.config_json,
+                updated_utc = excluded.updated_utc
+            "#,
+        )
+        .bind(device_id)
+        .bind(&json)
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_device_config(&self, device_id: &str) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM device_config_overrides WHERE device_id = ?")
+            .bind(device_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_default_config(
+        &self,
+    ) -> Result<Option<common_wire::AgentConfigOverride>, StorageError> {
+        let row =
+            sqlx::query("SELECT config_json FROM default_config_override WHERE id = 1")
+                .fetch_optional(&self.pool)
+                .await?;
+
+        row.map(|r| {
+            let json: String = r.get("config_json");
+            serde_json::from_str(&json).map_err(|e| {
+                StorageError::Sqlx(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid default config_json: {e}"),
+                ))))
+            })
+        })
+        .transpose()
+    }
+
+    async fn set_default_config(
+        &self,
+        config: &common_wire::AgentConfigOverride,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(config).map_err(|e| {
+            StorageError::Sqlx(sqlx::Error::Decode(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to serialize default config override: {e}"),
+            ))))
+        })?;
+        sqlx::query(
+            r#"
+            INSERT INTO default_config_override (id, config_json, updated_utc)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                config_json = excluded.config_json,
+                updated_utc = excluded.updated_utc
+            "#,
+        )
+        .bind(&json)
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,5 +1051,68 @@ mod tests {
         assert_eq!(stats.max_size, POOL_MAX_CONNECTIONS);
         assert!(stats.size <= stats.max_size, "size {} > max {}", stats.size, stats.max_size);
         assert!(stats.idle <= stats.size, "idle {} > size {}", stats.idle, stats.size);
+    }
+
+    #[tokio::test]
+    async fn config_store_device_round_trips() {
+        use common_wire::AgentConfigOverride;
+
+        let store = SqliteMetadataStore::connect(":memory:").await.unwrap();
+        let now = Utc::now();
+
+        // No override yet → None
+        let got = store.get_device_config("WIN-A").await.unwrap();
+        assert!(got.is_none());
+
+        let cfg = AgentConfigOverride {
+            log_level: Some("debug".into()),
+            queue_max_bundles: Some(10),
+            ..AgentConfigOverride::default()
+        };
+        store.set_device_config("WIN-A", &cfg, now).await.unwrap();
+
+        let got = store.get_device_config("WIN-A").await.unwrap();
+        assert_eq!(got.as_ref().unwrap().log_level.as_deref(), Some("debug"));
+        assert_eq!(got.as_ref().unwrap().queue_max_bundles, Some(10));
+
+        // Different device → still None
+        assert!(store.get_device_config("WIN-B").await.unwrap().is_none());
+
+        // Delete → None again
+        store.delete_device_config("WIN-A").await.unwrap();
+        assert!(store.get_device_config("WIN-A").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn config_store_default_round_trips() {
+        use common_wire::AgentConfigOverride;
+
+        let store = SqliteMetadataStore::connect(":memory:").await.unwrap();
+        let now = Utc::now();
+
+        // No default yet → None
+        assert!(store.get_default_config().await.unwrap().is_none());
+
+        let cfg = AgentConfigOverride {
+            evidence_schedule: Some("0 2 * * *".into()),
+            ..AgentConfigOverride::default()
+        };
+        store.set_default_config(&cfg, now).await.unwrap();
+
+        let got = store.get_default_config().await.unwrap();
+        assert_eq!(
+            got.as_ref().unwrap().evidence_schedule.as_deref(),
+            Some("0 2 * * *")
+        );
+
+        // Overwrite the singleton
+        let cfg2 = AgentConfigOverride {
+            log_level: Some("warn".into()),
+            ..AgentConfigOverride::default()
+        };
+        store.set_default_config(&cfg2, now).await.unwrap();
+        let got2 = store.get_default_config().await.unwrap();
+        assert_eq!(got2.as_ref().unwrap().log_level.as_deref(), Some("warn"));
+        assert!(got2.as_ref().unwrap().evidence_schedule.is_none());
     }
 }
