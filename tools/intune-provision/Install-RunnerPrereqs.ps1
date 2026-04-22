@@ -10,17 +10,22 @@
     Install-CmtraceRunner.ps1. Idempotent -- re-running after a partial
     success picks up where it left off.
 
+    Uses direct installer downloads (no winget) so it works on Windows
+    10, 11, and Server SKUs regardless of whether App Installer / winget
+    is available to the current admin session.
+
     Steps:
         1. Elevation + TLS 1.2 sanity.
-        2. winget install Git.Git --scope machine  (removes any prior
-           user-scope install first so the bin dir lands in Program Files).
-        3. Ensure C:\Program Files\Git\cmd + \bin on Machine PATH so the
+        2. Download + run Git for Windows installer with /ALLUSERS and
+           path-option adds Program Files\Git\cmd + \bin.
+        3. Ensure those two directories are on Machine PATH so the
            runner's service account inherits them.
-        4. winget install Microsoft.VisualStudio.2022.BuildTools with the
-           VCTools workload + Windows 11 SDK. Puts link.exe on the box
-           and wires up the MSVC vcvars for Rust's MSVC target.
-        5. Verifies git.exe, bash.exe, and signtool.exe are all locatable
-           via the Machine PATH / known install roots.
+        4. Download + run Visual Studio 2022 Build Tools bootstrapper
+           (vs_BuildTools.exe) with the VCTools workload + Windows 11
+           SDK. Puts link.exe on the box and wires up MSVC for Rust's
+           MSVC target.
+        5. Verifies git.exe, bash.exe, signtool.exe, and MSVC link.exe
+           are all locatable.
         6. Restarts the runner service if it exists, so the runner
            process inherits the freshly-updated PATH.
 
@@ -33,8 +38,8 @@
 
 .NOTES
     Runs on Windows PowerShell 5.1 and PowerShell 7+. ASCII-only.
-    Depends on winget being available (ships with Windows 11; on older
-    Windows 10 hosts install App Installer from the Store).
+    Requires outbound https to github.com, aka.ms, visualstudio.com,
+    and download.visualstudio.microsoft.com.
 #>
 #Requires -Version 5.1
 [CmdletBinding()]
@@ -63,12 +68,6 @@ if (-not $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRol
 # ------------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------------
-function Assert-Winget {
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        throw 'winget not found. On Windows 10 install App Installer from the Microsoft Store, or install Git + VS Build Tools manually.'
-    }
-}
-
 function Add-ToMachinePath {
     param([Parameter(Mandatory)][string] $Dir)
     if (-not (Test-Path -LiteralPath $Dir)) {
@@ -88,85 +87,92 @@ function Add-ToMachinePath {
     $env:PATH = "$env:PATH;$Dir"
 }
 
-function Install-WingetPackage {
+function Invoke-Download {
     param(
-        [Parameter(Mandatory)][string] $Id,
-        [string] $Override
+        [Parameter(Mandatory)][string] $Uri,
+        [Parameter(Mandatory)][string] $OutFile
     )
-    $args = @(
-        'install', '--id', $Id, '-e',
-        '--accept-source-agreements', '--accept-package-agreements',
-        '--scope', 'machine',
-        '--silent'
-    )
-    if ($Override) { $args += @('--override', $Override) }
-    Write-Host "  winget $($args -join ' ')" -ForegroundColor DarkGray
-    & winget @args
-    $code = $LASTEXITCODE
-    # winget returns exit 0 on fresh install, and a specific code for
-    # "already installed" / "no applicable upgrade" -- treat all of
-    # those as success. The actual codes are:
-    #   0x00000000 -- success
-    #   0x8A150077 -- already installed, no applicable upgrade
-    #   0x8A15002B -- already installed (newer version)
-    #   -1978335135 / 2316632161 = 0x8A150061 -- latest already installed
-    if ($code -ne 0) {
-        $hex = '0x{0:X8}' -f $code
-        Write-Host "  winget exit $code ($hex) -- treating as 'already installed / no-op'." -ForegroundColor Yellow
+    Write-Host "  Downloading $Uri" -ForegroundColor DarkGray
+    $savedProg = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'   # ~100x faster on PS 5.1
+    try {
+        Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
+    } finally {
+        $ProgressPreference = $savedProg
     }
 }
 
 # ------------------------------------------------------------------------
-# 1) Git (machine scope)
+# 1) Git for Windows (direct installer download, all-users scope)
 # ------------------------------------------------------------------------
 if ($SkipGit) {
     Write-Host 'Skipping Git install (-SkipGit).' -ForegroundColor DarkGray
+} elseif (Test-Path -LiteralPath 'C:\Program Files\Git\cmd\git.exe') {
+    Write-Host 'Git already installed at C:\Program Files\Git.' -ForegroundColor DarkGray
+    Add-ToMachinePath -Dir 'C:\Program Files\Git\cmd'
+    Add-ToMachinePath -Dir 'C:\Program Files\Git\bin'
 } else {
-    Assert-Winget
-    Write-Host 'Installing Git for Windows (machine scope) ...' -ForegroundColor Cyan
-    # Remove any prior user-scope install so the machine-scope install
-    # drops files at C:\Program Files\Git where services can see them.
-    try {
-        $userInstalled = winget list --id Git.Git --exact 2>$null
-        if ($LASTEXITCODE -eq 0 -and $userInstalled -match 'Git\.Git') {
-            $currentGit = Get-Command git -ErrorAction SilentlyContinue
-            if ($currentGit -and $currentGit.Source -notlike 'C:\Program Files\Git\*') {
-                Write-Host "  Removing non-machine-scope Git at $($currentGit.Source) ..." -ForegroundColor Yellow
-                winget uninstall --id Git.Git --silent 2>$null | Out-Null
-            }
-        }
-    } catch {
-        # Non-fatal; proceed to install.
-    }
-    Install-WingetPackage -Id 'Git.Git'
+    Write-Host 'Installing Git for Windows (all-users) ...' -ForegroundColor Cyan
+    $rel = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest' `
+             -Headers @{ 'User-Agent' = 'cmtraceopen-prereqs' }
+    $asset = $rel.assets |
+        Where-Object { $_.name -match '^Git-.*-64-bit\.exe$' } |
+        Select-Object -First 1
+    if (-not $asset) { throw 'Could not find a 64-bit Git installer in the latest release.' }
 
-    # The Git installer adds Program Files\Git\cmd to PATH automatically
-    # but some installer versions only update User PATH. Force both
-    # directories into Machine PATH so the runner service inherits them.
+    $gitExe = Join-Path $env:TEMP $asset.name
+    Invoke-Download -Uri $asset.browser_download_url -OutFile $gitExe
+
+    # /VERYSILENT + /SUPPRESSMSGBOXES = no UI. /NORESTART never reboots.
+    # /ALLUSERS = all-users scope (lands under C:\Program Files\Git).
+    # /COMPONENTS= keeps gitconfig + Git Bash; skips shell integrations
+    # we don't need on a headless runner.
+    # /o:PathOption=Cmd ensures the installer adds Program Files\Git\cmd
+    # to Machine PATH itself, though we also add both dirs below as a
+    # belt-and-suspenders for partial/failed PATH edits.
+    Write-Host '  Running installer (silent) ...' -ForegroundColor DarkGray
+    $proc = Start-Process -FilePath $gitExe `
+                -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', `
+                              '/NOCANCEL', '/SP-', '/ALLUSERS', `
+                              '/o:PathOption=Cmd' `
+                -Wait -PassThru
+    if ($proc.ExitCode -ne 0) {
+        throw "Git installer exited with code $($proc.ExitCode)."
+    }
+    Remove-Item -LiteralPath $gitExe -Force -ErrorAction SilentlyContinue
     Add-ToMachinePath -Dir 'C:\Program Files\Git\cmd'
     Add-ToMachinePath -Dir 'C:\Program Files\Git\bin'
 }
 
 # ------------------------------------------------------------------------
 # 2) Visual Studio 2022 Build Tools (C++ workload + Windows 11 SDK)
+#    Bootstrapper direct from aka.ms -- no winget required.
 # ------------------------------------------------------------------------
 if ($SkipBuildTools) {
     Write-Host 'Skipping VS Build Tools install (-SkipBuildTools).' -ForegroundColor DarkGray
 } else {
-    Assert-Winget
     Write-Host 'Installing Visual Studio 2022 Build Tools (VCTools + Win11 SDK) ...' -ForegroundColor Cyan
     Write-Host '  This download is multi-GB and may take 5-10 minutes.' -ForegroundColor DarkGray
-    # --override is passed verbatim to the VS installer bootstrapper.
-    $vsOverride = @(
-        '--quiet',
-        '--wait',
-        '--norestart',
-        '--nocache',
+
+    $bootstrap = Join-Path $env:TEMP 'vs_BuildTools.exe'
+    Invoke-Download -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $bootstrap
+
+    $vsArgs = @(
+        '--quiet', '--wait', '--norestart', '--nocache',
         '--add', 'Microsoft.VisualStudio.Workload.VCTools',
         '--includeRecommended',
         '--add', 'Microsoft.VisualStudio.Component.Windows11SDK.22621'
-    ) -join ' '
-    Install-WingetPackage -Id 'Microsoft.VisualStudio.2022.BuildTools' -Override $vsOverride
+    )
+    Write-Host '  Running bootstrapper (silent) ...' -ForegroundColor DarkGray
+    $proc = Start-Process -FilePath $bootstrap -ArgumentList $vsArgs -Wait -PassThru
+    # 0 = success, 3010 = success-but-reboot-required. Anything else is fatal.
+    if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) {
+        throw "VS Build Tools bootstrapper exited with code $($proc.ExitCode). See %TEMP%\dd_bootstrapper_*.log for details."
+    }
+    if ($proc.ExitCode -eq 3010) {
+        Write-Warning 'VS Build Tools installed but flagged a reboot requirement. Reboot the box before running CI jobs.'
+    }
+    Remove-Item -LiteralPath $bootstrap -Force -ErrorAction SilentlyContinue
 }
 
 # ------------------------------------------------------------------------
