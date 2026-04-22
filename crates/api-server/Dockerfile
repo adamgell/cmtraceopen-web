@@ -26,10 +26,12 @@ WORKDIR /workspace
 
 # System deps cargo may invoke. ca-certificates is needed for crates.io HTTPS;
 # pkg-config is widely expected by `-sys` crates.
+# libssl-dev needed because reqwest uses native-tls (PR #29 chose this over rustls to avoid ring; revisit when WASM-style aws-lc-rs path stabilizes for the api-server too — see PR #37 for agent's rustls+aws-lc-rs setup).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
       ca-certificates \
+      libssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy the workspace. .dockerignore keeps the context tight (no node_modules,
