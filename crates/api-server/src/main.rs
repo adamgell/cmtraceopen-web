@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 
@@ -68,9 +69,29 @@ async fn main() -> ExitCode {
         tls_enabled = config.tls.enabled,
         mtls_required_on_ingest = config.tls.require_on_ingest,
         san_uri_scheme = %config.tls.expected_san_uri_scheme,
+        peer_cert_header = ?config.tls.peer_cert_header,
+        trusted_proxy_cidr = ?config.tls.trusted_proxy_cidr,
         version = env!("CARGO_PKG_VERSION"),
         "starting cmtraceopen-api"
     );
+
+    // Warn when operator set CMTRACE_TLS_ENABLED=true alongside
+    // CMTRACE_PEER_CERT_HEADER — the config layer already forces TLS off
+    // in that case; the warning makes the override explicit in the log.
+    if config.tls.peer_cert_header.is_some() && std::env::var("CMTRACE_TLS_ENABLED")
+        .ok()
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(()),
+            _ => None,
+        })
+        .is_some()
+    {
+        warn!(
+            "CMTRACE_TLS_ENABLED=true and CMTRACE_PEER_CERT_HEADER are both set; \
+             in-process TLS has been disabled because AppGW terminates TLS — \
+             remove CMTRACE_TLS_ENABLED to silence this warning."
+        );
+    }
 
     // Warn loudly when CMTRACE_TLS_ENABLED is set but the binary was built
     // without the `mtls` feature (e.g. on a dev box with no cmake/NASM).
@@ -178,9 +199,42 @@ async fn main() -> ExitCode {
         allowed_origins: config.allowed_origins.clone(),
         allow_credentials: config.allow_credentials,
     };
+
+    // Load the CA bundle DER bytes for the header-cert path. This is only
+    // needed when CMTRACE_PEER_CERT_HEADER is set; TlsConfig::from_env
+    // already verified that CMTRACE_CLIENT_CA_BUNDLE is present in that
+    // case, so the `expect` below is unreachable in practice.
+    #[allow(unused_mut)]
+    let mut trusted_ca_ders: Vec<Vec<u8>> = vec![];
+    #[cfg(feature = "mtls")]
+    if config.tls.peer_cert_header.is_some() {
+        let ca_path = config
+            .tls
+            .client_ca_bundle
+            .as_ref()
+            .expect("TlsConfig::from_env ensures client_ca_bundle is set when peer_cert_header is set");
+        match api_server::tls::load_ca_ders_from_pem(ca_path) {
+            Ok(ders) => {
+                info!(
+                    count = ders.len(),
+                    path = %ca_path.display(),
+                    "CA bundle loaded for header-cert chain validation",
+                );
+                trusted_ca_ders = ders;
+            }
+            Err(err) => {
+                eprintln!("fatal: failed to load CA bundle for peer-cert-header mode: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+
     let mtls = MtlsRuntimeConfig {
         require_on_ingest: config.tls.require_on_ingest,
         expected_san_uri_scheme: config.tls.expected_san_uri_scheme.clone(),
+        peer_cert_header: config.tls.peer_cert_header.clone(),
+        trusted_proxy_cidr: config.tls.trusted_proxy_cidr,
+        trusted_ca_ders,
     };
 
     // Build the CRL cache (if the `crl` feature is on) and prime it with
@@ -264,7 +318,11 @@ async fn main() -> ExitCode {
         }
     };
 
-    let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    let serve = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
 
     if let Err(err) = serve.await {
         eprintln!("fatal: server error: {err}");
@@ -343,6 +401,13 @@ fn describe_metrics() {
     describe_counter!(
         retention::M_ERRORS,
         "Retention-sweeper failures, labeled by stage: scan | blob | metadata."
+    );
+    describe_counter!(
+        "cmtrace_peer_cert_source_total",
+        "Device-identity extractions by source: header (AppGW cert header \
+         accepted), header_invalid (AppGW cert header rejected — decode \
+         failure or chain validation failure), tls (in-process mTLS), or \
+         none (no cert / identity unavailable)."
     );
 }
 

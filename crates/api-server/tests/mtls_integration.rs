@@ -148,6 +148,7 @@ async fn start_tls_server(
     let mtls = MtlsRuntimeConfig {
         require_on_ingest,
         expected_san_uri_scheme: "device".into(),
+        ..Default::default()
     };
     let state = AppState::full(
         meta,
@@ -172,6 +173,8 @@ async fn start_tls_server(
         client_ca_bundle: Some(pki.client_ca_bundle.clone()),
         require_on_ingest,
         expected_san_uri_scheme: "device".into(),
+        peer_cert_header: None,
+        trusted_proxy_cidr: None,
     };
 
     // axum-server's `bind` does its own TCP bind + listening notification

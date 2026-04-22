@@ -31,6 +31,24 @@ pub struct MtlsRuntimeConfig {
     pub require_on_ingest: bool,
     /// Mirror of [`crate::config::TlsConfig::expected_san_uri_scheme`].
     pub expected_san_uri_scheme: String,
+    /// Mirror of [`crate::config::TlsConfig::peer_cert_header`].
+    /// When set, the `DeviceIdentity` extractor reads the peer cert PEM
+    /// from this header name rather than from the in-process TLS layer.
+    pub peer_cert_header: Option<String>,
+    /// Mirror of [`crate::config::TlsConfig::trusted_proxy_cidr`].
+    /// The cert header is only honoured when the request's TCP peer address
+    /// falls within this CIDR.
+    pub trusted_proxy_cidr: Option<ipnet::IpNet>,
+    /// DER-encoded bytes of the trusted CA certs loaded from
+    /// `CMTRACE_CLIENT_CA_BUNDLE`. Populated at startup when
+    /// `peer_cert_header` is set. The `DeviceIdentity` extractor uses this
+    /// to re-validate the cert presented in the header against the same
+    /// trust anchors that the in-process TLS path uses, guarding against
+    /// misconfigured proxies that forward unverified certs.
+    ///
+    /// Empty when `peer_cert_header` is `None` (CA validation is then
+    /// handled by the rustls TLS layer for the in-process path).
+    pub trusted_ca_ders: Vec<Vec<u8>>,
 }
 
 impl Default for MtlsRuntimeConfig {
@@ -38,6 +56,9 @@ impl Default for MtlsRuntimeConfig {
         Self {
             require_on_ingest: false,
             expected_san_uri_scheme: "device".to_string(),
+            peer_cert_header: None,
+            trusted_proxy_cidr: None,
+            trusted_ca_ders: vec![],
         }
     }
 }
