@@ -4,16 +4,52 @@ Browser-based log viewer for [CMTrace Open](https://github.com/adamgell/cmtraceo
 
 ## Status
 
-Walking skeleton is live. `cmtraceopen-web` ships:
+**Wave 3 + Wave 4 are largely shipped.** `cmtraceopen-web` now includes:
 
-- **Viewer** — drag-drop WASM mode and API-fetch mode (device → session → entries) over the api-server.
-- **API server** — Axum + SQLite + local-FS blob store; chunked resumable bundle ingest, parse-on-ingest, entries/files queries.
-- **Agent** (Windows) — collectors for logs / event logs / dsregcmd, queues bundles, ships over HTTPS.
-- **Dev stack** — `docker compose up` brings up api-server + Postgres + Adminer; `dev/bigmac-runner-kit/scripts/redeploy.sh` one-command deploys to the always-on Mac runner.
+### Viewer (browser)
+- **Local mode** — drag-drop a CCM/CBS/Panther/etc log → parsed client-side via WebAssembly, no server.
+- **API mode** — sign in with Entra, browse devices → sessions → entries from the api-server.
+- **Filters + search** — severity multi-select, component contains, message contains with `<mark>` highlighting.
+- **Devices view** — operator UI listing registered devices, last-seen, with Admin-gated Disable button.
 
-Wave 2/3 in flight: operator OAuth (Entra), real CORS, mTLS termination, RBAC, CRL polling, Azure Blob, Prometheus metrics, GHCR publish.
+### API server
+- **Ingest** — chunked resumable bundle upload (init → chunks → finalize), parse-on-ingest, byte-identical to desktop parser.
+- **Query** — keyset-paginated devices / sessions / entries with operator-bearer (Entra JWKS) auth.
+- **Auth** — RBAC (Operator + Admin roles), mTLS termination with cert-derived `DeviceIdentity`, CRL polling for revocation, AppGW header-mode for cloud deploys.
+- **Storage** — SQLite or Postgres metadata + local-FS or Azure Blob backend (object_store), Cargo-feature gated.
+- **Observability** — Prometheus `/metrics`, structured JSON logs, status page (recent bundles + per-route counters).
+- **Operator audit** — append-only audit log of admin actions with keyset cursor query route.
+- **Bundle retention** — TTL sweeper (`CMTRACE_BUNDLE_TTL_DAYS`, default 90d) + Azure Blob lifecycle policy alternative.
+- **Per-device + per-IP rate limiting** with bounded LRU and trusted-proxy CIDR support.
+- **Server-side config push** — operators tune retention/log-level/schedules without re-deploying the agent MSI.
 
-See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the full developer workflow.
+### Agent (Windows)
+- **Windows service dispatcher** — proper SCM integration (`CMTraceOpenAgent`, LocalSystem, automatic-delayed-start, restart-on-failure).
+- **Collectors** — logs, event logs (wevtutil channels), dsregcmd, evidence orchestrator.
+- **Telemetry redaction** — agent-side PII filter (usernames, GUIDs, RFC 1918 IPs, SIDs) with streaming for files >4 MiB.
+- **Queue + uploader** — durable on-disk queue, chunked resumable upload, real TLS via rustls + aws-lc-rs.
+- **Collection scheduler** — cron + interval modes with per-device deterministic jitter.
+
+### Infra
+- **Azure deploy** — Terraform module under `infra/azure/` for Container Apps + Application Gateway with mTLS, Postgres Flexible Server, Storage account, Key Vault.
+- **Intune Graph deploy** — `tools/intune-deploy/Deploy-CmtraceAgent.ps1` + `Pack-CmtraceAgent.ps1` for upload + assignment via Graph SDK.
+- **WiX MSI** — designed in `docs/wave4/01-msi-design.md` with sources scaffolded under `crates/agent/installer/wix/`.
+- **Code signing** — Cloud PKI primary path on a self-hosted GitHub Actions runner; Azure Trusted Signing as the documented broader-release fallback. See `docs/wave4/02-code-signing.md` and `02a-sign-every-component.md`.
+- **CI** — `ci.yml` (workspace check/test/clippy + wasm canary + conditional Docker buildx), `audit.yml` (weekly cargo-audit), `semgrep.yml` (security + secrets), `submodule-bump.yml` (weekly cmtraceopen sync), `publish-api.yml` (GHCR on `api-v*` tags), `agent-msi.yml` (Cloud PKI signing on agent-v* tags).
+
+### Ops
+- **Day-2 operations runbook** — `docs/wave4/04-day2-operations.md` with 6 incident playbooks, capacity thresholds, DR procedures.
+- **Beta pilot runbook** — `docs/wave4/03-beta-pilot-runbook.md`, 14-day 8-device beta with locked success metrics.
+- **Quarterly DR rehearsal** — `docs/wave4/20-dr-rehearsal.md` with rotating scenarios (server loss, blob corruption, Cloud PKI outage, PG corruption).
+- **Postgres backup automation** — `tools/ops/pg-backup.sh` + `pg-restore.sh` + `blob-backup.sh` (append-only, scratch-DB-only restores).
+- **Prometheus alerting** — `infra/observability/prometheus-rules.yaml` + AlertManager + Grafana dashboard.
+
+### Dev stack
+- **Local**: `docker compose up` brings up api-server + Postgres + Adminer.
+- **BigMac26 runner** (always-on Mac at 192.168.2.50): `dev/bigmac-runner-kit/scripts/redeploy.sh` one-command deploy.
+- **End-to-end test**: `cargo test -p api-server --features test-mtls wave4_e2e` exercises Cloud PKI cert → mTLS handshake → bundle ingest → JWT-authenticated query.
+
+See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the developer workflow and [`docs/wave4/`](docs/wave4/) for the full Wave 4 design + operations corpus.
 
 ## Prerequisites
 
@@ -45,20 +81,36 @@ pnpm typecheck       # tsc --noEmit only
 
 ```
 cmtraceopen-web/
-├── Cargo.toml             Rust workspace (cmtrace-wasm + crates/api-server + crates/agent + crates/common-wire)
-├── rust-toolchain.toml    pins Rust 1.90 across host + Docker builds
-├── cmtraceopen/           submodule — Tauri app + cmtraceopen-parser crate
-├── cmtrace-wasm/          cdylib crate, wraps cmtraceopen-parser with wasm-bindgen
+├── Cargo.toml                 Rust workspace (cmtrace-wasm + crates/api-server + crates/agent + crates/common-wire)
+├── rust-toolchain.toml        pins Rust 1.90 across host + Docker builds
+├── cmtraceopen/               submodule — Tauri app + cmtraceopen-parser crate
+├── cmtrace-wasm/              cdylib crate, wraps cmtraceopen-parser with wasm-bindgen
 ├── crates/
-│   ├── api-server/        Axum HTTP API (ingest, query, status page)
-│   ├── agent/             Windows service: collect → queue → ship
-│   └── common-wire/       shared DTOs (ingest envelopes, query types)
-├── pkg/                   wasm-pack output (gitignored)
-├── docker-compose.yml     dev stack: api-server + Postgres + Adminer
-├── dev/bigmac-runner-kit/ Ansible kit + redeploy.sh for the BigMac26 runner
-├── tools/                 ship-bundle.sh + query.sh + fixtures/build.sh
-├── docs/                  CONTRIBUTING + provisioning runbooks + release.md
-└── src/                   Vite + React 19 viewer (drag-drop WASM + API-fetch modes)
+│   ├── api-server/            Axum HTTP API (ingest, query, status page, mTLS, audit log)
+│   │   ├── migrations/        SQLite migrations
+│   │   ├── migrations-pg/     Postgres parallel migrations
+│   │   └── installer/wix/     (in agent/) WiX v4 MSI sources
+│   ├── agent/                 Windows service: collect → queue → ship → sign
+│   └── common-wire/           shared DTOs (ingest envelopes, query types)
+├── infra/azure/               Terraform for Azure deploy (ACA + AppGW + Postgres + Storage + Key Vault)
+├── infra/observability/       PrometheusRules + AlertManager + Grafana dashboard
+├── tools/
+│   ├── intune-deploy/         Graph SDK script for MSI upload + assignment
+│   ├── ops/                   pg-backup, pg-restore, blob-backup
+│   ├── ship-bundle.sh         reference ingest client
+│   ├── query.sh               operator query helper
+│   └── fixtures/build.sh      reproducible test bundle builder
+├── pkg/                       wasm-pack output (gitignored)
+├── docker-compose.yml         dev stack: api-server + Postgres + Adminer
+├── dev/bigmac-runner-kit/     Ansible kit + redeploy.sh for the BigMac26 runner
+├── docs/
+│   ├── CONTRIBUTING.md        developer workflow
+│   ├── adr/                   architecture decisions (Postgres storage types, etc.)
+│   ├── provisioning/          Entra app reg + Cloud PKI + Windows VM + Graph deploy runbooks
+│   ├── release-notes/         per-version release notes
+│   └── wave4/                 24+ design docs: MSI, code-signing, beta pilot, day-2 ops, DR, etc.
+├── tests/load/                k6 load tests (bundle-ingest + query-mix scenarios)
+└── src/                       Vite + React 19 viewer (Local WASM + API-fetch + Devices admin UI)
 ```
 
 ## Dev status pages
