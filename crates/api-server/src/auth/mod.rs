@@ -170,6 +170,12 @@ impl JwksCache {
     }
 
     pub fn with_ttl(jwks_uri: String, ttl: Duration) -> Self {
+        // PR #46 switched workspace reqwest to rustls-tls-native-roots-no-provider;
+        // building any reqwest client now requires a rustls crypto provider to be
+        // installed first. main.rs installs aws-lc-rs eagerly at startup; tests
+        // that construct JwksCache directly bypass main, so install here too.
+        // Idempotent (rustls install_default no-ops if a provider is already set).
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         Self {
             keys: RwLock::new(HashMap::new()),
             last_refresh: Mutex::new(None),
