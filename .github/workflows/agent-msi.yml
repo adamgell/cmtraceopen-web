@@ -106,6 +106,27 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       # -----------------------------------------------------------------------
+      # Guard: ring crate must not appear in the agent dep tree.
+      # CONTRIBUTING.md prohibits ring everywhere (aws-lc-rs is the mandated
+      # crypto provider). This check runs before the build so a transitive
+      # regression fails fast with a clear message rather than silently
+      # producing a binary that may fail on Windows ARM64 CI.
+      # -----------------------------------------------------------------------
+      - name: Check for ring crate (must be absent)
+        shell: pwsh
+        run: |
+          $ringFound = cargo tree -p agent 2>&1 | Select-String 'ring\s+v\d'
+          if ($ringFound) {
+            Write-Error @"
+          ring crate detected in the agent dep tree. CONTRIBUTING.md prohibits ring.
+          Use aws-lc-rs instead. Offending entries:
+          $ringFound
+          "@
+            exit 1
+          }
+          Write-Host "ring check: clean"
+
+      # -----------------------------------------------------------------------
       # Build the agent binary in release mode.
       # --target x86_64-pc-windows-msvc is explicit so we never pick up an
       # aarch64-pc-windows-msvc toolchain that may be installed on a dev VM
@@ -233,6 +254,14 @@ jobs:
       # signtool for script files; it embeds the SIG block at the end of the
       # script so PowerShell can verify it before execution.
       # Skipped if the script doesn't exist yet (WiX sources not yet merged).
+      #
+      # Elevated-runner requirement: Set-AuthenticodeSignature reads the
+      # private key from LocalMachine\My. Depending on how the Cloud PKI cert
+      # profile sets the private-key ACL during enrollment, the runner process
+      # may need to run as SYSTEM or a local administrator to access the key.
+      # If this step fails with "Cannot find an appropriate certificate" despite
+      # the cert being present, confirm the runner service is running as a
+      # privileged account (see docs/wave4/07-build-vm-runbook.md — planned).
       # -----------------------------------------------------------------------
       - name: Sign CertCheck.ps1
         if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
@@ -405,7 +434,7 @@ jobs:
       # dry-runs).
       # -----------------------------------------------------------------------
       - name: Upload MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ steps.build-msi.outputs.msi-name }}
           path: ${{ steps.build-msi.outputs.msi-path }}
@@ -420,7 +449,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Attach MSI to GitHub Release
         if: startsWith(github.ref, 'refs/tags/agent-v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ github.ref_name }}
           files: ${{ steps.build-msi.outputs.msi-path }}
