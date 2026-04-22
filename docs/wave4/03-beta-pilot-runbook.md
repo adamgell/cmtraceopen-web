@@ -545,13 +545,18 @@ hours off.
 
 ```powershell
 w32tm /query /status
-w32tm /resync
+w32tm /resync /force
 ```
 
 Time off by > 5 min from UTC → resync. Persistent skew (e.g. on a VM
 whose host clock drifts) → fix the host or set
 `HKLM\SYSTEM\CurrentControlSet\Services\w32time\Config\MaxAllowedPhaseOffset`
 appropriately.
+
+> **Deep dive:** see
+> [`docs/wave4/21-agent-network-time.md` — §1 Time Sync](./21-agent-network-time.md#1-time-sync)
+> for full verification steps, failure modes, and VM-specific
+> remediation guidance.
 
 ### A.4 — MSI install failed silently because no admin rights
 
@@ -715,6 +720,7 @@ corp LAN, longer off-corp).
 
 - [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)
 - [`docs/provisioning/04-windows-test-vm.md`](../provisioning/04-windows-test-vm.md)
+- [`docs/wave4/21-agent-network-time.md`](./21-agent-network-time.md) — time sync + network policy deep-dive
 - [`docs/release-notes/api-v0.1.0.md`](../release-notes/api-v0.1.0.md)
 - Intune Win32 app deploy:
   <https://learn.microsoft.com/mem/intune/apps/apps-win32-app-management>
