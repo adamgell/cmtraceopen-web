@@ -27,14 +27,20 @@ FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /workspace
 
-# System deps cargo may invoke. ca-certificates is needed for crates.io HTTPS;
-# pkg-config is widely expected by `-sys` crates.
-# libssl-dev needed because reqwest uses native-tls (PR #29 chose this over rustls to avoid ring; revisit when WASM-style aws-lc-rs path stabilizes for the api-server too — see PR #37 for agent's rustls+aws-lc-rs setup).
+# System deps cargo may invoke. ca-certificates is needed for crates.io HTTPS
+# (and for the rustls native-roots loader at runtime); pkg-config is widely
+# expected by `-sys` crates.
+#
+# `cmake` + `nasm` are required by `aws-lc-sys` at build time — reqwest is
+# now configured with rustls + aws-lc-rs (matches the agent in PR #37 and
+# the Wave 3 mTLS stack), so we no longer need `libssl-dev` (PR #39's
+# native-tls hotfix is reverted by the same migration).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       pkg-config \
       ca-certificates \
-      libssl-dev \
+      cmake \
+      nasm \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy the workspace. .dockerignore keeps the context tight (no node_modules,
