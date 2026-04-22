@@ -5,6 +5,7 @@ use api_server::auth::{AuthMode, AuthState, JwksCache};
 #[cfg(feature = "crl")]
 use api_server::auth::CrlCache;
 use api_server::config::Config;
+use api_server::pipeline::retention;
 use api_server::router;
 use api_server::state::{install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig};
 use api_server::storage::{build_blob_store, SqliteMetadataStore};
@@ -134,6 +135,37 @@ async fn main() -> ExitCode {
         entra: config.entra.clone(),
         jwks,
     };
+
+    // Spin up the retention sweeper. Lives for the life of the process —
+    // detached `tokio::spawn` is fine because the loop has no shutdown
+    // handshake (every state transition is a single transaction; killing
+    // the task mid-sleep or mid-delete leaves the DB consistent). When
+    // `CMTRACE_BUNDLE_TTL_DAYS=0` the loop still runs but no-ops on every
+    // tick; see `retention::run_retention_loop` for the gate.
+    //
+    // The meta clone uses an explicit binding rather than passing
+    // `Arc::clone(&meta)` inline because `Arc<SqliteMetadataStore>` →
+    // `Arc<dyn MetadataStore>` needs the unsizing coercion to fire,
+    // which only happens at a let binding with an explicit type
+    // annotation (or when passed into a function whose parameter type
+    // already nails the trait object).
+    {
+        // `Arc::clone(&meta)` would bind T = dyn MetadataStore from the LHS
+        // and then choke on `&meta: &Arc<SqliteMetadataStore>`. Method-call
+        // syntax binds T to the concrete type, then the let's type
+        // annotation triggers the unsizing coercion to the trait object.
+        let meta_for_retention: Arc<dyn api_server::storage::MetadataStore> = meta.clone();
+        let blobs_for_retention = Arc::clone(&blobs);
+        let cfg_for_retention = config.clone();
+        tokio::spawn(async move {
+            retention::run_retention_loop(
+                cfg_for_retention,
+                meta_for_retention,
+                blobs_for_retention,
+            )
+            .await;
+        });
+    }
 
     // AppState is constructed here so `started_at` reflects the real
     // process start (before we block in `bind`). Cloned by reference into
@@ -289,6 +321,22 @@ fn describe_metrics() {
          result: rejected (serial in CRL) | unknown_fail_open (cache cold, \
          allowed by crl_fail_open=true) | unknown_fail_closed (cache cold, \
          rejected with 503)."
+    );
+    describe_counter!(
+        retention::M_SWEEPS,
+        "Total bundle-retention sweep passes run since process start (one per CMTRACE_RETENTION_SCAN_INTERVAL_SECS tick)."
+    );
+    describe_counter!(
+        retention::M_SESSIONS_DELETED,
+        "Sessions hard-deleted (blob + metadata) by the retention sweeper."
+    );
+    describe_counter!(
+        retention::M_BYTES_FREED,
+        "Approximate blob bytes freed by the retention sweeper, summed from head_blob before delete."
+    );
+    describe_counter!(
+        retention::M_ERRORS,
+        "Retention-sweeper failures, labeled by stage: scan | blob | metadata."
     );
 }
 

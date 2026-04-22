@@ -107,6 +107,10 @@ impl BlobStore for LocalFsBlobStore {
     async fn read_blob(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
         self.inner.read_blob(uri).await
     }
+
+    async fn delete_blob(&self, uri: &str) -> Result<(), StorageError> {
+        self.inner.delete_blob(uri).await
+    }
 }
 
 #[cfg(test)]

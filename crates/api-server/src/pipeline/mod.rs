@@ -1,7 +1,11 @@
 //! Async post-ingest pipelines.
 //!
-//! Today this is a single background parse worker spawned from the finalize
-//! handler. The module exists so the next pipeline (e.g. retention sweeper,
-//! re-parse on parser upgrade) has an obvious home.
+//! Two background tasks live here:
+//!   - [`parse_worker`] — fire-and-forget parse spawned from the ingest
+//!     finalize handler.
+//!   - [`retention`] — periodic sweep that purges sessions past the
+//!     configured `CMTRACE_BUNDLE_TTL_DAYS` window. Spawned once at
+//!     startup from `main.rs`.
 
 pub mod parse_worker;
+pub mod retention;

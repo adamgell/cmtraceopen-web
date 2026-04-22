@@ -164,6 +164,9 @@ mod build_blob_store_tests {
             blob_azure_container: None,
             blob_azure_account_key: None,
             blob_azure_use_managed_identity: false,
+            bundle_ttl_days: 90,
+            retention_scan_interval_secs: 21_600,
+            retention_batch_size: 100,
         }
     }
 
@@ -510,6 +513,19 @@ pub trait BlobStore: Send + Sync + 'static {
     /// today is the in-memory zip walker — adding a streaming variant is
     /// straightforward when an `ndjson-entries` parser lands.
     async fn read_blob(&self, uri: &str) -> Result<Vec<u8>, StorageError>;
+
+    /// Hard-delete a finalized blob. Used by the retention sweeper (see
+    /// `pipeline::retention`) to free storage when a session ages past the
+    /// configured TTL.
+    ///
+    /// Implementations MUST treat "blob not found" as success — the
+    /// sweeper is idempotent by design: if a previous run already removed
+    /// the blob but crashed before clearing the metadata row, the next
+    /// scan re-issues the delete and expects it to be a no-op rather than
+    /// an error. Unrecognized URI schemes still return
+    /// [`StorageError::BadBlobUri`] (same contract as `read_blob` /
+    /// `head_blob`).
+    async fn delete_blob(&self, uri: &str) -> Result<(), StorageError>;
 }
 
 /// Relational metadata operations. Split out so handlers can be unit-tested
@@ -658,4 +674,33 @@ pub trait MetadataStore: Send + Sync + 'static {
         filters: &EntryFilters,
         limit: u32,
     ) -> Result<Vec<EntryRow>, StorageError>;
+
+    // ----- retention -----
+
+    /// Return up to `batch_size` sessions whose `ingested_utc` is older than
+    /// `ttl_days` ago, ordered by `ingested_utc ASC` (oldest first).
+    ///
+    /// Each row carries the `session_id` + the `blob_uri` so the retention
+    /// sweeper can issue a `BlobStore::delete_blob` before clearing the
+    /// metadata row. A `ttl_days` of zero is reserved by the caller as
+    /// "never sweep" and should never reach this method — callers gate on
+    /// it before invoking.
+    async fn sessions_older_than(
+        &self,
+        ttl_days: u32,
+        batch_size: u32,
+    ) -> Result<Vec<(Uuid, String)>, StorageError>;
+
+    /// Delete a session row plus its parse-on-ingest fan-out (`files` and
+    /// `entries`). Wrapped in a single transaction at the SQL layer so a
+    /// crash mid-delete leaves the session either fully present or fully
+    /// gone; callers (the retention sweeper) tolerate the small window
+    /// where the blob has been removed but the metadata row is still
+    /// present (next scan re-tries the cycle).
+    ///
+    /// Returns the number of `entries` rows deleted so the sweeper can
+    /// surface the cleanup volume in its summary log line. Missing
+    /// sessions return `Ok(0)` rather than an error — same idempotency
+    /// rationale as `BlobStore::delete_blob`.
+    async fn delete_session(&self, session_id: Uuid) -> Result<u64, StorageError>;
 }

@@ -228,6 +228,21 @@ impl BlobStore for ObjectStoreBlobStore {
         Ok(meta.size as u64)
     }
 
+    async fn delete_blob(&self, uri: &str) -> Result<(), StorageError> {
+        let obj_path = self
+            .extract_obj_path(uri)
+            .ok_or_else(|| StorageError::BadBlobUri(uri.to_string()))?;
+        // The retention sweeper relies on this being idempotent: a second
+        // delete on a blob already gone must succeed. Both the local-FS
+        // and Azure object_store backends surface a missing blob as
+        // `object_store::Error::NotFound`; collapse that into Ok(()).
+        match self.inner.delete(&obj_path).await {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(StorageError::ObjectStore(e.to_string())),
+        }
+    }
+
     async fn read_blob(&self, uri: &str) -> Result<Vec<u8>, StorageError> {
         let obj_path = self
             .extract_obj_path(uri)
