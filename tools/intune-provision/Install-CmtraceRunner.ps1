@@ -51,6 +51,13 @@
     up the runner before certs have landed (agent-jobs will work; signing
     jobs will fail until the certs arrive).
 
+.PARAMETER IssuerPattern
+    Regex matched against the Issuer field of certs in LocalMachine\My
+    when the precheck selects the "our" Cloud PKI client cert. Needed
+    because Intune-enrolled boxes carry several Microsoft-issued
+    client-auth certs that we must ignore. Default matches the Gell lab
+    Cloud PKI issuing CA; override for other deployments.
+
 .EXAMPLE
     # Precheck only - no token needed, no install performed.
     .\Install-CmtraceRunner.ps1 -PrecheckOnly
@@ -76,7 +83,8 @@ param(
     [string]  $Labels     = 'self-hosted,windows,cmtrace-build',
     [string]  $RunnerName = $env:COMPUTERNAME,
     [switch]  $PrecheckOnly,
-    [switch]  $SkipCertCheck
+    [switch]  $SkipCertCheck,
+    [string]  $IssuerPattern = 'issuing\.gell\.internal\.cdw\.lab'
 )
 
 if (-not $PrecheckOnly -and -not $Token) {
@@ -111,10 +119,22 @@ if (-not $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRol
 $EkuClientAuth  = '1.3.6.1.5.5.7.3.2'
 $EkuCodeSigning = '1.3.6.1.5.5.7.3.3'
 
+# Any Intune-enrolled box has several Microsoft-issued client-auth certs
+# (MS-Organization-Access, Intune MDM Device CA, etc.) that we must ignore.
+# The Cloud PKI cert is distinguished by having EKU 1.3.6.1.5.5.7.3.3
+# (Code Signing) AND being issued by the Cloud PKI issuing CA. Match on
+# both to avoid false positives. Default regex matches the 'Gell - PKI
+# Issuing' CN; override with -IssuerPattern for a different deployment.
 function Get-CmtraceCert {
-    param([string] $EkuOid)
+    param(
+        [string] $EkuOid,
+        [string] $IssuerPattern = 'issuing\.gell\.internal\.cdw\.lab'
+    )
     Get-ChildItem Cert:\LocalMachine\My |
-        Where-Object { $_.EnhancedKeyUsageList.ObjectId -contains $EkuOid } |
+        Where-Object {
+            $_.EnhancedKeyUsageList.ObjectId -contains $EkuOid -and
+            $_.Issuer -match $IssuerPattern
+        } |
         Sort-Object NotAfter -Descending |
         Select-Object -First 1
 }
@@ -162,18 +182,24 @@ function Invoke-CmtracePrecheck {
     }
     Write-Host '  Intune enrollment   : OK' -ForegroundColor Green
 
-    # Code-signing cert (required for CI jobs)
-    $codeCert = Get-CmtraceCert -EkuOid $EkuCodeSigning
+    # Code-signing cert (required for CI jobs). Filter by the Cloud PKI
+    # issuer so we don't accidentally match Microsoft-issued certs.
+    $codeCert = Get-CmtraceCert -EkuOid $EkuCodeSigning -IssuerPattern $IssuerPattern
     if (-not $codeCert) {
-        throw "Code-signing cert (EKU $EkuCodeSigning) not found in LocalMachine\My. Check: device is in cmtraceopen-build-machines group, and Intune has synced (Intune admin center > Devices > <name> > Sync). Re-run after the cert appears."
+        throw "Code-signing cert (EKU $EkuCodeSigning, issuer matching '$IssuerPattern') not found in LocalMachine\My. Check: device is in the build-machines group (or profile is assigned to All Devices), and Intune has synced. Override the issuer filter with -IssuerPattern if your Cloud PKI has a different CN."
     }
     Write-Host ("  Code-signing cert   : OK  ({0}, exp {1:yyyy-MM-dd})" -f $codeCert.Thumbprint, $codeCert.NotAfter) -ForegroundColor Green
 
-    # Client-auth cert (required for agent mTLS; same physical cert on a
-    # combined profile, but EKU-filtered lookups still have to find it).
-    $clientCert = Get-CmtraceCert -EkuOid $EkuClientAuth
+    # Client-auth cert (required for agent mTLS). Prefer the same Cloud
+    # PKI cert if it carries both EKUs (combined profile); otherwise look
+    # for a separate client-auth-only cert from the same issuer.
+    $clientCert = if ($codeCert.EnhancedKeyUsageList.ObjectId -contains $EkuClientAuth) {
+        $codeCert
+    } else {
+        Get-CmtraceCert -EkuOid $EkuClientAuth -IssuerPattern $IssuerPattern
+    }
     if (-not $clientCert) {
-        throw "Client-auth cert (EKU $EkuClientAuth) not found in LocalMachine\My. If you expect a combined profile, it should carry both EKUs - check the 'Gell - SCEP Cert' profile's Extended Key Usage list."
+        throw "Client-auth cert (EKU $EkuClientAuth, issuer matching '$IssuerPattern') not found in LocalMachine\My."
     }
     Write-Host ("  Client-auth cert    : OK  ({0}, exp {1:yyyy-MM-dd})" -f $clientCert.Thumbprint, $clientCert.NotAfter) -ForegroundColor Green
 
