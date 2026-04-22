@@ -110,7 +110,7 @@ log "  dst     : ${BLOB_DST}"
 case "${BACKEND}" in
   # -------------------------------------------------------------------------
   azure)
-    command -v azcopy >/dev/null 2>&1 || die "azcopy not found on PATH"
+    command -v azcopy >/dev/null 2>&1 || die "azcopy not found on PATH. See https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azcopy-v10 for installation."
 
     AZCOPY_ARGS=(
       sync

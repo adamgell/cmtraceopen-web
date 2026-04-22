@@ -104,8 +104,8 @@ psql_cmd() {
 # ---------------------------------------------------------------------------
 # pre-flight checks
 # ---------------------------------------------------------------------------
-command -v psql   >/dev/null 2>&1 || die "psql not found on PATH"
-command -v gunzip >/dev/null 2>&1 || die "gunzip not found on PATH"
+command -v psql   >/dev/null 2>&1 || die "psql not found on PATH. Install the postgresql-client (Debian/Ubuntu) or postgresql (RHEL/Alpine) package."
+command -v gunzip >/dev/null 2>&1 || die "gunzip not found on PATH. Install the gzip package."
 
 log "Restore drill starting"
 log "  backup file : ${BACKUP_FILE}"

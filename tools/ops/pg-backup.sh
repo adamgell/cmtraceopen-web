@@ -74,8 +74,8 @@ die() {
 # ---------------------------------------------------------------------------
 # pre-flight checks
 # ---------------------------------------------------------------------------
-command -v pg_dumpall >/dev/null 2>&1 || die "pg_dumpall not found on PATH"
-command -v gzip       >/dev/null 2>&1 || die "gzip not found on PATH"
+command -v pg_dumpall >/dev/null 2>&1 || die "pg_dumpall not found on PATH. Install the postgresql-client (Debian/Ubuntu) or postgresql (RHEL/Alpine) package."
+command -v gzip       >/dev/null 2>&1 || die "gzip not found on PATH. Install the gzip package."
 
 mkdir -p "${BACKUP_DIR}" || die "cannot create backup directory: ${BACKUP_DIR}"
 
