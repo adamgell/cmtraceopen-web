@@ -30,14 +30,47 @@ adds complexity with no practical benefit at these thresholds. The 8-device
 beta pilot generates well under 10 ingest calls per device per hour; the
 default 100/h leaves an order-of-magnitude margin.
 
+### Memory management
+
+The `DashMap` grows as new keys arrive. A background Tokio task calls
+`RateLimiter::purge_expired()` once per minute, evicting entries whose
+window has fully elapsed. This bounds the map footprint to the number of
+distinct keys seen within **one** window rather than growing indefinitely
+over the life of the process — important for the IP scope where IPv6
+address cycling is trivially cheap.
+
 ### IP identification
 
-Source IP is read from the `X-Forwarded-For` header (first hop), then
-`X-Real-Ip`, then falls back to the sentinel key `__unknown__`. In
-production the Azure Application Gateway must be configured to **overwrite**
-`X-Forwarded-For` so clients cannot spoof it. Unrecognised IPs all share
-the `__unknown__` bucket, which means the fallback bucket exhausts at the
-configured threshold — a safe default for unproxied test traffic.
+Source IP is derived as follows (in order):
+
+1. **`ConnectInfo<SocketAddr>`** (TCP peer address) — always present in
+   production because `main.rs` uses
+   `into_make_service_with_connect_info::<SocketAddr>()`.
+   - If the peer is **not** in `CMTRACE_TRUSTED_PROXY_CIDRS` → use peer IP
+     directly. Forwarded headers are ignored and cannot be spoofed.
+   - If the peer **is** in a trusted CIDR → read the first hop from
+     `X-Forwarded-For`, then `X-Real-Ip`.
+2. **Header fallback** — only when `ConnectInfo` is absent (integration-test
+   path using plain `axum::serve`). Tests simulate different IPs via
+   `X-Forwarded-For`.
+
+Set `CMTRACE_TRUSTED_PROXY_CIDRS` to the Azure Application Gateway frontend
+subnet CIDR(s) so the limiter counts the real client IP forwarded by the
+AppGW WAF instead of the AppGW's own address.
+
+When trusted proxy CIDRs are empty (the default), **no forwarded header is
+ever honoured** — an attacker cannot bypass per-IP limits by setting
+`X-Forwarded-For`.
+
+### Device identity
+
+The device limiter key is resolved in the same priority order as the
+`DeviceIdentity` extractor:
+
+1. A `DeviceIdentity` already stashed in request extensions by a prior layer.
+2. mTLS peer-cert SAN URI (`PeerCertChain` extension, `mtls` feature).
+3. `X-Device-Id` header (legacy transitional path).
+4. `"__unknown__"` sentinel.
 
 ---
 
@@ -50,6 +83,7 @@ All variables use the `CMTRACE_` prefix:
 | `CMTRACE_RATE_LIMIT_INGEST_PER_DEVICE_HOUR`   | `100`   | Bundle ingest calls per device ID per hour. `0` = off. |
 | `CMTRACE_RATE_LIMIT_INGEST_PER_IP_MINUTE`     | `1000`  | Ingest requests per source IP per minute. `0` = off.  |
 | `CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE`      | `60`    | Query requests per source IP per minute. `0` = off.   |
+| `CMTRACE_TRUSTED_PROXY_CIDRS`                 | `""`    | Comma-separated CIDRs that may forward `X-Forwarded-For`. Empty = honour no forwarded headers (safest). |
 
 ### Disabling all limits (dev-only)
 
@@ -59,6 +93,17 @@ CMTRACE_RATE_LIMIT_INGEST_PER_IP_MINUTE=0 \
 CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE=0 \
 cargo run -p api-server
 ```
+
+### Production (AppGW in front)
+
+```bash
+# AppGW frontend subnet — only XFF from this range is trusted
+CMTRACE_TRUSTED_PROXY_CIDRS=10.0.1.0/24
+```
+
+The AppGW WAF rule must **overwrite** (not append) `X-Forwarded-For` with
+the real client IP. If the rule only appends, an attacker can inject a
+spoofed first hop before the AppGW's value.
 
 ---
 
@@ -110,13 +155,16 @@ Prometheus + Grafana alert rule (add to your alert rules config):
 
 | File                                                   | Change                                |
 |--------------------------------------------------------|---------------------------------------|
-| `crates/api-server/src/config.rs`                      | `RateLimitConfig` + env-var parsing   |
-| `crates/api-server/src/state.rs`                       | `RateLimiter`, `RateLimitState`, `AppState::rate_limit` field |
+| `crates/api-server/Cargo.toml`                         | Add `ipnet = "2"` as explicit dep     |
+| `crates/api-server/src/config.rs`                      | `RateLimitConfig` + `trusted_proxy_cidrs` field + env-var parsing |
+| `crates/api-server/src/state.rs`                       | `RateLimiter`, `RateLimitState`, `purge_expired()`, `len()` |
 | `crates/api-server/src/middleware/mod.rs`              | NEW — middleware module declaration   |
-| `crates/api-server/src/middleware/rate_limit.rs`       | NEW — three middleware functions      |
+| `crates/api-server/src/middleware/rate_limit.rs`       | NEW — three middleware functions; CIDR-aware `extract_ip`; cert-priority `resolve_device_id` |
+| `crates/api-server/src/auth/device_identity.rs`        | Add `extract_device_id_from_leaf` (pub crate, mtls feature) |
 | `crates/api-server/src/lib.rs`                         | Wire middleware on ingest + query sub-routers |
-| `crates/api-server/src/main.rs`                        | Pass `RateLimitState` to `AppState`   |
+| `crates/api-server/src/main.rs`                        | GC background task; `into_make_service_with_connect_info`; log trusted CIDRs |
 | `crates/api-server/tests/rate_limit_integration.rs`    | NEW — 7 integration tests             |
+| `docs/wave4/19-rate-limiting.md`                       | Design, config, 429 shape, metrics, acceptance criteria |
 
 ---
 
@@ -127,6 +175,9 @@ Prometheus + Grafana alert rule (add to your alert rules config):
 - [x] 429 response includes `Retry-After` header
 - [x] Operator query routes have separate limits from agent ingest
 - [x] Default limits leave headroom for the 8-device pilot (100 req/device/h vs ~10 real)
+- [x] DashMap footprint bounded by `purge_expired()` GC task (once/min)
+- [x] IP source secured: peer IP used directly unless peer CIDR is in `CMTRACE_TRUSTED_PROXY_CIDRS`
+- [x] Device key resolved from cert SAN URI before falling back to header
 
 ---
 

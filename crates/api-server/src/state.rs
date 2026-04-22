@@ -14,6 +14,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use ipnet::IpNet;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
@@ -44,6 +45,14 @@ struct WindowEntry {
 /// The implementation uses a write lock (via `DashMap::entry`) per check so
 /// the increment and the threshold comparison are atomic with respect to other
 /// concurrent callers for the same key.
+///
+/// ## Memory management
+///
+/// The map grows as new keys arrive. Call [`RateLimiter::purge_expired`]
+/// periodically (e.g. from `main.rs` once per window size) to evict entries
+/// whose window has fully elapsed and whose count would reset on the next
+/// request anyway. This bounds the footprint to the number of *distinct* keys
+/// seen within a single window, which is finite for all realistic deployments.
 pub struct RateLimiter {
     windows: DashMap<String, WindowEntry>,
     /// Maximum requests in a single window.
@@ -89,6 +98,29 @@ impl RateLimiter {
             Err(remaining)
         }
     }
+
+    /// Remove all entries whose window has fully elapsed.
+    ///
+    /// Safe to call concurrently with [`check`] — `DashMap::retain` takes a
+    /// shard lock per shard (not the whole map), so live traffic on other
+    /// shards is unaffected. Entries that arrive during a `purge_expired` call
+    /// may or may not be swept; both outcomes are correct (a fresh entry would
+    /// pass `check` on the next call anyway).
+    ///
+    /// Intended to be called by a background task once per window duration so
+    /// the map footprint is bounded by the number of distinct keys seen in any
+    /// single window rather than growing unboundedly over the lifetime of the
+    /// process.
+    pub fn purge_expired(&self) {
+        let now = Instant::now();
+        self.windows
+            .retain(|_, entry| now.duration_since(entry.window_start) < self.window);
+    }
+
+    /// Number of live keys in the map. Useful for logging + metrics.
+    pub fn len(&self) -> usize {
+        self.windows.len()
+    }
 }
 
 /// Collection of rate limiters for the three protected scopes.
@@ -103,6 +135,10 @@ pub struct RateLimitState {
     pub ip_ingest: Option<RateLimiter>,
     /// Per-source-IP limiter on query routes. Window: 1 minute.
     pub ip_query: Option<RateLimiter>,
+    /// CIDRs trusted to forward the real client IP in `X-Forwarded-For` /
+    /// `X-Real-Ip`. Empty means headers are untrusted and the TCP peer
+    /// address is used directly for IP-based rate limiting.
+    pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
 impl RateLimitState {
@@ -116,6 +152,7 @@ impl RateLimitState {
             device_ingest: make(cfg.ingest_per_device_hour, Duration::from_secs(3600)),
             ip_ingest: make(cfg.ingest_per_ip_minute, Duration::from_secs(60)),
             ip_query: make(cfg.query_per_ip_minute, Duration::from_secs(60)),
+            trusted_proxy_cidrs: cfg.trusted_proxy_cidrs.clone(),
         }
     }
 
@@ -126,6 +163,7 @@ impl RateLimitState {
             device_ingest: None,
             ip_ingest: None,
             ip_query: None,
+            trusted_proxy_cidrs: vec![],
         }
     }
 }

@@ -125,6 +125,7 @@ async fn per_device_limit_triggers_429_and_isolates_other_devices() {
         ingest_per_device_hour: 2,
         ingest_per_ip_minute: 0, // disabled — don't interfere
         query_per_ip_minute: 0,
+        ..Default::default()
     })
     .await;
 
@@ -159,6 +160,7 @@ async fn per_device_429_includes_retry_after_and_scope_hint() {
         ingest_per_device_hour: 1,
         ingest_per_ip_minute: 0,
         query_per_ip_minute: 0,
+        ..Default::default()
     })
     .await;
 
@@ -232,6 +234,7 @@ async fn zero_limit_disables_device_rate_limiting() {
         ingest_per_device_hour: 0, // disabled
         ingest_per_ip_minute: 0,
         query_per_ip_minute: 0,
+        ..Default::default()
     })
     .await;
 
@@ -260,6 +263,7 @@ async fn per_ip_ingest_limit_triggers_429_with_ip_scope() {
         ingest_per_device_hour: 0, // don't interfere
         ingest_per_ip_minute: 2,
         query_per_ip_minute: 0,
+        ..Default::default()
     })
     .await;
 
@@ -309,6 +313,7 @@ async fn per_ip_query_limit_triggers_429() {
         ingest_per_device_hour: 0,
         ingest_per_ip_minute: 0,
         query_per_ip_minute: 2,
+        ..Default::default()
     })
     .await;
 
@@ -347,6 +352,7 @@ async fn query_limit_does_not_affect_ingest() {
         ingest_per_device_hour: 0, // unlimited ingest
         ingest_per_ip_minute: 0,
         query_per_ip_minute: 1, // tight query limit
+        ..Default::default()
     })
     .await;
 

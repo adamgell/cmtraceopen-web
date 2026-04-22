@@ -220,6 +220,35 @@ fn extract_identity_from_leaf(
     None
 }
 
+/// Lightweight variant of [`extract_identity_from_leaf`] for the rate-limit
+/// middleware: returns only the device-ID string, skipping the SHA-256
+/// fingerprint computation (which is not needed for rate-limit key purposes).
+///
+/// `pub(crate)` so `middleware::rate_limit` can call it without making the
+/// full `ParsedSanUri` type part of the public rate-limit API.
+#[cfg(feature = "mtls")]
+pub(crate) fn extract_device_id_from_leaf(
+    leaf_der: &[u8],
+    expected_scheme: &str,
+) -> Option<String> {
+    use x509_parser::extensions::{GeneralName, ParsedExtension};
+    use x509_parser::prelude::*;
+
+    let (_, cert) = X509Certificate::from_der(leaf_der).ok()?;
+    for ext in cert.extensions() {
+        if let ParsedExtension::SubjectAlternativeName(san) = ext.parsed_extension() {
+            for gn in &san.general_names {
+                if let GeneralName::URI(uri) = gn {
+                    if let Ok(parsed) = parse_san_uri(uri, expected_scheme) {
+                        return Some(parsed.device_id);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(feature = "mtls")]
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();

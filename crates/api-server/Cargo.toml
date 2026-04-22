@@ -176,7 +176,8 @@ rustls-pki-types = { version = "1", optional = true }
 # pulled in (verified by the workspace `cargo tree` rule).
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false }
-# CIDR parsing for CMTRACE_TRUSTED_PROXY_CIDR (AppGW-terminated mTLS).
+# CIDR parsing for CMTRACE_TRUSTED_PROXY_CIDR (AppGW-terminated mTLS) and
+# the trusted-proxy IP-source check used by the rate limiter.
 # Pure-Rust, no ring / openssl dependency.
 ipnet = "2"
 

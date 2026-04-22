@@ -31,6 +31,20 @@ pub struct RateLimitConfig {
     /// `CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE`. Default: `60`. `0` =
     /// disabled.
     pub query_per_ip_minute: u64,
+
+    /// CIDRs whose source IP is trusted to have set `X-Forwarded-For` or
+    /// `X-Real-Ip` correctly. Env: `CMTRACE_TRUSTED_PROXY_CIDRS`,
+    /// comma-separated (e.g. `10.0.0.0/8,172.16.0.0/12`). Default: empty.
+    ///
+    /// When empty the IP-based rate limiters use the TCP peer address
+    /// directly (safest default — no header spoofing possible). Set to the
+    /// Azure Application Gateway frontend subnet CIDR(s) in production so
+    /// the rate limiter sees the client IP forwarded by the AppGW WAF
+    /// rather than the AppGW's own address.
+    ///
+    /// Invalid CIDR strings are silently skipped (logged at startup by
+    /// `main.rs`).
+    pub trusted_proxy_cidrs: Vec<IpNet>,
 }
 
 impl Default for RateLimitConfig {
@@ -39,6 +53,7 @@ impl Default for RateLimitConfig {
             ingest_per_device_hour: 100,
             ingest_per_ip_minute: 1000,
             query_per_ip_minute: 60,
+            trusted_proxy_cidrs: vec![],
         }
     }
 }
@@ -576,6 +591,16 @@ impl Config {
                     "CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE",
                     60,
                 )?,
+                trusted_proxy_cidrs: env::var("CMTRACE_TRUSTED_PROXY_CIDRS")
+                    .ok()
+                    .map(|raw| {
+                        raw.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .filter_map(|s| s.parse::<IpNet>().ok())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             },
         })
     }

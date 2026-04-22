@@ -17,24 +17,45 @@
 //!
 //! ## Source-IP extraction
 //!
-//! The middleware reads `X-Forwarded-For` (first hop) and falls back to
-//! `X-Real-Ip`. In production the Azure Application Gateway should be
-//! configured to *overwrite* `X-Forwarded-For` so clients cannot spoof it.
-//! When neither header is present the request is counted under the sentinel
-//! key `"__unknown__"`; the limiter still fires at the configured threshold,
-//! which provides a safe default for unproxied traffic.
+//! The middleware uses the TCP peer address (`ConnectInfo<SocketAddr>`) when
+//! it is available (production path — `main.rs` uses
+//! `into_make_service_with_connect_info`).  If the peer address falls inside
+//! one of the configured `CMTRACE_TRUSTED_PROXY_CIDRS` CIDRs, the first value
+//! in `X-Forwarded-For` (or `X-Real-Ip`) is used instead so the AppGW WAF
+//! forwarded address is counted rather than the AppGW's own address.
+//!
+//! If `ConnectInfo` is absent (integration-test path that uses plain
+//! `axum::serve`) the old header-first fallback behaviour is preserved so
+//! tests can still simulate different source IPs via `X-Forwarded-For`.
+//!
+//! When trusted proxy CIDRs are empty (the default), the peer address is
+//! **always** used and forwarded headers are completely ignored for IP-based
+//! limiting — headers cannot be spoofed by the client.
+//!
+//! ## Device identity
+//!
+//! The device limiter key is resolved in the same priority order as the
+//! [`crate::auth::DeviceIdentity`] extractor:
+//!
+//! 1. `DeviceIdentity` already stashed in request extensions (by a prior
+//!    middleware layer).
+//! 2. mTLS peer-cert SAN URI (`PeerCertChain` extension, `mtls` feature).
+//! 3. `X-Device-Id` header (legacy transitional path).
+//! 4. `"__unknown__"` sentinel.
 //!
 //! ## Metrics
 //!
-//! Every rejected request increments:
+//! Every rejected request increments (only when the matched route template is
+//! known — the `"unknown"` label is dropped to keep cardinality bounded):
 //! ```text
 //! cmtrace_rate_limit_rejected_total{scope="device|ip", route="<template>"}
 //! ```
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderValue, Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -50,9 +71,9 @@ use crate::state::AppState;
 
 /// Axum middleware: per-device-ID rate limit on bundle-ingest routes.
 ///
-/// Reads the device identity from the `X-Device-Id` header (legacy path) or
-/// from a future cert-identity extension. Requests that exceed the hourly
-/// limit return 429 + `Retry-After`.
+/// Resolves the device identity from (in order) a previously-stashed
+/// `DeviceIdentity` extension, the mTLS cert SAN URI, or the `X-Device-Id`
+/// header. Requests that exceed the hourly limit return 429 + `Retry-After`.
 pub async fn device_ingest_middleware(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
@@ -63,21 +84,17 @@ pub async fn device_ingest_middleware(
         None => return next.run(req).await,
     };
 
-    let device_id = req
-        .headers()
-        .get(DEVICE_ID_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("__unknown__")
-        .to_string();
+    let device_id = resolve_device_id(&req, &state);
 
     if let Err(retry_after) = limiter.check(&device_id) {
-        let route = route_label(&req);
-        metrics::counter!(
-            "cmtrace_rate_limit_rejected_total",
-            "scope" => "device",
-            "route" => route,
-        )
-        .increment(1);
+        if let Some(route) = route_label(&req) {
+            metrics::counter!(
+                "cmtrace_rate_limit_rejected_total",
+                "scope" => "device",
+                "route" => route,
+            )
+            .increment(1);
+        }
         return too_many_requests(
             retry_after.as_secs().max(1),
             "device",
@@ -102,15 +119,16 @@ pub async fn ip_ingest_middleware(
         None => return next.run(req).await,
     };
 
-    let ip = extract_ip(&req);
+    let ip = extract_ip(&req, &state.rate_limit.trusted_proxy_cidrs);
     if let Err(retry_after) = limiter.check(&ip) {
-        let route = route_label(&req);
-        metrics::counter!(
-            "cmtrace_rate_limit_rejected_total",
-            "scope" => "ip",
-            "route" => route,
-        )
-        .increment(1);
+        if let Some(route) = route_label(&req) {
+            metrics::counter!(
+                "cmtrace_rate_limit_rejected_total",
+                "scope" => "ip",
+                "route" => route,
+            )
+            .increment(1);
+        }
         return too_many_requests(
             retry_after.as_secs().max(1),
             "ip",
@@ -136,15 +154,16 @@ pub async fn ip_query_middleware(
         None => return next.run(req).await,
     };
 
-    let ip = extract_ip(&req);
+    let ip = extract_ip(&req, &state.rate_limit.trusted_proxy_cidrs);
     if let Err(retry_after) = limiter.check(&ip) {
-        let route = route_label(&req);
-        metrics::counter!(
-            "cmtrace_rate_limit_rejected_total",
-            "scope" => "ip",
-            "route" => route,
-        )
-        .increment(1);
+        if let Some(route) = route_label(&req) {
+            metrics::counter!(
+                "cmtrace_rate_limit_rejected_total",
+                "scope" => "ip",
+                "route" => route,
+            )
+            .increment(1);
+        }
         return too_many_requests(
             retry_after.as_secs().max(1),
             "ip",
@@ -174,14 +193,98 @@ fn too_many_requests(retry_after_secs: u64, scope: &str, hint: &str) -> Response
     resp
 }
 
-/// Extract the client IP from `X-Forwarded-For` (leftmost entry) or
-/// `X-Real-Ip`. Falls back to `"__unknown__"` when neither header is present.
+/// Resolve the device key for rate limiting.
 ///
-/// In production the AppGW WAF should overwrite `X-Forwarded-For` so this
-/// value is trusted. In local dev or test it defaults to the loopback
-/// sentinel, which counts against the same bucket as all other unidentified
-/// local callers.
-fn extract_ip(req: &Request<Body>) -> String {
+/// Priority order (mirrors [`crate::auth::DeviceIdentity`]):
+/// 1. `DeviceIdentity` already stashed in request extensions.
+/// 2. mTLS `PeerCertChain` SAN URI (requires `mtls` feature).
+/// 3. `X-Device-Id` header (legacy transitional path).
+/// 4. `"__unknown__"` sentinel.
+fn resolve_device_id(req: &Request<Body>, state: &AppState) -> String {
+    // 1. Already resolved by a prior middleware/extension?
+    if let Some(id) = req.extensions().get::<crate::auth::DeviceIdentity>() {
+        return id.device_id.clone();
+    }
+
+    // 2. mTLS peer-cert SAN URI (only compiled in with the `mtls` feature).
+    #[cfg(feature = "mtls")]
+    if let Some(chain) = req.extensions().get::<crate::tls::PeerCertChain>() {
+        if let Some(leaf) = chain.leaf() {
+            if let Some(parsed) =
+                crate::auth::device_identity::extract_device_id_from_leaf(
+                    leaf.as_ref(),
+                    &state.mtls.expected_san_uri_scheme,
+                )
+            {
+                return parsed;
+            }
+        }
+    }
+
+    // Suppress "unused variable" warning when the mtls feature is off.
+    let _ = state;
+
+    // 3. Legacy `X-Device-Id` header fallback.
+    if let Some(id) = req
+        .headers()
+        .get(DEVICE_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 256)
+    {
+        return id;
+    }
+
+    // 4. Sentinel.
+    "__unknown__".to_string()
+}
+
+/// Extract the effective client IP to use as the rate-limit key.
+///
+/// ## Trust model
+///
+/// **If `ConnectInfo<SocketAddr>` is present** (production — server was
+/// started with `into_make_service_with_connect_info`):
+/// - Peer IP **not** in any configured trusted-proxy CIDR → use peer IP
+///   directly. Forwarded headers are ignored; they cannot be spoofed.
+/// - Peer IP **is** in a trusted-proxy CIDR (AppGW etc.) → read the
+///   first token from `X-Forwarded-For`, then `X-Real-Ip`. The AppGW is
+///   required to overwrite (not append) that header in the WAF rules.
+///
+/// **If `ConnectInfo` is absent** (integration-test path that uses plain
+/// `axum::serve`):
+/// - Fall back to the old header-first behaviour so tests can simulate
+///   different source IPs via `X-Forwarded-For`.
+///
+/// When no useful IP is found the sentinel `"__unknown__"` is returned so
+/// traffic still counts against *some* bucket.
+fn extract_ip(req: &Request<Body>, trusted_cidrs: &[ipnet::IpNet]) -> String {
+    // Try to get the real TCP peer address from ConnectInfo.
+    if let Some(ConnectInfo(peer_addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        let peer_ip = peer_addr.ip();
+        if trusted_cidrs.is_empty() || !cidr_contains(trusted_cidrs, peer_ip) {
+            // Not from a trusted proxy — use peer IP directly.
+            return peer_ip.to_string();
+        }
+        // Peer is a trusted proxy — honor its forwarded header.
+        if let Some(forwarded) = forwarded_ip_from_headers(req) {
+            return forwarded;
+        }
+        // Trusted proxy but no header set — fall through to peer IP.
+        return peer_ip.to_string();
+    }
+
+    // No ConnectInfo (test path) — fall back to header-based extraction.
+    forwarded_ip_from_headers(req).unwrap_or_else(|| "__unknown__".to_string())
+}
+
+/// Check whether `ip` is contained in any of the supplied CIDR ranges.
+fn cidr_contains(cidrs: &[ipnet::IpNet], ip: IpAddr) -> bool {
+    cidrs.iter().any(|cidr| cidr.contains(&ip))
+}
+
+/// Read the first value from `X-Forwarded-For`, then `X-Real-Ip`.
+fn forwarded_ip_from_headers(req: &Request<Body>) -> Option<String> {
     req.headers()
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -194,15 +297,14 @@ fn extract_ip(req: &Request<Body>) -> String {
                 .map(|s| s.trim().to_string())
         })
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "__unknown__".to_string())
 }
 
-/// Return a short route label for the metrics tag. Uses the `MatchedPath`
-/// extension if available (it is when the middleware is attached to a
-/// sub-router after route matching); falls back to `"unknown"`.
-fn route_label(req: &Request<Body>) -> String {
+/// Return the matched-route template, or `None` when the route is unknown.
+///
+/// Unknown routes are excluded from the metric to keep cardinality bounded
+/// (un-matched paths can be arbitrary attacker-controlled strings).
+fn route_label(req: &Request<Body>) -> Option<String> {
     req.extensions()
         .get::<axum::extract::MatchedPath>()
         .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
