@@ -40,7 +40,11 @@
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
+#[cfg(all(feature = "mtls", feature = "crl"))]
+use axum::http::header::RETRY_AFTER;
 use axum::http::header::WWW_AUTHENTICATE;
+#[cfg(all(feature = "mtls", feature = "crl"))]
+use axum::http::HeaderValue;
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -51,6 +55,9 @@ use sha2::{Digest, Sha256};
 #[cfg(feature = "mtls")]
 use tracing::debug;
 use tracing::warn;
+
+#[cfg(all(feature = "mtls", feature = "crl"))]
+use crate::auth::RevocationStatus;
 
 use crate::extract::DEVICE_ID_HEADER;
 use crate::state::AppState;
@@ -197,6 +204,95 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(h.finalize())
 }
 
+/// Apply the CRL decision matrix to a leaf cert. Returns `None` to
+/// continue extractor flow (accept), or `Some(Response)` carrying the
+/// rejection to return to the client. See `docs/wave4/06-crl-wiring.md`
+/// for the full table.
+///
+/// Re-parses the leaf DER inline rather than threading the parsed cert
+/// through `extract_identity_from_leaf`; the parse is cheap (microseconds
+/// on a 2 KiB leaf) and keeping the surfaces independent means a future
+/// rework of either path doesn't drag the other.
+#[cfg(all(feature = "mtls", feature = "crl"))]
+fn check_revocation(
+    crl: &crate::auth::CrlCache,
+    leaf_der: &[u8],
+) -> Option<Response> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    // If the leaf can't be parsed at all, the SAN-URI extractor below
+    // will also fail and the request will end up rejected for a
+    // different reason. Don't conflate that with revocation here —
+    // accept-and-let-the-next-stage-decide.
+    let (_, parsed) = match X509Certificate::from_der(leaf_der) {
+        Ok(p) => p,
+        Err(err) => {
+            warn!(%err, "CRL check: leaf cert failed to parse; deferring to identity extractor");
+            return None;
+        }
+    };
+    let serial = parsed.tbs_certificate.raw_serial();
+
+    match crl.revocation_status(serial) {
+        RevocationStatus::Revoked => {
+            warn!(
+                serial = %hex::encode(serial),
+                "client cert revoked by CRL; rejecting request",
+            );
+            metrics::counter!(
+                "cmtrace_crl_revocations_total",
+                "result" => "rejected",
+            )
+            .increment(1);
+            let mut resp = (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorBody {
+                    error: "unauthorized".into(),
+                    message: "client certificate revoked".into(),
+                }),
+            )
+                .into_response();
+            resp.headers_mut()
+                .insert(WWW_AUTHENTICATE, HeaderValue::from_static("cert-revoked"));
+            Some(resp)
+        }
+        RevocationStatus::NotRevoked => None,
+        RevocationStatus::Unknown => {
+            if crl.fail_open() {
+                metrics::counter!(
+                    "cmtrace_crl_revocations_total",
+                    "result" => "unknown_fail_open",
+                )
+                .increment(1);
+                None
+            } else {
+                warn!(
+                    serial = %hex::encode(serial),
+                    "client cert revocation status unknown (CRL cache cold); rejecting per crl_fail_open=false",
+                );
+                metrics::counter!(
+                    "cmtrace_crl_revocations_total",
+                    "result" => "unknown_fail_closed",
+                )
+                .increment(1);
+                let mut resp = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ErrorBody {
+                        error: "service_unavailable".into(),
+                        message:
+                            "client cert revocation status unknown; CRL cache not yet warm. Retry shortly."
+                                .into(),
+                    }),
+                )
+                    .into_response();
+                resp.headers_mut()
+                    .insert(RETRY_AFTER, HeaderValue::from_static("60"));
+                Some(resp)
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Extractor
 // ---------------------------------------------------------------------------
@@ -219,6 +315,18 @@ where
         #[cfg(feature = "mtls")]
         if let Some(chain) = parts.extensions.get::<crate::tls::PeerCertChain>() {
             if let Some(leaf) = chain.leaf() {
+                // 1a. CRL revocation check, before any identity is
+                //     constructed. See `docs/wave4/06-crl-wiring.md`
+                //     for the full decision matrix. This is the entire
+                //     payoff of PR #47's polling loop: without this
+                //     block the cache populates but nothing consults it.
+                #[cfg(feature = "crl")]
+                if let Some(crl) = app_state.crl_cache.as_ref() {
+                    if let Some(rejection) = check_revocation(crl, leaf.as_ref()) {
+                        return Err(rejection);
+                    }
+                }
+
                 if let Some((parsed, fingerprint)) = extract_identity_from_leaf(
                     leaf.as_ref(),
                     &mtls_cfg.expected_san_uri_scheme,
@@ -407,6 +515,194 @@ mod tests {
         assert_eq!(id.source, DeviceIdentitySource::HeaderTemp);
         assert!(id.tenant_id.is_none());
         assert!(id.cert_fingerprint.is_none());
+    }
+
+    // ---- CRL wiring ---------------------------------------------------
+    //
+    // These tests exercise the new CRL plumbing added by
+    // `feat/wire-crl-revocation`. They drive `check_revocation` directly
+    // instead of constructing a full extractor pipeline because:
+    //   - the function is the entire decision surface (status code,
+    //     header, metric label, body shape all live there);
+    //   - building a `PeerCertChain` requires either rcgen (test-mtls
+    //     feature only) or a hand-rolled X.509 leaf, both of which add
+    //     complexity that doesn't change what's being verified.
+    //
+    // We hand-roll a minimal DER cert just rich enough for x509-parser
+    // to expose `tbs_certificate.raw_serial()`. This mirrors the
+    // hand-rolled CRL DER used by `crl::tests::build_minimal_crl`.
+    #[cfg(all(feature = "mtls", feature = "crl"))]
+    mod crl_wiring {
+        use super::super::check_revocation;
+        use crate::auth::CrlCache;
+        use axum::http::header::{RETRY_AFTER, WWW_AUTHENTICATE};
+        use axum::http::StatusCode;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        /// Build a minimal DER X.509 v1 cert with the given serial.
+        ///
+        /// Mirrors `crl::tests::build_minimal_crl`'s ASN.1 layout: just
+        /// enough structure for `x509-parser` to parse it and surface
+        /// `tbs_certificate.raw_serial()`. Not signed — `x509-parser`
+        /// without the `verify` feature doesn't check signatures, and
+        /// the workspace bans the `verify` feature (pulls ring).
+        fn build_minimal_leaf(serial: &[u8]) -> Vec<u8> {
+            // sha256WithRSAEncryption AlgorithmIdentifier
+            let alg_id: Vec<u8> = vec![
+                0x30, 0x0d,
+                0x06, 0x09,
+                0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
+                0x05, 0x00,
+            ];
+
+            // Issuer + Subject: SEQUENCE { SET { SEQUENCE { OID CN, UTF8 "test" }}}
+            fn name(cn: &[u8]) -> Vec<u8> {
+                let mut atv: Vec<u8> = Vec::new();
+                atv.extend_from_slice(&[0x06, 0x03, 0x55, 0x04, 0x03]);
+                atv.push(0x0c);
+                atv.push(cn.len() as u8);
+                atv.extend_from_slice(cn);
+                let mut atv_seq = vec![0x30, atv.len() as u8];
+                atv_seq.extend_from_slice(&atv);
+                let mut rdn = vec![0x31, atv_seq.len() as u8];
+                rdn.extend_from_slice(&atv_seq);
+                let mut out = vec![0x30, rdn.len() as u8];
+                out.extend_from_slice(&rdn);
+                out
+            }
+            let issuer = name(b"test-ca");
+            let subject = name(b"test-leaf");
+
+            // Validity: SEQUENCE { UTCTime "250101000000Z", UTCTime "350101000000Z" }
+            let validity: Vec<u8> = vec![
+                0x30, 0x1e,
+                0x17, 0x0d, b'2', b'5', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
+                0x17, 0x0d, b'3', b'5', b'0', b'1', b'0', b'1', b'0', b'0', b'0', b'0', b'0', b'0', b'Z',
+            ];
+
+            // SubjectPublicKeyInfo: minimal — RSA OID, NULL params,
+            // BIT STRING wrapping a SEQUENCE { INTEGER 1, INTEGER 1 }.
+            // (The exact RSA modulus/exponent are unused — x509-parser
+            // only walks the structure to surface tbsCertificate fields.)
+            //
+            // Layout:
+            //   inner_pubkey  = 0x30 0x06 0x02 0x01 0x01 0x02 0x01 0x01  (8 bytes)
+            //   bit_string    = 0x03 0x09 0x00 <inner_pubkey>            (11 bytes)
+            //   alg_id        = 0x30 0x0d 0x06 0x09 <rsaEncryption OID> 0x05 0x00  (15 bytes)
+            //   spki body     = alg_id ++ bit_string                     (15 + 11 = 26 bytes)
+            let spki: Vec<u8> = vec![
+                0x30, 0x1a,                                     // SEQUENCE len 26
+                0x30, 0x0d,                                     // AlgorithmIdentifier len 13
+                0x06, 0x09,                                     // OID len 9
+                0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, // rsaEncryption
+                0x05, 0x00,                                     // NULL params
+                0x03, 0x09,                                     // BIT STRING len 9
+                0x00,                                           // 0 unused bits
+                0x30, 0x06,                                     // SEQUENCE len 6
+                0x02, 0x01, 0x01,                               // INTEGER 1 (modulus)
+                0x02, 0x01, 0x01,                               // INTEGER 1 (exponent)
+            ];
+
+            // tbsCertificate (v1): SEQUENCE { serial INTEGER, sigAlg, issuer, validity, subject, spki }
+            let mut serial_tlv = vec![0x02, serial.len() as u8];
+            serial_tlv.extend_from_slice(serial);
+            let mut tbs: Vec<u8> = Vec::new();
+            tbs.extend_from_slice(&serial_tlv);
+            tbs.extend_from_slice(&alg_id);
+            tbs.extend_from_slice(&issuer);
+            tbs.extend_from_slice(&validity);
+            tbs.extend_from_slice(&subject);
+            tbs.extend_from_slice(&spki);
+            let tbs_seq = wrap_seq(&tbs);
+
+            // Dummy signature.
+            let sig: Vec<u8> = vec![0x03, 0x05, 0x00, 0xde, 0xad, 0xbe, 0xef];
+
+            let mut cert: Vec<u8> = Vec::new();
+            cert.extend_from_slice(&tbs_seq);
+            cert.extend_from_slice(&alg_id);
+            cert.extend_from_slice(&sig);
+            wrap_seq(&cert)
+        }
+
+        fn wrap_seq(body: &[u8]) -> Vec<u8> {
+            let mut out = vec![0x30];
+            let len = body.len();
+            if len < 128 {
+                out.push(len as u8);
+            } else if len < 256 {
+                out.push(0x81);
+                out.push(len as u8);
+            } else {
+                out.push(0x82);
+                out.push((len >> 8) as u8);
+                out.push((len & 0xff) as u8);
+            }
+            out.extend_from_slice(body);
+            out
+        }
+
+        #[test]
+        fn crl_revoked_serial_returns_401() {
+            // Cache contains serial 0x42; leaf cert has serial 0x42.
+            // Expect: 401 Unauthorized + WWW-Authenticate: cert-revoked.
+            let cache = Arc::new(CrlCache::new(
+                ["http://example.invalid/crl".to_string()],
+                Duration::from_secs(3600),
+                false,
+            ));
+            let url: reqwest::Url = "http://example.invalid/crl".parse().unwrap();
+            cache.insert_for_test(url, vec![vec![0x42]]);
+
+            let leaf = build_minimal_leaf(&[0x42]);
+            let resp = check_revocation(&cache, &leaf)
+                .expect("revoked serial must produce a rejection response");
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(
+                resp.headers()
+                    .get(WWW_AUTHENTICATE)
+                    .map(|v| v.to_str().unwrap()),
+                Some("cert-revoked"),
+            );
+        }
+
+        #[test]
+        fn crl_unknown_serial_fail_open_passes() {
+            // Cache empty (no successful fetch ever), fail_open=true.
+            // Expect: None (accept and continue extractor flow).
+            let cache = Arc::new(CrlCache::new(
+                std::iter::empty::<String>(),
+                Duration::from_secs(3600),
+                true,
+            ));
+
+            let leaf = build_minimal_leaf(&[0x99]);
+            assert!(
+                check_revocation(&cache, &leaf).is_none(),
+                "fail_open=true with cold cache must accept",
+            );
+        }
+
+        #[test]
+        fn crl_unknown_serial_fail_closed_returns_503() {
+            // Cache empty, fail_open=false.
+            // Expect: 503 Service Unavailable + Retry-After: 60.
+            let cache = Arc::new(CrlCache::new(
+                std::iter::empty::<String>(),
+                Duration::from_secs(3600),
+                false,
+            ));
+
+            let leaf = build_minimal_leaf(&[0x99]);
+            let resp = check_revocation(&cache, &leaf)
+                .expect("fail_open=false with cold cache must reject");
+            assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                resp.headers().get(RETRY_AFTER).map(|v| v.to_str().unwrap()),
+                Some("60"),
+            );
+        }
     }
 
     #[tokio::test]
