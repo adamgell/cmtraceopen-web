@@ -97,7 +97,8 @@ param(
     [switch]  $SkipCertCheck,
     [string]  $IssuerPattern = 'issuing\.gell\.internal\.cdw\.lab',
     [string]  $ServiceAccount = 'cmtraceopen-runner',
-    [securestring] $ServicePassword
+    [securestring] $ServicePassword,
+    [switch]  $SkipSelfUpdate
 )
 
 if (-not $PrecheckOnly -and -not $Token) {
@@ -115,6 +116,44 @@ try {
 } catch {
     # Some .NET profiles may not expose Tls12; Invoke-RestMethod will
     # surface a clearer error below.
+}
+
+# ------------------------------------------------------------------------
+# Self-update: fetch the latest copy of this script from main and re-exec
+# if it differs from what's on disk. Keeps a runner host from silently
+# running stale logic after we push a fix. Opt out with -SkipSelfUpdate.
+# ------------------------------------------------------------------------
+if (-not $SkipSelfUpdate -and $MyInvocation.MyCommand.Path) {
+    $selfPath   = $MyInvocation.MyCommand.Path
+    $latestUri  = "https://raw.githubusercontent.com/adamgell/cmtraceopen-web/main/tools/intune-provision/Install-CmtraceRunner.ps1?t=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $latestTmp  = [IO.Path]::Combine([IO.Path]::GetDirectoryName($selfPath), 'Install-CmtraceRunner.ps1.new')
+    $savedProg  = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $latestUri -OutFile $latestTmp -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Write-Warning "Self-update check failed ($($_.Exception.Message)); continuing with local copy."
+        $latestTmp = $null
+    } finally {
+        $ProgressPreference = $savedProg
+    }
+    if ($latestTmp -and (Test-Path -LiteralPath $latestTmp)) {
+        $localHash  = (Get-FileHash -Path $selfPath   -Algorithm SHA256).Hash
+        $latestHash = (Get-FileHash -Path $latestTmp -Algorithm SHA256).Hash
+        if ($localHash -ne $latestHash) {
+            Write-Host "Self-updating from main (local $($localHash.Substring(0,8)) -> latest $($latestHash.Substring(0,8))) ..." -ForegroundColor Cyan
+            Move-Item -LiteralPath $latestTmp -Destination $selfPath -Force
+            # Re-exec with all original params + -SkipSelfUpdate so we
+            # don't loop. pwsh / powershell inherit the same interpreter.
+            $forwardedParams = @{} + $PSBoundParameters
+            $forwardedParams['SkipSelfUpdate'] = $true
+            & $selfPath @forwardedParams
+            exit $LASTEXITCODE
+        } else {
+            Remove-Item -LiteralPath $latestTmp -Force -ErrorAction SilentlyContinue
+            Write-Host 'Self-update check: already on latest.' -ForegroundColor DarkGray
+        }
+    }
 }
 
 # ------------------------------------------------------------------------
@@ -178,10 +217,11 @@ function Initialize-CmtraceServiceAccount {
             $Password = ConvertTo-SecureString -String $pt -AsPlainText -Force
         }
         Write-Host "Creating local account '$AccountName' ..." -ForegroundColor Green
+        # New-LocalUser caps Description at 48 chars on Windows.
         New-LocalUser -Name $AccountName `
                       -Password $Password `
                       -FullName 'CMTraceOpen GitHub Runner' `
-                      -Description 'Service account for the cmtraceopen-web self-hosted GitHub Actions runner.' `
+                      -Description 'cmtraceopen-web self-hosted runner account' `
                       -PasswordNeverExpires `
                       -AccountNeverExpires `
                       -UserMayNotChangePassword | Out-Null
