@@ -95,6 +95,13 @@ async fn init(
 
     let now = Utc::now();
 
+    // Bump the ingest-init counter as soon as we accept the request shape.
+    // We deliberately count *attempts*, not successes — a spike in this
+    // metric without a matching `cmtrace_ingest_bundles_finalized_total`
+    // climb is the signal for "agents are starting uploads but not
+    // finishing them" (network drops, sha mismatch, etc.).
+    metrics::counter!("cmtrace_ingest_bundles_initiated_total").increment(1);
+
     // Pre-register the device so the subsequent session insert's FK is
     // satisfied.
     state
@@ -316,6 +323,10 @@ async fn put_chunk(
     }
 
     info!(next_offset = new_offset, "chunk accepted");
+    // Count successful chunks only — failed appends have already returned
+    // above. Useful as a coarse throughput proxy; pair with the per-route
+    // request histogram for latency.
+    metrics::counter!("cmtrace_ingest_chunks_received_total").increment(1);
     Ok(Json(ChunkUploadResponse { next_offset: new_offset }))
 }
 
@@ -334,6 +345,28 @@ async fn finalize(
     Json(req): Json<BundleFinalizeRequest>,
 ) -> Result<(StatusCode, Json<BundleFinalizeResponse>), AppError> {
     let device_id = identity.device_id.clone();
+    let result = finalize_inner(state, device_id, upload_id, req).await;
+    // Map the outcome onto a single status label for the Prometheus
+    // counter. "ok" / "partial" mirror the parse_state the response carries
+    // (a re-finalize of a session whose parse landed partial returns
+    // "partial" without re-running the worker); every Err path collapses to
+    // "failed". Keeping the label cardinality at three values keeps Grafana
+    // dashboards trivial.
+    let status = match &result {
+        Ok((_, body)) if body.parse_state == "partial" => "partial",
+        Ok(_) => "ok",
+        Err(_) => "failed",
+    };
+    metrics::counter!("cmtrace_ingest_bundles_finalized_total", "status" => status).increment(1);
+    result
+}
+
+async fn finalize_inner(
+    state: Arc<AppState>,
+    device_id: String,
+    upload_id: Uuid,
+    req: BundleFinalizeRequest,
+) -> Result<(StatusCode, Json<BundleFinalizeResponse>), AppError> {
     validate_sha256_hex(&req.final_sha256)?;
 
     let upload = state.meta.get_upload(upload_id).await?;

@@ -4,6 +4,7 @@ pub mod entries;
 pub mod files;
 pub mod health;
 pub mod ingest;
+pub mod metrics;
 pub mod sessions;
 pub mod status;
 

@@ -144,6 +144,13 @@ x509-parser = { version = "0.16", optional = true }
 # (shared between `mtls` and `test-mtls` feature gates).
 http = { version = "1", optional = true }
 rustls-pki-types = { version = "1", optional = true }
+# Prometheus metrics. The metrics-rs facade (`metrics`) decouples emit
+# sites from the recorder backend, and `metrics-exporter-prometheus`
+# renders the standard text-exposition format that Prometheus + Grafana
+# scrape natively. Both crates are tiny and pure-rust — no ring/openssl
+# pulled in (verified by the workspace `cargo tree` rule).
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
 
 [dependencies.rcgen]
 version = "0.13"

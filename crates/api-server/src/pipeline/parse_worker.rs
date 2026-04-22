@@ -71,6 +71,7 @@ pub async fn parse_session(
         "starting background parse"
     );
 
+    let started = std::time::Instant::now();
     let outcome = match content_kind.as_str() {
         "evidence-zip" => parse_evidence_zip(session_id, &blob_uri, &deps).await,
         other => {
@@ -82,6 +83,12 @@ pub async fn parse_session(
             Err(format!("content kind {other:?} not yet supported"))
         }
     };
+    // Record the wall-clock parse duration regardless of outcome — slow
+    // parses are interesting whether they succeed or fail. The histogram
+    // is in seconds (Prometheus convention); the recorder applies the
+    // default bucket boundaries set in `state::install_metrics_recorder`.
+    metrics::histogram!("cmtrace_parse_worker_duration_seconds")
+        .record(started.elapsed().as_secs_f64());
 
     let final_state = match &outcome {
         Ok(ParseOutcome::Ok) => STATE_OK,
@@ -91,6 +98,10 @@ pub async fn parse_session(
             STATE_FAILED
         }
     };
+    // Mirror `final_state` into the Prometheus counter. Keeping the label
+    // values aligned with the DB's `parse_state` column means alert rules
+    // can be expressed identically against either source.
+    metrics::counter!("cmtrace_parse_worker_runs_total", "result" => final_state).increment(1);
 
     if let Err(e) = deps
         .meta

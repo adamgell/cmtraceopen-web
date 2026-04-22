@@ -180,10 +180,46 @@ sha/size/kind · `413` chunk over `MAX_CHUNK_SIZE`. Device identity is
 | `GET` | `/v1/sessions/{session_id}/files` | files emitted by the parser |
 | `GET` | `/v1/sessions/{session_id}/entries` | entries, filterable by `file`/`severity`/`after_ts`/`before_ts`/`q` |
 | `GET` | `/healthz` · `/readyz` · `/` | liveness · readiness · dev status page |
+| `GET` | `/metrics` | Prometheus text-exposition snapshot (no auth — see below) |
 
 All pagination responses: `{ items, nextCursor }`. Default limit 50–200,
 cap 500. Reference client: `tools/ship-bundle.sh` + `tools/query.sh`
 (see [`tools/README.md`](../tools/README.md)).
+
+### Observability — `/metrics`
+
+The api-server exposes a Prometheus 0.0.4 text-exposition endpoint at
+`GET /metrics`, backed by the `metrics` + `metrics-exporter-prometheus`
+crates (the modern metrics-rs ecosystem; we deliberately avoid the older
+`prometheus = "0.13"` crate and its hyper-tied scrape server). Recommended
+scrape interval: **15s** (Prometheus default); a `scrape_configs` block
+pointing at `<host>:8080/metrics` is all that's needed.
+
+`/metrics` is **unauthenticated** — Prometheus scrapers don't speak Bearer
+tokens by default, and the operator-bearer auth on this server is geared at
+human-driven JSON queries. In production, lock it down at the network layer
+(firewall / NetworkPolicy to the Prometheus pod only) or expose it on a
+separate listener bound to a private interface. Liveness / readiness probes
+keep their own routes (`/healthz`, `/readyz`) so probe latency doesn't drift
+as more metrics are added.
+
+Initial metric set:
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `cmtrace_http_requests_total` | counter | `path` (matched route template) | Every served HTTP request |
+| `cmtrace_http_request_duration_seconds` | histogram | `path` | End-to-end handler latency |
+| `cmtrace_ingest_bundles_initiated_total` | counter | — | Accepted ingest /init requests |
+| `cmtrace_ingest_bundles_finalized_total` | counter | `status=ok\|partial\|failed` | Finalize-attempt outcomes |
+| `cmtrace_ingest_chunks_received_total` | counter | — | Chunks successfully appended |
+| `cmtrace_parse_worker_runs_total` | counter | `result=ok\|partial\|failed` | Background parse-worker runs |
+| `cmtrace_parse_worker_duration_seconds` | histogram | — | Parse-worker wall-clock time |
+| `cmtrace_db_connections_in_use` | gauge | — | sqlx pool: `size - idle` |
+
+Path labels come from Axum's `MatchedPath` extractor (e.g.
+`/v1/devices/{device_id}/sessions`), so the `path` cardinality is bounded
+by the route table — adding a new route adds one label value, not one per
+device.
 
 ---
 

@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{MatchedPath, State},
@@ -22,7 +22,9 @@ use axum::{
 use crate::state::{AppState, UNMATCHED_ROUTE_KEY};
 use crate::storage::{PoolStats, SessionRow};
 
-/// Axum middleware that bumps the per-route request counter on every request.
+/// Axum middleware that bumps both the per-route request counter (used by the
+/// dev status page) and the Prometheus per-route counter / latency histogram
+/// on every request.
 ///
 /// Pulls the `MatchedPath` extension out of the request (set by Axum's
 /// router when a route matched) and increments that route's bucket. Requests
@@ -30,8 +32,16 @@ use crate::storage::{PoolStats, SessionRow};
 /// so the status page can surface probe traffic without inflating real
 /// route counts.
 ///
-/// Uses `Relaxed` ordering because the counter is a display-only metric — no
-/// other code branches on its value, so stricter ordering would be overkill.
+/// Uses `Relaxed` ordering on the per-route DashMap counter because it's a
+/// display-only metric — no other code branches on its value, so stricter
+/// ordering would be overkill. The Prometheus counter uses the same
+/// `MatchedPath` template (e.g. `/v1/devices/{device_id}/sessions`) rather
+/// than the raw URI so label cardinality stays bounded by the route table.
+///
+/// Also pulls the SQLite pool stats once per request and refreshes the
+/// `cmtrace_db_connections_in_use` gauge — sampling on the hot path keeps the
+/// gauge fresh without spawning a background task. The pool snapshot is a
+/// non-blocking read of two atomics, so the cost is negligible.
 pub async fn request_counter_middleware(
     State(state): State<Arc<AppState>>,
     req: Request<axum::body::Body>,
@@ -47,11 +57,25 @@ pub async fn request_counter_middleware(
     // shard. The returned guard derefs to the AtomicU64 we want to bump.
     state
         .request_counts
-        .entry(key)
+        .entry(key.clone())
         .or_insert_with(|| AtomicU64::new(0))
         .fetch_add(1, Ordering::Relaxed);
 
-    next.run(req).await
+    let start = Instant::now();
+    let response = next.run(req).await;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    metrics::counter!("cmtrace_http_requests_total", "path" => key.clone()).increment(1);
+    metrics::histogram!("cmtrace_http_request_duration_seconds", "path" => key).record(elapsed);
+
+    // Refresh the pool gauge from the snapshot. (size - idle) gives us the
+    // connections currently in-use, which is what the operator cares about
+    // for spotting saturation.
+    let pool = state.meta.pool_stats();
+    let in_use = pool.size.saturating_sub(pool.idle);
+    metrics::gauge!("cmtrace_db_connections_in_use").set(f64::from(in_use));
+
+    response
 }
 
 /// Render the status page. Returns HTML with an explicit UTF-8 content type.
@@ -441,6 +465,9 @@ mod tests {
             mtls: crate::state::MtlsRuntimeConfig::default(),
             #[cfg(feature = "crl")]
             crl_cache: None,
+            // Share the process-wide recorder so handler tests don't double-
+            // install (the metrics-rs recorder is global + install-once).
+            metrics: crate::state::install_metrics_recorder(),
         }
     }
 
