@@ -404,8 +404,10 @@ fn describe_metrics() {
     );
     describe_counter!(
         "cmtrace_peer_cert_source_total",
-        "Device-identity extractions by source: header (AppGW cert header), \
-         tls (in-process mTLS), or none (no cert / identity unavailable)."
+        "Device-identity extractions by source: header (AppGW cert header \
+         accepted), header_invalid (AppGW cert header rejected — decode \
+         failure or chain validation failure), tls (in-process mTLS), or \
+         none (no cert / identity unavailable)."
     );
 }
 

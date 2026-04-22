@@ -522,7 +522,29 @@ where
                         // Trusted source — read and decode the cert header.
                         if let Some(hv) = parts.headers.get(header_name.as_str()) {
                             if let Ok(cert_str) = hv.to_str() {
-                                if let Some(der) = decode_peer_cert_header(cert_str) {
+                                let decoded = decode_peer_cert_header(cert_str);
+                                if decoded.is_none() && !cert_str.trim().is_empty() {
+                                    // Header was present and non-empty but decode
+                                    // failed (none of raw-PEM / base64-PEM /
+                                    // base64-DER / percent-encoded paths matched).
+                                    // Surface as `header_invalid` so an operator
+                                    // pointing the header at the wrong source has a
+                                    // clear signal in the metric instead of cryptic
+                                    // downstream 401s.
+                                    warn!(
+                                        peer_ip = %ip,
+                                        header = %header_name,
+                                        "cert header present from trusted proxy but \
+                                         could not be decoded as PEM/DER (raw or \
+                                         base64 or percent-encoded); falling through",
+                                    );
+                                    metrics::counter!(
+                                        METRIC_PEER_CERT_SOURCE,
+                                        "source" => "header_invalid"
+                                    )
+                                    .increment(1);
+                                }
+                                if let Some(der) = decoded {
                                     // Re-validate the cert against our CA bundle
                                     // before trusting its SAN URI. AppGW should
                                     // have already verified the chain, but we
@@ -543,8 +565,18 @@ where
                                                  bundle validation (chain does not lead to a \
                                                  configured trust anchor); falling through",
                                             );
-                                            // Fall through: cert failed validation, do not
-                                            // extract identity from it.
+                                            // Bump the dedicated `header_invalid` metric label
+                                            // so security ops can spot forged-cert probe
+                                            // attempts in `cmtrace_peer_cert_source_total`
+                                            // independently from the all-paths-failed `none`
+                                            // bucket. Per-route enforcement
+                                            // (`require_on_ingest=true`) will still 401 on the
+                                            // fall-through.
+                                            metrics::counter!(
+                                                METRIC_PEER_CERT_SOURCE,
+                                                "source" => "header_invalid"
+                                            )
+                                            .increment(1);
                                         } else if let Some((parsed, fingerprint)) =
                                             extract_identity_from_leaf(
                                                 &der,

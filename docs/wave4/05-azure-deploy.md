@@ -431,13 +431,14 @@ each request's device identity was resolved:
 
 | Label `source=` | Meaning |
 | --- | --- |
-| `header` | Cert read from the reverse-proxy header (`CMTRACE_PEER_CERT_HEADER`). |
+| `header` | Cert read from the reverse-proxy header (`CMTRACE_PEER_CERT_HEADER`) and accepted (decoded + chain + SAN-URI all passed). |
+| `header_invalid` | Cert header was present but rejected — either the value couldn't be decoded as PEM/DER, or it failed the `CMTRACE_CLIENT_CA_BUNDLE` chain/expiry check. Look in the WARN logs for the `reason=` field; a sustained non-zero rate from a real device fleet indicates either a misconfigured AppGW `trustedRootCertificate` or active probing for forged-cert acceptance. |
 | `tls` | Cert from in-process mTLS session (`CMTRACE_TLS_ENABLED=true`). |
 | `none` | No cert found; request proceeded without a device identity (or was rejected). |
 
 Use this metric to confirm that requests are hitting the expected path and to
 detect unexpected `none` spikes (e.g. AppGW misconfiguration stopped forwarding
-the header).
+the header) or `header_invalid` spikes (forged-cert probes).
 
 ### AppGW configuration checklist
 
