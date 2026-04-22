@@ -1,7 +1,6 @@
 # 15 — Agent MSI CI Recipe
 
-**Status:** Live. Workflows implemented at `.github/workflows/agent-msi.yml`
-and `.github/workflows/sign-agent.yml`.
+**Status:** Live. Workflow implemented at `.github/workflows/agent-msi.yml`.
 
 **Audience:** operators building, signing, and releasing the
 `cmtraceopen-agent` Windows MSI installer.
@@ -10,12 +9,11 @@ and `.github/workflows/sign-agent.yml`.
 
 ## Overview
 
-The CI pipeline for the agent MSI lives in two workflows:
+The CI pipeline for the agent MSI lives in a single workflow:
 
 | Workflow | Purpose |
 |---|---|
-| `.github/workflows/agent-msi.yml` | Full build → sign → publish pipeline. Triggered by `agent-v*` tags and `workflow_dispatch`. |
-| `.github/workflows/sign-agent.yml` | Reusable signing workflow. Signs a previously uploaded artifact using signtool + the Cloud PKI cert. |
+| `.github/workflows/agent-msi.yml` | Full build → sign → publish pipeline. Triggered by `agent-v*` tags and `workflow_dispatch`. The signing logic lives inline in this workflow; a reusable signing workflow will be split out only when there is a second consumer that needs it. |
 
 ### Sign order
 
@@ -62,7 +60,11 @@ Required software on the VM:
 | Rust (stable) | 1.77.2+ | Via rustup; see `rust-toolchain.toml` |
 | WiX v4 | 4.0+ | Installed automatically by the workflow via `dotnet tool install` |
 
-See `docs/wave4/07-build-vm-runbook.md` for the full VM provisioning recipe.
+The full VM provisioning recipe (OS baseline, runner registration,
+Windows SDK install, Cloud PKI cert enrollment) is tracked as a
+separate runbook landing after this PR (docs/wave4/07-build-vm-runbook.md
+— *planned*). Until then, follow the "Required software" table above
+and the cert-enrollment steps in §3 below.
 
 ### 3. Cloud PKI code-signing cert
 
@@ -132,35 +134,6 @@ gh workflow run agent-msi.yml -f sign=false
 A `workflow_dispatch` run that succeeds with `sign=true` (the default)
 satisfies the acceptance criterion "Manual workflow_dispatch run produces
 a signed MSI in the workflow artifacts".
-
----
-
-## Using the reusable `sign-agent.yml` workflow
-
-`sign-agent.yml` is a standalone reusable workflow that can sign any
-uploaded artifact with the Cloud PKI cert. To use it from another workflow:
-
-```yaml
-jobs:
-  build:
-    runs-on: [self-hosted, windows, cmtrace-build]
-    steps:
-      - name: Upload unsigned artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: my-artifact.msi
-          path: out/my-artifact.msi
-
-  sign:
-    needs: build
-    uses: ./.github/workflows/sign-agent.yml
-    with:
-      artifact-name: my-artifact.msi
-      description: "My Artifact Installer"
-      file-glob: "*.msi"
-```
-
-The workflow re-uploads the signed artifact as `my-artifact.msi-signed`.
 
 ---
 
@@ -244,7 +217,12 @@ Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter sign
 
 - `docs/wave4/01-msi-design.md §10` — CI shape rationale
 - `docs/wave4/02-code-signing.md` — full signing strategy
-- `docs/wave4/02a-sign-every-component.md §5` — sign-order recipe
-- `docs/wave4/07-build-vm-runbook.md` — build VM setup
+- The sign-order recipe is captured inline in this document under
+  "Sign order" above. A dedicated `docs/wave4/02a-sign-every-component.md`
+  is *planned* if it gains a second consumer (e.g. a separate
+  CertCheck.ps1 standalone build); until then the sign-order recipe
+  here is the single source of truth.
+- The build VM runbook (`docs/wave4/07-build-vm-runbook.md`) is *planned*
+  as a follow-up; until then the prerequisites in §1–3 above and
+  `docs/wave4/02-code-signing.md §4` cover the setup steps.
 - `.github/workflows/agent-msi.yml` — build + sign + publish pipeline
-- `.github/workflows/sign-agent.yml` — reusable signing workflow

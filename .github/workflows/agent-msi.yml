@@ -107,11 +107,16 @@ jobs:
 
       # -----------------------------------------------------------------------
       # Build the agent binary in release mode.
-      # Output: target\release\cmtraceopen-agent.exe
+      # --target x86_64-pc-windows-msvc is explicit so we never pick up an
+      # aarch64-pc-windows-msvc toolchain that may be installed on a dev VM
+      # (output path silently shifts to target\aarch64-pc-windows-msvc\release\).
+      # Matches the canonical invocation documented in
+      # crates/agent/installer/wix/build.ps1 (PR #87).
+      # Output: target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe
       # -----------------------------------------------------------------------
       - name: Build agent (release)
         shell: pwsh
-        run: cargo build --release -p agent
+        run: cargo build --release -p agent --target x86_64-pc-windows-msvc
 
       # -----------------------------------------------------------------------
       # Locate signtool.exe dynamically.
@@ -207,7 +212,7 @@ jobs:
         if: ${{ github.event_name == 'push' || inputs.sign == 'true' }}
         shell: pwsh
         run: |
-          $exe   = 'target\release\cmtraceopen-agent.exe'
+          $exe   = 'target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'
           $thumb = '${{ steps.cert.outputs.thumbprint }}'
           & '${{ steps.signtool.outputs.path }}' sign `
               /sha1  $thumb `
@@ -287,6 +292,24 @@ jobs:
           wix --version
 
       # -----------------------------------------------------------------------
+      # Add the WiX Util extension required by the .wxs sources (PR #87).
+      # `dotnet tool install --global wix` does NOT pull in the Util extension;
+      # it must be added explicitly. `wix extension add` is idempotent — it
+      # treats "already installed" as success — so we don't need an exit-code
+      # dance like the wix install step above.
+      # -----------------------------------------------------------------------
+      - name: Add WiX Util extension
+        shell: pwsh
+        run: |
+          $out = wix extension add --global WixToolset.Util.wixext 2>&1 | Out-String
+          Write-Host $out
+          if ($LASTEXITCODE -ne 0 -and $out -notmatch 'already added') {
+            Write-Error "Failed to add WixToolset.Util.wixext (exit $LASTEXITCODE)"
+            exit $LASTEXITCODE
+          }
+          wix extension list --global
+
+      # -----------------------------------------------------------------------
       # Build MSI
       # build.ps1 runs `wix build` to produce the MSI. The EXE and PS1 are
       # already signed at this point so the inner-binary signature is embedded.
@@ -298,7 +321,7 @@ jobs:
         shell: pwsh
         run: |
           $ver    = '${{ steps.version.outputs.version }}'
-          $relBin = 'target\release\cmtraceopen-agent.exe'
+          $relBin = 'target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe'
           $script = 'crates\agent\installer\wix\build.ps1'
 
           if (-not (Test-Path $script)) {
@@ -357,7 +380,7 @@ jobs:
         run: |
           $stool = '${{ steps.signtool.outputs.path }}'
           $artifacts = @(
-            'target\release\cmtraceopen-agent.exe',
+            'target\x86_64-pc-windows-msvc\release\cmtraceopen-agent.exe',
             '${{ steps.build-msi.outputs.msi-path }}'
           )
 
