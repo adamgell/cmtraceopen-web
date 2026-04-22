@@ -15,10 +15,11 @@ name = "api_server"
 path = "src/lib.rs"
 
 [features]
-# `mtls`, `crl`, and `azure` are all default-on so the production binary:
+# `mtls`, `crl`, `azure`, and `sqlite` are all default-on so the production binary:
 #   - terminates TLS and validates client certs (`mtls`)
 #   - polls Cloud PKI CRLs and rejects revoked certs (`crl`)
 #   - can flip `CMTRACE_BLOB_BACKEND=Azure` at runtime (`azure`)
+#   - uses SQLite for metadata storage (`sqlite`)
 #
 # Any of them can be turned off via `--no-default-features` (with explicit
 # re-enables) on dev boxes that lack cmake/NASM (`mtls` brings the
@@ -27,10 +28,34 @@ path = "src/lib.rs"
 # (object_store::local::LocalFileSystem) ships in object_store's base build,
 # so the local-FS dev path keeps working without the Azure transitives.
 #
+# Database backend flags:
+#   `sqlite` — local file / in-memory SQLite (dev default, no TLS required).
+#   `postgres` — PostgreSQL / Azure Database for PostgreSQL Flexible Server.
+#                Activates `tls-rustls-aws-lc-rs` because Azure Postgres
+#                enforces TLS; `tls-none` and `tls-rustls-aws-lc-rs` may
+#                coexist in sqlx 0.8 — rustls wins for network drivers, and
+#                SQLite (file-based) ignores TLS entirely.
+#
 # Future S3 / GCS backends slot in here as additional feature flags
 # (`s3 = ["object_store/aws"]`, `gcs = ["object_store/gcp"]`) and a matching
 # `BlobBackend` enum variant in `config.rs`.
-default = ["mtls", "crl", "azure"]
+default = ["mtls", "crl", "azure", "sqlite"]
+
+# SQLite metadata backend. Uses `tls-none` so sqlite-only builds on dev boxes
+# without cmake/NASM don't trigger the aws-lc-sys C+asm build path in sqlx's
+# TLS drivers (SQLite is a local file, TLS is meaningless for it). Note: the
+# top-level binary already depends on aws-lc-rs via `rustls`; this flag only
+# controls whether sqlx's *network* drivers (postgres, mysql) are built with
+# TLS. SQLite doesn't use those drivers, so `tls-none` is safe here.
+sqlite = ["sqlx/sqlite", "sqlx/tls-none"]
+
+# PostgreSQL metadata backend. Activates the postgres sqlx driver and the
+# rustls-aws-lc-rs TLS connector required for Azure Database for PostgreSQL
+# Flexible Server (which enforces SSL/TLS on all connections). Having both
+# `tls-none` (from `sqlite`) and `tls-rustls-aws-lc-rs` active simultaneously
+# is valid in sqlx 0.8: the rustls connector handles postgres connections while
+# SQLite (a file driver) ignores the TLS layer entirely.
+postgres = ["sqlx/postgres", "sqlx/tls-rustls-aws-lc-rs"]
 
 # Azure Blob Storage backend for the BlobStore abstraction. Pulls in
 # `object_store/azure` so `CMTRACE_BLOB_BACKEND=Azure` actually works at
@@ -76,11 +101,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 common-wire = { path = "../common-wire" }
-# Storage: SQLite via sqlx. Use runtime-tokio + tls-none — SQLite is a
-# local file so no TLS is needed, and avoiding rustls/ring keeps a C
-# toolchain (clang) off the build path on aarch64-windows dev boxes.
-# When we add Postgres (M2+), pick tls-rustls-aws-lc-rs explicitly.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "chrono", "uuid", "macros", "migrate"] }
+# Storage: sqlx with runtime-tokio. Driver (sqlite / postgres) and TLS are
+# controlled by the `sqlite` / `postgres` Cargo features above so that:
+#   - sqlite-only builds use `tls-none` (no TLS needed for a local file; avoids
+#     the aws-lc-sys C+asm build path in sqlx's network TLS drivers).
+#   - postgres builds add `tls-rustls-aws-lc-rs` (Azure Postgres requires TLS).
+#   - Both drivers may coexist: rustls handles postgres connections; SQLite
+#     (file-based) ignores TLS entirely.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "chrono", "uuid", "macros", "migrate"] }
 uuid = { version = "1", features = ["serde", "v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
@@ -208,7 +236,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "fs", "
 # Reuse the same zip crate the api-server depends on so there's one
 # code path being exercised end-to-end.
 zip = { version = "2", default-features = false, features = ["deflate"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "sqlite", "postgres", "macros"] }
 # Note: rcgen + tokio-rustls are intentionally NOT mirrored into the
 # default dev-dependencies. The gated `test-mtls` integration test pulls
 # them via the `[features]` block above, so a default `cargo test` on a

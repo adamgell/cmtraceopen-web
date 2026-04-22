@@ -103,7 +103,25 @@ pub struct Config {
 
     /// SQLite DB path (file or `:memory:`). Env: `CMTRACE_SQLITE_PATH`.
     /// Default: `<data_dir>/meta.sqlite`.
+    ///
+    /// Deprecated in favour of [`Self::database_url`]. When
+    /// `CMTRACE_DATABASE_URL` is **not** set, `from_env` synthesises a
+    /// `sqlite://<sqlite_path>` URL so existing deployments that only set
+    /// `CMTRACE_SQLITE_PATH` continue to work unchanged.
     pub sqlite_path: String,
+
+    /// Database connection URL. Env: `CMTRACE_DATABASE_URL`.
+    ///
+    /// Supported schemes:
+    ///   - `sqlite://<path>` or `sqlite::memory:` — SQLite backend (dev / small
+    ///     deployments). Requires the `sqlite` cargo feature (default).
+    ///   - `postgres://user:pass@host:5432/dbname` — PostgreSQL backend
+    ///     (production / Azure). Requires the `postgres` cargo feature.
+    ///
+    /// When not set, falls back to constructing `sqlite://<sqlite_path>` from
+    /// `CMTRACE_SQLITE_PATH` (or its default) so existing deployments that
+    /// only configure `CMTRACE_SQLITE_PATH` continue to work unchanged.
+    pub database_url: String,
 
     /// Auth enforcement mode. Env: `CMTRACE_AUTH_MODE` (`enabled` | `disabled`).
     /// Default: `enabled`.
@@ -433,6 +451,20 @@ impl Config {
                 .to_string()
         });
 
+        // `CMTRACE_DATABASE_URL` takes precedence. When not set, synthesise a
+        // `sqlite://` URL from `sqlite_path` so existing deployments that only
+        // set `CMTRACE_SQLITE_PATH` (or rely on its default) continue to work.
+        let database_url = env::var("CMTRACE_DATABASE_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                if sqlite_path == ":memory:" {
+                    "sqlite::memory:".to_string()
+                } else {
+                    format!("sqlite://{sqlite_path}")
+                }
+            });
+
         let auth_mode = AuthMode::from_env_str(env::var("CMTRACE_AUTH_MODE").ok().as_deref());
 
         // Entra config is optional iff auth is disabled. Partial config is
@@ -562,6 +594,7 @@ impl Config {
             listen_addr,
             data_dir,
             sqlite_path,
+            database_url,
             auth_mode,
             entra,
             allowed_origins,

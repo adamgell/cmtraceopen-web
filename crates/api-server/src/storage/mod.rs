@@ -19,11 +19,15 @@ pub mod blob_object_store;
 pub mod blob_azure;
 pub mod meta_sqlite;
 pub mod audit_sqlite;
+#[cfg(feature = "postgres")]
+pub mod meta_postgres;
 
 pub use blob_fs::LocalFsBlobStore;
 pub use blob_object_store::ObjectStoreBlobStore;
 pub use meta_sqlite::SqliteMetadataStore;
 pub use audit_sqlite::AuditSqliteStore;
+#[cfg(feature = "postgres")]
+pub use meta_postgres::PgMetadataStore;
 
 use std::sync::Arc;
 
@@ -108,7 +112,87 @@ async fn build_azure_blob_store(
     Err(BuildBlobStoreError::AzureFeatureMissing)
 }
 
-/// Errors surfaced by [`build_blob_store`]. Distinct from
+/// Build the right [`MetadataStore`] implementation based on the
+/// `CMTRACE_DATABASE_URL` scheme in `config.database_url`:
+///
+/// - `postgres://…` or `postgresql://…` → [`PgMetadataStore`] (requires the
+///   `postgres` cargo feature).
+/// - `sqlite://…` or a bare path → [`SqliteMetadataStore`] (requires the
+///   `sqlite` cargo feature).
+///
+/// This is the *only* place the codebase chooses a metadata backend. Adding a
+/// new backend later means: new feature flag in `Cargo.toml`, new arm here,
+/// new factory module — handlers and tests don't move.
+pub async fn build_metadata_store(
+    config: &crate::config::Config,
+) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+    let url = &config.database_url;
+
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        build_pg_metadata_store(url).await
+    } else {
+        build_sqlite_metadata_store(url).await
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn build_pg_metadata_store(
+    url: &str,
+) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+    let store = PgMetadataStore::connect(url).await?;
+    Ok(Arc::new(store))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn build_pg_metadata_store(
+    _url: &str,
+) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+    Err(BuildMetadataStoreError::PostgresFeatureMissing)
+}
+
+#[cfg(feature = "sqlite")]
+async fn build_sqlite_metadata_store(
+    url: &str,
+) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+    // Strip the `sqlite://` scheme prefix if present; SqliteMetadataStore
+    // expects either a bare path or `:memory:`.
+    let path = url
+        .strip_prefix("sqlite://")
+        .or_else(|| url.strip_prefix("sqlite:"))
+        .unwrap_or(url);
+    let store = SqliteMetadataStore::connect(path).await?;
+    Ok(Arc::new(store))
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn build_sqlite_metadata_store(
+    _url: &str,
+) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+    Err(BuildMetadataStoreError::SqliteFeatureMissing)
+}
+
+/// Errors surfaced by [`build_metadata_store`].
+#[derive(Debug, Error)]
+pub enum BuildMetadataStoreError {
+    #[error("storage error: {0}")]
+    Storage(#[from] StorageError),
+
+    #[error(
+        "database URL uses a postgres:// scheme but the api-server was built \
+         without the `postgres` cargo feature. Rebuild with \
+         `--features postgres`."
+    )]
+    PostgresFeatureMissing,
+
+    #[error(
+        "database URL uses a sqlite:// scheme but the api-server was built \
+         without the `sqlite` cargo feature. Rebuild with \
+         `--features sqlite` (the default)."
+    )]
+    SqliteFeatureMissing,
+}
+
+
 /// [`crate::config::ConfigError`] so this stays runtime-only — env-time
 /// validation and runtime construction can fail differently and we want the
 /// operator-facing messages to reflect that.
@@ -153,6 +237,7 @@ mod build_blob_store_tests {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             data_dir: data_dir.clone(),
             sqlite_path: ":memory:".to_string(),
+            database_url: "sqlite::memory:".to_string(),
             auth_mode: AuthMode::Disabled,
             entra: None,
             allowed_origins: vec![],
@@ -579,6 +664,17 @@ pub trait MetadataStore: Send + Sync + 'static {
     /// future in-memory stores) don't have to care.
     fn pool_stats(&self) -> PoolStats {
         PoolStats::default()
+    }
+
+    /// Build an [`AuditStore`] that shares this metadata store's connection
+    /// pool. Called once at startup in `main.rs` so the audit log writes go
+    /// through the same pool as metadata writes.
+    ///
+    /// The default impl returns a [`NoopAuditStore`] — backends that don't
+    /// have a real audit-log table (mocks, future in-memory stores) don't
+    /// need to override this. Production backends MUST override.
+    fn audit_store(&self) -> Arc<dyn AuditStore> {
+        Arc::new(NoopAuditStore)
     }
 
     // ----- devices -----
