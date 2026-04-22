@@ -1,0 +1,212 @@
+name: "cmtraceopen-web: Build & release agent MSI"
+
+# Builds the cmtraceopen-agent Windows MSI installer, signs it with
+# Azure Trusted Signing (via sign-agent.yml), generates a CycloneDX
+# SBOM, and attaches SLSA Build Level 3 generic provenance.
+#
+# STATUS: DESIGN STUB. The Rust agent crate and WiX project do not yet
+# exist. Steps marked [STUB] will be filled in once agent-msi lands.
+# Signing is wired via the reusable sign-agent.yml workflow.
+# See docs/wave4/01-msi-design.md and docs/wave4/13-sbom-slsa.md.
+#
+# Tag format: `agent-v<semver>` (e.g. agent-v1.0.0, agent-v1.1.0-rc.1).
+
+on:
+  push:
+    tags:
+      - "agent-v*"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Publish release assets (false = build-only dry run)"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+# Workflow-level permission ceiling.
+# id-token: write  — OIDC for cosign / SLSA provenance generator
+# actions: read    — SLSA provenance generator reads workflow run metadata
+# contents: write  — upload provenance + SBOM as GitHub release assets
+# packages: write  — reserved for future OCI attestation uploads
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  actions: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # build-msi — Compile agent binary, package MSI, generate SBOM
+  # ---------------------------------------------------------------------------
+  build-msi:
+    name: Build agent MSI + SBOM
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      # base64-encoded "sha256:HASH  filename" lines consumed by the
+      # SLSA generic provenance generator.
+      artifact-hashes: ${{ steps.hash.outputs.hashes }}
+
+    steps:
+      # --- Checkout --------------------------------------------------------
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      # --- Rust toolchain --------------------------------------------------
+      - name: Set up Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      # [STUB] Build agent binary -------------------------------------------
+      # Replace this placeholder with the real cargo build once the agent
+      # crate exists under crates/cmtraceopen-agent/.
+      # Expected output: target/x86_64-pc-windows-msvc/release/cmtraceopen-agent.exe
+      - name: Build agent binary [STUB]
+        shell: pwsh
+        run: |
+          Write-Host "[STUB] cargo build --release --target x86_64-pc-windows-msvc -p cmtraceopen-agent"
+          Write-Host "Replace this step with real cargo build once crates/cmtraceopen-agent exists."
+
+      # [STUB] Package MSI with WiX -----------------------------------------
+      # Replace with WiX harvest + candle + light (or dotnet wix toolset) once
+      # the WiX project in installer/ exists. See docs/wave4/01-msi-design.md.
+      # Expected output: installer/CMTraceOpenAgent.msi
+      - name: Package MSI (WiX) [STUB]
+        shell: pwsh
+        run: |
+          Write-Host "[STUB] WiX build — produces CMTraceOpenAgent.msi"
+          Write-Host "Replace with: dotnet wix build installer/cmtraceopen-agent.wxs"
+          # Create placeholder file so downstream steps don't fail outright
+          New-Item -ItemType Directory -Force -Path installer | Out-Null
+          [System.IO.File]::WriteAllBytes(
+            "installer/CMTraceOpenAgent.msi",
+            [byte[]](0x00)
+          )
+
+      # --- SBOM (CycloneDX via cargo-cyclonedx) ----------------------------
+      # cargo-cyclonedx walks Cargo.lock and emits a CycloneDX JSON SBOM
+      # covering all Rust dependencies. The SBOM is uploaded as a release
+      # asset alongside the MSI.
+      # [STUB] Install step is real; the generate command targets the agent
+      # crate which doesn't exist yet — adjust the -p flag when it does.
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Generate SBOM (CycloneDX JSON) [STUB]
+        shell: pwsh
+        run: |
+          # [STUB] Replace `--manifest-path` with the real agent crate path
+          # once crates/cmtraceopen-agent/Cargo.toml exists:
+          #   cargo cyclonedx --format json --spec-version 1.4 \
+          #     --manifest-path crates/cmtraceopen-agent/Cargo.toml \
+          #     -o sbom-agent.cyclonedx.json
+          Write-Host "[STUB] cargo cyclonedx — placeholder SBOM"
+          '{"bomFormat":"CycloneDX","specVersion":"1.4","version":1,"components":[]}' |
+            Set-Content sbom-agent.cyclonedx.json
+
+      # --- Hash artifacts --------------------------------------------------
+      # sha256sum output format: "HASH  filename" (two spaces).
+      # base64-encode for consumption by the SLSA generator.
+      - name: Hash artifacts
+        id: hash
+        shell: pwsh
+        run: |
+          $msiHash   = (Get-FileHash "installer/CMTraceOpenAgent.msi"   -Algorithm SHA256).Hash.ToLower()
+          $sbomHash  = (Get-FileHash "sbom-agent.cyclonedx.json"        -Algorithm SHA256).Hash.ToLower()
+          $subjects  = "$msiHash  CMTraceOpenAgent.msi`n$sbomHash  sbom-agent.cyclonedx.json"
+          $b64       = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($subjects))
+          "hashes=$b64" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # --- Upload unsigned MSI for signing ---------------------------------
+      - name: Upload unsigned MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CMTraceOpenAgent-unsigned.msi
+          path: installer/CMTraceOpenAgent.msi
+          if-no-files-found: error
+          retention-days: 1
+
+      # --- Upload SBOM artifact --------------------------------------------
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-agent-cyclonedx.json
+          path: sbom-agent.cyclonedx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # sign — Authenticode-sign the MSI via Azure Trusted Signing (reusable)
+  # ---------------------------------------------------------------------------
+  sign:
+    needs: [build-msi]
+    # Only sign on real tag pushes (or explicit opt-in via workflow_dispatch).
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/sign-agent.yml
+    with:
+      artifact-name: CMTraceOpenAgent-unsigned.msi
+      description: "CMTrace Open Agent installer"
+      file-glob: "*.msi"
+
+  # ---------------------------------------------------------------------------
+  # provenance — SLSA Build Level 3 generic provenance
+  # ---------------------------------------------------------------------------
+  # The generator reads the Actions workflow-run record (actions: read),
+  # builds a signed SLSA provenance document covering the MSI + SBOM hashes,
+  # and uploads it to the GitHub Release as `multiple.intoto.jsonl`.
+  # Verification: see docs/wave4/13-sbom-slsa.md
+  provenance:
+    needs: [build-msi]
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: ${{ needs.build-msi.outputs.artifact-hashes }}
+      upload-assets: true
+
+  # ---------------------------------------------------------------------------
+  # release — Create GitHub Release, attach signed MSI + SBOM + provenance
+  # ---------------------------------------------------------------------------
+  release:
+    needs: [sign, provenance]
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == 'true') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download signed MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: CMTraceOpenAgent-unsigned.msi-signed
+          path: release-assets
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom-agent-cyclonedx.json
+          path: release-assets
+
+      # [STUB] Replace with the real gh release create / softprops action
+      # once the MSI build produces a real artifact.
+      - name: Create GitHub Release [STUB]
+        shell: bash
+        run: |
+          echo "[STUB] gh release create ${{ github.ref_name }} release-assets/*"
+          echo "Replace with: uses: softprops/action-gh-release@v2"
+          echo "              with: { files: release-assets/*, ... }"
