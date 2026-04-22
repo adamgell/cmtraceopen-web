@@ -25,10 +25,15 @@ services:
       CMTRACE_LISTEN_ADDR: 0.0.0.0:8080
       CMTRACE_DATA_DIR: /data
       RUST_LOG: ${RUST_LOG:-api_server=info,tower_http=info,axum=info,warn}
-      # Dev default: bearer auth disabled. Production / staging deploys
-      # should override with full Entra config (CMTRACE_ENTRA_TENANT_ID,
-      # CMTRACE_ENTRA_AUDIENCE, CMTRACE_ENTRA_JWKS_URI) and remove this.
-      CMTRACE_AUTH_MODE: disabled
+      # Entra bearer-token validation. Tenant/client IDs are public
+      # identifiers (documented in docs/provisioning/02-entra-app-registration.md)
+      # and match the values provisioned by
+      # tools/entra-provision/Provision-CmtraceEntra.ps1. Operator tokens
+      # issued to cmtraceopen-viewer are validated against these values.
+      CMTRACE_AUTH_MODE: enabled
+      CMTRACE_ENTRA_TENANT_ID: 00c171a4-0053-4cae-ab80-0bd18db2e0fc
+      CMTRACE_ENTRA_AUDIENCE: api://b2990298-7cdd-4426-b311-2df0221b6eca
+      CMTRACE_ENTRA_JWKS_URI: https://login.microsoftonline.com/00c171a4-0053-4cae-ab80-0bd18db2e0fc/discovery/v2.0/keys
       # Placeholder — api-server ignores this today. Wired up when the
       # metadata store lands in a follow-up commit.
       CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace

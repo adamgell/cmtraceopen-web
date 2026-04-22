@@ -47,10 +47,11 @@ function buildMsalConfig(tenantId: string, clientId: string): Configuration {
     auth: {
       clientId,
       authority: `https://login.microsoftonline.com/${tenantId}`,
-      // MSAL only matches the redirect URI against what's registered in
-      // Entra; using the current origin keeps dev (5173) and prod (any
-      // domain) working as long as both URIs are listed on the SPA app.
-      redirectUri: window.location.origin,
+      // Must match the SPA redirect URI registered in Entra exactly,
+      // including trailing slash — otherwise MSAL's popup handler treats
+      // the redirect as foreign, skips postMessage back to the opener,
+      // and the popup never closes.
+      redirectUri: `${window.location.origin}/`,
     },
     cache: {
       // localStorage lets the operator avoid re-signing-in across tabs

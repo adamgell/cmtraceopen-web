@@ -14,6 +14,15 @@ if (!rootEl) {
 async function bootstrap() {
   if (entraConfig.status === "configured") {
     await entraConfig.msalInstance.initialize();
+    // Process any pending auth response (popup or redirect). In popup
+    // flow this is what signals the opener and closes the popup window.
+    // MsalProvider does this on mount too, but doing it before the first
+    // React render avoids a visible app flicker inside the popup.
+    try {
+      await entraConfig.msalInstance.handleRedirectPromise();
+    } catch (err) {
+      console.error("handleRedirectPromise failed", err);
+    }
   }
   const root = createRoot(rootEl!);
   if (entraConfig.status === "configured") {

@@ -97,13 +97,14 @@ function ConfiguredAuth() {
     setBusy(true);
     setError(null);
     try {
-      const result = await instance.loginPopup({
+      // Redirect flow is more robust than popup across browsers — no
+      // window.opener / bridge-timeout failure modes. The response is
+      // picked up by handleRedirectPromise() during main.tsx bootstrap.
+      await instance.loginRedirect({
         scopes: [entraConfig.status === "configured" ? entraConfig.apiScope : ""],
       });
-      if (result.account) instance.setActiveAccount(result.account);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
       setBusy(false);
     }
   }, [instance]);
@@ -112,9 +113,9 @@ function ConfiguredAuth() {
     setBusy(true);
     setError(null);
     try {
-      // logoutPopup keeps the user in the SPA; logoutRedirect would yank
-      // them away from the viewer entirely.
-      await instance.logoutPopup({ account: account ?? undefined });
+      // logoutRedirect navigates to Entra and back; matches the sign-in
+      // flow above and avoids browser popup restrictions entirely.
+      await instance.logoutRedirect({ account: account ?? undefined });
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
