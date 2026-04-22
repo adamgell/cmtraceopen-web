@@ -60,6 +60,70 @@ impl Default for RedactionConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Schedule config
+// ---------------------------------------------------------------------------
+
+/// How the collection scheduler decides when to fire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScheduleMode {
+    /// Fire every `interval_hours` hours (default).
+    #[default]
+    Interval,
+    /// Fire according to a 5-field cron expression in `cron_expr`.
+    Cron,
+    /// Never fire automatically. Intended for service deployments that
+    /// trigger collection via an external mechanism (e.g., a management
+    /// script calling `--oneshot`). The scheduler loop simply blocks on
+    /// the stop signal.
+    Manual,
+}
+
+/// Schedule configuration nested under `[collection.schedule]` in the TOML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScheduleConfig {
+    /// How the scheduler decides when to fire.
+    pub mode: ScheduleMode,
+
+    /// Hours between collections when `mode = "interval"`.
+    pub interval_hours: u64,
+
+    /// Standard 5-field cron expression (min hour dom mon dow) used when
+    /// `mode = "cron"`. Evaluated in local time.
+    pub cron_expr: String,
+
+    /// Randomize the fire time within ±N minutes so that a fleet of 1000+
+    /// devices doesn't hammer the server all at once. Applied to both
+    /// interval and cron modes. Set to `0` to disable jitter.
+    pub jitter_minutes: u64,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            mode: ScheduleMode::Interval,
+            interval_hours: 24,
+            cron_expr: String::from("0 3 * * *"),
+            jitter_minutes: 30,
+        }
+    }
+}
+
+/// Wraps `ScheduleConfig` so it can be nested as `[collection.schedule]`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CollectionConfig {
+    #[serde(default)]
+    pub schedule: ScheduleConfig,
+}
+
+// ---------------------------------------------------------------------------
+// Top-level agent config
+// ---------------------------------------------------------------------------
+
+
 /// Agent configuration. Mirrors the layout in the project plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -74,7 +138,16 @@ pub struct AgentConfig {
 
     /// Cron-like schedule for the evidence collector, e.g. `"0 3 * * *"`.
     /// Evaluated by the scheduler (not wired up yet).
+    ///
+    /// **Deprecated** — use `[collection.schedule]` instead. This field is
+    /// kept for backward-compatibility and is ignored when `collection` is
+    /// explicitly configured.
+    #[deprecated(note = "Use `[collection.schedule]` in the config file or \
+        CMTRACE_SCHEDULE_* env vars instead.")]
     pub evidence_schedule: String,
+
+    /// Collection scheduler configuration (`[collection.schedule]` table).
+    pub collection: CollectionConfig,
 
     /// Maximum number of bundles the upload queue will hold on disk before
     /// it starts dropping the oldest to make room.
@@ -139,11 +212,13 @@ fn default_log_paths() -> Vec<String> {
 }
 
 impl Default for AgentConfig {
+    #[allow(deprecated)] // setting the deprecated field in its own Default impl
     fn default() -> Self {
         Self {
             api_endpoint: String::from("https://api.corp.example.com"),
             request_timeout_secs: 60,
             evidence_schedule: String::from("0 3 * * *"),
+            collection: CollectionConfig::default(),
             queue_max_bundles: 50,
             log_level: String::from("info"),
             device_id: String::new(),
@@ -216,7 +291,45 @@ impl AgentConfig {
             }
         }
         if let Ok(v) = std::env::var("CMTRACE_EVIDENCE_SCHEDULE") {
-            cfg.evidence_schedule = v;
+            #[allow(deprecated)]
+            {
+                cfg.evidence_schedule = v;
+            }
+        }
+        if let Ok(v) = std::env::var("CMTRACE_SCHEDULE_MODE") {
+            match v.to_lowercase().as_str() {
+                "interval" => cfg.collection.schedule.mode = ScheduleMode::Interval,
+                "cron" => cfg.collection.schedule.mode = ScheduleMode::Cron,
+                "manual" => cfg.collection.schedule.mode = ScheduleMode::Manual,
+                _ => eprintln!(
+                    "warning: CMTRACE_SCHEDULE_MODE={v:?} is not one of interval/cron/manual; \
+                     falling back to default {:?}",
+                    cfg.collection.schedule.mode,
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("CMTRACE_SCHEDULE_INTERVAL_HOURS") {
+            match v.parse::<u64>() {
+                Ok(parsed) => cfg.collection.schedule.interval_hours = parsed,
+                Err(e) => eprintln!(
+                    "warning: CMTRACE_SCHEDULE_INTERVAL_HOURS={v:?} failed to parse ({e}); \
+                     falling back to default {}",
+                    cfg.collection.schedule.interval_hours
+                ),
+            }
+        }
+        if let Ok(v) = std::env::var("CMTRACE_SCHEDULE_CRON_EXPR") {
+            cfg.collection.schedule.cron_expr = v;
+        }
+        if let Ok(v) = std::env::var("CMTRACE_SCHEDULE_JITTER_MINUTES") {
+            match v.parse::<u64>() {
+                Ok(parsed) => cfg.collection.schedule.jitter_minutes = parsed,
+                Err(e) => eprintln!(
+                    "warning: CMTRACE_SCHEDULE_JITTER_MINUTES={v:?} failed to parse ({e}); \
+                     falling back to default {}",
+                    cfg.collection.schedule.jitter_minutes
+                ),
+            }
         }
         if let Ok(v) = std::env::var("CMTRACE_QUEUE_MAX_BUNDLES") {
             match v.parse::<usize>() {
@@ -283,6 +396,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn defaults_are_sensible() {
         let cfg = AgentConfig::default();
         assert_eq!(cfg.request_timeout_secs, 60);
@@ -296,9 +410,15 @@ mod tests {
         assert!(cfg.tls_client_cert_pem.is_none());
         assert!(cfg.tls_client_key_pem.is_none());
         assert!(cfg.tls_ca_bundle_pem.is_none());
+        // Schedule defaults.
+        assert_eq!(cfg.collection.schedule.mode, ScheduleMode::Interval);
+        assert_eq!(cfg.collection.schedule.interval_hours, 24);
+        assert_eq!(cfg.collection.schedule.cron_expr, "0 3 * * *");
+        assert_eq!(cfg.collection.schedule.jitter_minutes, 30);
     }
 
     #[test]
+    #[allow(deprecated)]
     fn resolved_device_id_prefers_explicit() {
         let cfg = AgentConfig {
             device_id: "WIN-UNIT-01".into(),
@@ -337,6 +457,59 @@ queue_max_bundles = 7
             matches!(err, ConfigError::Io { .. }),
             "expected ConfigError::Io, got {err:?}"
         );
+    }
+
+    #[test]
+    fn schedule_config_parses_from_toml() {
+        let dir = tempdir();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[collection.schedule]
+mode = "cron"
+cron_expr = "0 2 * * 1"
+interval_hours = 12
+jitter_minutes = 10
+"#,
+        )
+        .unwrap();
+
+        let cfg = AgentConfig::from_file(&path).expect("parse");
+        assert_eq!(cfg.collection.schedule.mode, ScheduleMode::Cron);
+        assert_eq!(cfg.collection.schedule.cron_expr, "0 2 * * 1");
+        assert_eq!(cfg.collection.schedule.interval_hours, 12);
+        assert_eq!(cfg.collection.schedule.jitter_minutes, 10);
+    }
+
+    #[test]
+    fn schedule_config_defaults_when_omitted() {
+        let dir = tempdir();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, r#"api_endpoint = "https://test.example.com""#).unwrap();
+
+        let cfg = AgentConfig::from_file(&path).expect("parse");
+        assert_eq!(cfg.collection.schedule.mode, ScheduleMode::Interval);
+        assert_eq!(cfg.collection.schedule.interval_hours, 24);
+        assert_eq!(cfg.collection.schedule.cron_expr, "0 3 * * *");
+        assert_eq!(cfg.collection.schedule.jitter_minutes, 30);
+    }
+
+    #[test]
+    fn schedule_manual_mode_parses() {
+        let dir = tempdir();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[collection.schedule]
+mode = "manual"
+"#,
+        )
+        .unwrap();
+
+        let cfg = AgentConfig::from_file(&path).expect("parse");
+        assert_eq!(cfg.collection.schedule.mode, ScheduleMode::Manual);
     }
 
     /// Minimal ad-hoc temp dir; avoids pulling `tempfile` into deps just for

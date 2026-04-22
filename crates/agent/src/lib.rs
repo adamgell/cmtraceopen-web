@@ -22,6 +22,7 @@ pub mod config;
 pub mod queue;
 pub mod redact;
 pub mod runtime;
+pub mod scheduler;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 pub mod service;

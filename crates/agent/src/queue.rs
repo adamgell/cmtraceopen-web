@@ -78,6 +78,15 @@ pub enum QueueError {
 }
 
 /// Persistent on-disk queue rooted at `root_dir`.
+///
+/// `Queue` is cheaply cloneable — all clones share the same `root` path and
+/// operate on the same on-disk files. Each queue operation uses per-bundle
+/// filenames (UUID-keyed) and atomic-rename writes, so concurrent clones
+/// do not corrupt each other's state. The one invariant callers must
+/// maintain: a single bundle must not have two callers concurrently
+/// transitioning its state (the upload drain and the scheduler naturally
+/// satisfy this — they operate on different bundles at the same time).
+#[derive(Clone)]
 pub struct Queue {
     root: PathBuf,
 }
@@ -463,5 +472,46 @@ mod tests {
 
         let q2 = Queue::open(queue_dir.path()).await.unwrap();
         assert_eq!(q2.get(bundle_id).await.unwrap().state, QueueState::Pending);
+    }
+
+    /// Two `Queue` clones pointing at the same directory can enqueue
+    /// different bundles concurrently without corrupting each other's
+    /// state. This covers the daemon-mode topology where the scheduler
+    /// clone and the drain-loop clone live side-by-side.
+    #[tokio::test]
+    async fn cloned_queues_on_same_dir_are_safe() {
+        let src_dir = TempDir::new().unwrap();
+        let queue_dir = TempDir::new().unwrap();
+
+        let q1 = Queue::open(queue_dir.path()).await.unwrap();
+        let q2 = q1.clone(); // second handle, same dir
+
+        // Enqueue two different bundles from the two handles concurrently.
+        let md1 = fake_metadata();
+        let md2 = fake_metadata();
+        let id1 = md1.bundle_id;
+        let id2 = md2.bundle_id;
+
+        let zip1 = write_fake_zip(&src_dir, b"bundle-1").await;
+        let zip2_path = src_dir.path().join("b2.zip");
+        tokio::fs::write(&zip2_path, b"bundle-2").await.unwrap();
+
+        let (r1, r2) = tokio::join!(
+            q1.enqueue(md1, &zip1),
+            q2.enqueue(md2, &zip2_path),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        // Both bundles must be independently readable and in Pending state.
+        let e1 = q1.get(id1).await.unwrap();
+        let e2 = q1.get(id2).await.unwrap();
+        assert_eq!(e1.state, QueueState::Pending);
+        assert_eq!(e2.state, QueueState::Pending);
+
+        // A transition on one bundle must not affect the other.
+        q2.mark_uploading(id2).await.unwrap();
+        assert_eq!(q1.get(id1).await.unwrap().state, QueueState::Pending);
+        assert_eq!(q1.get(id2).await.unwrap().state, QueueState::Uploading);
     }
 }
