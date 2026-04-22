@@ -202,16 +202,26 @@ struct TestServer {
     client: reqwest::Client,
     /// Keep PKI artifacts alive so temp files don't disappear mid-test.
     _pki: PkiArtifacts,
+    /// Owns the blob-store tempdir for the lifetime of the TestServer.
+    /// Replaces the older `std::mem::forget(tmp)` pattern (review fix):
+    /// explicit ownership means the tempdir is dropped (and reclaimed)
+    /// when the test fixture goes out of scope rather than leaking.
+    _blob_tmp: TempDir,
 }
 
 /// Boot a TLS-terminating api-server that:
-///   - Uses `require_on_ingest = false` so the TLS verifier operates in
-///     `allow_unauthenticated()` mode, letting the JWT-only reqwest client
-///     reach query routes without a client cert.
+///   - `require_on_ingest` controls whether the TLS verifier operates in
+///     `allow_unauthenticated()` mode (false → reqwest can reach query routes
+///     w/o client cert) or rejects unauthenticated peers at the handshake
+///     (true → only used by the dedicated TLS-handshake-rejection sub-test).
 ///   - Enables Entra JWT auth with `jwks` pre-seeded so tests skip the
 ///     network.
 ///   - Uses an in-memory SQLite + local-FS blob store in a fresh tempdir.
-async fn start_wave4_server(pki: PkiArtifacts, entra_jwks: Arc<JwksCache>) -> TestServer {
+async fn start_wave4_server(
+    pki: PkiArtifacts,
+    entra_jwks: Arc<JwksCache>,
+    require_on_ingest: bool,
+) -> TestServer {
     let tmp = TempDir::new().expect("data tempdir");
     let blobs = Arc::new(LocalFsBlobStore::new(tmp.path()).await.expect("blobs"));
     let meta = Arc::new(
@@ -233,12 +243,11 @@ async fn start_wave4_server(pki: PkiArtifacts, entra_jwks: Arc<JwksCache>) -> Te
         jwks: entra_jwks,
     };
 
-    // `require_on_ingest = false` keeps the TLS-level verifier in
-    // `allow_unauthenticated()` mode (see module-level doc-comment for
-    // rationale). The per-route extractor enforces the cert requirement for
-    // ingest, tested explicitly via the rejection assertion below.
+    // `require_on_ingest` flips the TLS-level verifier between
+    // `allow_unauthenticated()` (false) and full handshake-level cert
+    // enforcement (true). See module-level doc-comment for rationale.
     let mtls = MtlsRuntimeConfig {
-        require_on_ingest: false,
+        require_on_ingest,
         expected_san_uri_scheme: "device".into(),
     };
 
@@ -252,9 +261,6 @@ async fn start_wave4_server(pki: PkiArtifacts, entra_jwks: Arc<JwksCache>) -> Te
     );
     let app = router(state);
 
-    // Keep the blob tempdir alive for the test duration by leaking; the
-    // process exits cleanly and the OS reclaims it.
-    std::mem::forget(tmp);
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
 
     let tls_cfg = TlsConfig {
@@ -262,7 +268,7 @@ async fn start_wave4_server(pki: PkiArtifacts, entra_jwks: Arc<JwksCache>) -> Te
         server_cert_pem: Some(pki.server_cert_pem.clone()),
         server_key_pem: Some(pki.server_key_pem.clone()),
         client_ca_bundle: Some(pki.client_ca_bundle.clone()),
-        require_on_ingest: false,
+        require_on_ingest,
         expected_san_uri_scheme: "device".into(),
     };
 
@@ -315,6 +321,7 @@ async fn start_wave4_server(pki: PkiArtifacts, entra_jwks: Arc<JwksCache>) -> Te
         plain_connector,
         client: http_client,
         _pki: pki,
+        _blob_tmp: tmp,
     }
 }
 
@@ -450,12 +457,21 @@ struct TestClaims {
 }
 
 fn mint_operator_jwt(kp: &RS256KeyPair) -> String {
+    mint_jwt_with_scope(kp, "CmtraceOpen.Query openid profile")
+}
+
+/// Mint a Wave 4 test JWT with the supplied `scp` claim verbatim — used by
+/// the RBAC negative-path test to mint a token that is technically valid
+/// (signature OK, audience matches, key id present in the cache) but is
+/// missing the `CmtraceOpen.Query` scope. The query routes must surface a
+/// 403 in that case, not 401, since the token itself is valid.
+fn mint_jwt_with_scope(kp: &RS256KeyPair, scp: &str) -> String {
     let issuer = format!(
         "https://login.microsoftonline.com/{}/v2.0",
         TEST_TENANT
     );
     let custom = TestClaims {
-        scp: "CmtraceOpen.Query openid profile".to_string(),
+        scp: scp.to_string(),
         name: "Wave4 E2E Operator".to_string(),
         tid: TEST_TENANT.to_string(),
     };
@@ -497,7 +513,7 @@ async fn wave4_e2e_mtls_ingest_and_jwt_query() {
     let jwks = Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string()));
     jwks.insert_for_test(JWKS_KID, jwt_kp.public_key());
 
-    let server = start_wave4_server(pki, jwks).await;
+    let server = start_wave4_server(pki, jwks, false).await;
     let base = format!("https://localhost:{}", server.addr.port());
 
     // ---- mTLS rejection: ingest without cert and without X-Device-Id
@@ -642,9 +658,17 @@ async fn wave4_e2e_mtls_ingest_and_jwt_query() {
     );
 
     // ---- 3. Poll until parse_state != "pending" ------------------------
+    //
+    // Track the last observed `parse_state` across iterations so that — if the
+    // worker stalls and we time out on `pending` — operators triaging a flaky
+    // test see the actual stall state rather than a generic "timed out"
+    // message (review fix).
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut final_parse_state = String::new();
+    let mut last_observed = String::from("<no response yet>");
+    let mut iteration_count: usize = 0;
     while Instant::now() < deadline {
+        iteration_count += 1;
         let s: SessionSummary = server
             .client
             .get(format!("{base}/v1/sessions/{session_id}"))
@@ -657,6 +681,7 @@ async fn wave4_e2e_mtls_ingest_and_jwt_query() {
             .json()
             .await
             .expect("parse session summary");
+        last_observed = s.parse_state.clone();
         if s.parse_state != "pending" {
             final_parse_state = s.parse_state;
             break;
@@ -665,7 +690,8 @@ async fn wave4_e2e_mtls_ingest_and_jwt_query() {
     }
     assert_eq!(
         final_parse_state, "ok",
-        "expected parse_state=ok within 10s, got {final_parse_state:?}"
+        "expected parse_state=ok within 10s; last observed parse_state={last_observed:?} \
+         after {iteration_count} poll iterations (final_parse_state={final_parse_state:?})",
     );
 
     // ---- 4. Entries must be present with expected severity distribution
@@ -716,5 +742,102 @@ async fn wave4_e2e_mtls_ingest_and_jwt_query() {
         reqwest::StatusCode::UNAUTHORIZED,
         "expected 401 without JWT; got {}",
         unauth_resp.status()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional Wave 4 e2e tests (review-fix follow-ups)
+// ---------------------------------------------------------------------------
+
+/// True mTLS-handshake-rejection: boots a fresh api-server with
+/// `require_on_ingest = true` so the rustls server-side verifier no longer
+/// runs in `allow_unauthenticated()` mode. A bare TLS client (no client
+/// cert) MUST fail at the handshake — the application layer is never
+/// reached, so the failure is surfaced as a connection-level error from
+/// the rustls connector, not as an HTTP status code.
+///
+/// This complements the application-layer rejection asserted in
+/// `wave4_e2e_mtls_ingest_and_jwt_query` (which proves the extractor returns
+/// 401 when no cert + no header is presented) by closing the matching gap
+/// at the TLS layer itself.
+#[tokio::test]
+async fn wave4_mtls_handshake_rejects_unauthenticated_client() {
+    api_server::tls::install_default_crypto_provider_for_tests();
+
+    let pki = mint_pki(TEST_TENANT, TEST_DEVICE);
+    let jwt_kp = RS256KeyPair::generate(2048).unwrap();
+    let jwks = Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string()));
+    jwks.insert_for_test(JWKS_KID, jwt_kp.public_key());
+
+    // require_on_ingest = TRUE → handshake-level cert enforcement.
+    let server = start_wave4_server(pki, jwks, true).await;
+
+    // Attempt a bare TLS handshake using the plain (no-client-cert) connector.
+    // We expect the handshake itself to fail — `connect()` returns Err — so we
+    // assert via the rustls/tokio error rather than via an HTTP status code.
+    let stream = TcpStream::connect(server.addr).await.expect("tcp connect");
+    let domain = ServerName::try_from("localhost").unwrap();
+    let handshake = server.plain_connector.connect(domain, stream).await;
+    assert!(
+        handshake.is_err(),
+        "expected TLS handshake to fail without a client cert when \
+         require_on_ingest=true; instead it succeeded",
+    );
+
+    // For the curious operator triaging: log the underlying error category.
+    let err = handshake.err().unwrap();
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("certificate")
+            || msg.contains("cert")
+            || msg.contains("alert")
+            || msg.contains("handshake")
+            || msg.contains("eof"),
+        "expected a TLS-cert-related handshake error; got: {err}",
+    );
+}
+
+/// RBAC negative path: a token that's cryptographically valid (correct
+/// signature, audience, issuer, key id) but whose `scp` claim does NOT
+/// include `CmtraceOpen.Query` must be rejected with 403, not 401.
+///
+/// 403 vs. 401 matters because:
+///   - 401 = "we don't know who you are" → the client should re-auth.
+///   - 403 = "we know who you are; you're not allowed" → re-auth won't help.
+///
+/// Closes the gap flagged in review: previously only the happy-path token
+/// (with the scope) was tested, so a regression that drops the scope check
+/// would still pass.
+#[tokio::test]
+async fn wave4_query_rejects_token_without_query_scope() {
+    api_server::tls::install_default_crypto_provider_for_tests();
+
+    let pki = mint_pki(TEST_TENANT, TEST_DEVICE);
+    let jwt_kp = RS256KeyPair::generate(2048).unwrap();
+    let jwks = Arc::new(JwksCache::new("http://127.0.0.1:1/unused".to_string()));
+    jwks.insert_for_test(JWKS_KID, jwt_kp.public_key());
+
+    let server = start_wave4_server(pki, jwks, false).await;
+    let base = format!("https://localhost:{}", server.addr.port());
+
+    // Mint a token whose scope is everything OPERATOR_AND_ABOVE checks for
+    // *except* CmtraceOpen.Query.
+    let bad_token = mint_jwt_with_scope(&jwt_kp, "openid profile email");
+
+    let resp = server
+        .client
+        .get(format!("{base}/v1/devices"))
+        .bearer_auth(&bad_token)
+        .send()
+        .await
+        .expect("GET /v1/devices with no-query-scope token");
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "expected 403 from query route when token is valid but missing \
+         CmtraceOpen.Query scope; got {} body={:?}",
+        resp.status(),
+        resp.text().await.unwrap_or_default(),
     );
 }
