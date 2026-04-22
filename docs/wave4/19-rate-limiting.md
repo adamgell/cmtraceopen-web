@@ -32,12 +32,33 @@ default 100/h leaves an order-of-magnitude margin.
 
 ### Memory management
 
-The `DashMap` grows as new keys arrive. A background Tokio task calls
-`RateLimiter::purge_expired()` once per minute, evicting entries whose
-window has fully elapsed. This bounds the map footprint to the number of
-distinct keys seen within **one** window rather than growing indefinitely
-over the life of the process — important for the IP scope where IPv6
-address cycling is trivially cheap.
+Two lines of defence keep the limiter from becoming a DoS vector against
+itself:
+
+1. **Background GC (steady state).** A Tokio task calls
+   `RateLimiter::purge_expired()` once per minute, evicting entries
+   whose window has fully elapsed. Bounds the map footprint to the
+   number of distinct keys seen within **one** window in normal traffic.
+2. **In-line hard cap (burst attack).** Each limiter is hard-capped at
+   `RATE_LIMIT_MAX_KEYS = 50_000` distinct keys. When the cap is
+   reached the hot path runs an opportunistic sweep before inserting a
+   new key. If the sweep can't reclaim a slot (e.g. an attacker churns
+   50 000 IPv6 addresses inside a single minute), new keys are admitted
+   without being inserted (the limiter fails open on cap exhaustion —
+   cap-exhaustion lockout would itself be a DoS). Existing keys remain
+   enforced regardless of map size.
+
+#### IPv6 attacker rotation (known limitation)
+
+Even with the hard cap and per-minute GC, an IPv6 attacker can churn
+keys faster than either layer absorbs (a single /64 prefix gives ~1.8e19
+addresses). Once map capacity is reached the limiter is effectively
+disabled for new IPv6 sources from the attacker. A future refinement is
+to **collapse IPv6 keys onto their /64 prefix** so per-IPv6-customer-
+allocation rather than per-address counting — this would make the
+limiter robust against single-customer floods. Tracked as a follow-up;
+the AppGW WAF + Azure DDoS Protection upstream is the load-bearing
+IPv6-flood mitigation today.
 
 ### IP identification
 

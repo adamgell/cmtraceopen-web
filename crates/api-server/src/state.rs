@@ -35,6 +35,26 @@ struct WindowEntry {
     count: u64,
 }
 
+/// Hard cap on the number of distinct keys a single [`RateLimiter`] will
+/// hold in memory.
+///
+/// The background GC task in `main.rs` calls [`RateLimiter::purge_expired`]
+/// once per minute, but between two GC ticks an attacker can churn keys
+/// arbitrarily fast — and the per-IP limiter is exposed to IPv6 source-
+/// address rotation where a single attacker can synthesise millions of
+/// unique addresses per second. Without a hard cap the limiter itself
+/// becomes the DoS vector. 50_000 covers every device fleet + per-AppGW
+/// client population we expect, with bounded memory at the worst-case
+/// per-entry size.
+///
+/// When the map crosses this threshold, [`RateLimiter::check`] runs an
+/// in-line opportunistic sweep of expired entries. If the sweep doesn't
+/// reclaim room, *new* keys are admitted without being inserted (the
+/// limiter fails open on cap exhaustion — the alternative would be to
+/// fail closed, but a cap-exhaustion DoS that locks out legitimate
+/// callers is itself a denial of service). Existing keys remain enforced.
+pub const RATE_LIMIT_MAX_KEYS: usize = 50_000;
+
 /// Simple fixed-window rate limiter keyed by an arbitrary string.
 ///
 /// Backed by a [`DashMap`] so concurrent requests on different keys don't
@@ -48,11 +68,19 @@ struct WindowEntry {
 ///
 /// ## Memory management
 ///
-/// The map grows as new keys arrive. Call [`RateLimiter::purge_expired`]
-/// periodically (e.g. from `main.rs` once per window size) to evict entries
-/// whose window has fully elapsed and whose count would reset on the next
-/// request anyway. This bounds the footprint to the number of *distinct* keys
-/// seen within a single window, which is finite for all realistic deployments.
+/// Two lines of defence:
+///
+/// 1. **Background GC** — `main.rs` spawns a Tokio task that calls
+///    [`RateLimiter::purge_expired`] once per window duration so entries
+///    whose window has elapsed don't hang around forever. This handles
+///    the steady-state case (organic growth as device IDs / IPs come and
+///    go).
+/// 2. **In-line cap** — [`RATE_LIMIT_MAX_KEYS`] bounds the map at any
+///    point in time. The hot path checks the cap before inserting a new
+///    key; if the cap is reached it runs a synchronous sweep to try to
+///    reclaim space, and falls back to "allow without insert" only when
+///    that sweep can't free a slot. This handles the burst-attack case
+///    (millions of fresh IPv6 addresses inside a single minute).
 pub struct RateLimiter {
     windows: DashMap<String, WindowEntry>,
     /// Maximum requests in a single window.
@@ -76,8 +104,29 @@ impl RateLimiter {
     /// Returns `Ok(())` when the request is allowed.
     /// Returns `Err(retry_after)` when the limit is exceeded; `retry_after`
     /// is the duration until the current window expires.
+    ///
+    /// Enforces the [`RATE_LIMIT_MAX_KEYS`] cap on first-time insertions:
+    /// if the map is at capacity, an in-line sweep runs first; if no slot
+    /// is freed, the new key is admitted without being inserted (fail-open
+    /// on cap exhaustion). Existing keys remain enforced regardless of
+    /// total map size.
     pub fn check(&self, key: &str) -> Result<(), Duration> {
         let now = Instant::now();
+
+        // Cap guard: if this is a brand-new key and the map is at capacity,
+        // try to reclaim room with an opportunistic sweep before allowing
+        // the insert. If the sweep doesn't free a slot, allow the request
+        // through without recording it — see RATE_LIMIT_MAX_KEYS doc-comment
+        // for the fail-open rationale. The `contains_key` + `entry` pair is
+        // not strictly atomic but the cap is a soft hint anyway: small
+        // overshoots from concurrent inserts are acceptable.
+        if !self.windows.contains_key(key) && self.windows.len() >= RATE_LIMIT_MAX_KEYS {
+            self.purge_expired_inline(now);
+            if self.windows.len() >= RATE_LIMIT_MAX_KEYS {
+                return Ok(());
+            }
+        }
+
         let mut entry = self
             .windows
             .entry(key.to_string())
@@ -97,6 +146,14 @@ impl RateLimiter {
             let remaining = window_end.saturating_duration_since(now);
             Err(remaining)
         }
+    }
+
+    /// In-line variant of [`Self::purge_expired`] that takes the `now`
+    /// reading already captured by the caller. Avoids a second
+    /// `Instant::now()` syscall on the cap-exhaustion hot path.
+    fn purge_expired_inline(&self, now: Instant) {
+        self.windows
+            .retain(|_, entry| now.duration_since(entry.window_start) < self.window);
     }
 
     /// Remove all entries whose window has fully elapsed.
@@ -120,6 +177,49 @@ impl RateLimiter {
     /// Number of live keys in the map. Useful for logging + metrics.
     pub fn len(&self) -> usize {
         self.windows.len()
+    }
+}
+
+#[cfg(test)]
+mod limiter_cap_tests {
+    use super::*;
+
+    #[test]
+    fn map_size_is_hard_capped_under_key_churn() {
+        // 1µs window so every entry is expired by the time the next check
+        // runs — exercises the in-line sweep path that should keep the map
+        // size below the cap even under fast key churn.
+        let limiter = RateLimiter::new(10, Duration::from_micros(1));
+
+        for i in 0..(RATE_LIMIT_MAX_KEYS + 5_000) {
+            let _ = limiter.check(&format!("k-{i}"));
+        }
+
+        assert!(
+            limiter.len() <= RATE_LIMIT_MAX_KEYS,
+            "limiter.len()={} must not exceed RATE_LIMIT_MAX_KEYS={}",
+            limiter.len(),
+            RATE_LIMIT_MAX_KEYS,
+        );
+    }
+
+    #[test]
+    fn existing_key_at_cap_is_still_enforced() {
+        // Long window so entries don't auto-expire during the test.
+        let limiter = RateLimiter::new(2, Duration::from_secs(60));
+
+        // Pre-existing key: first hit allowed, count = 1.
+        assert!(limiter.check("alice").is_ok());
+
+        // Saturate the map past the cap with junk keys. Sweep can't reclaim
+        // (long window), so the cap-exhaustion fail-open path runs.
+        for i in 0..(RATE_LIMIT_MAX_KEYS + 200) {
+            let _ = limiter.check(&format!("junk-{i}"));
+        }
+
+        // Even at cap saturation the pre-existing key is still counted.
+        assert!(limiter.check("alice").is_ok()); // 2nd hit, limit=2
+        assert!(limiter.check("alice").is_err()); // 3rd hit → 429
     }
 }
 
