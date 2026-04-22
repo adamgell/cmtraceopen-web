@@ -123,7 +123,7 @@ $cert = Get-ChildItem Cert:\LocalMachine\My |
   Select-Object -First 1
 
 Set-AuthenticodeSignature -Certificate $cert `
-  -FilePath .\installer\wix\CustomActions\CertCheck.ps1 `
+  -FilePath .\crates\agent\installer\wix\CustomActions\CertCheck.ps1 `
   -TimestampServer http://timestamp.digicert.com `
   -HashAlgorithm SHA256
 ```
@@ -138,7 +138,7 @@ human-readable above the signature.
 ```
 signtool sign /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 ^
   /d "CMTraceOpen Agent Installer" ^
-  dist\CMTraceOpenAgent.msi
+  out\CMTraceOpenAgent-{version}.msi
 ```
 
 Identical to the EXE invocation. The only difference is `/d`: the
@@ -171,14 +171,14 @@ Pseudocode YAML:
       Where-Object { $_.EnhancedKeyUsageList.FriendlyName -contains 'Code Signing' } |
       Select-Object -First 1
     Set-AuthenticodeSignature -Certificate $cert `
-      -FilePath .\installer\wix\CustomActions\CertCheck.ps1 `
+      -FilePath .\crates\agent\installer\wix\CustomActions\CertCheck.ps1 `
       -TimestampServer http://timestamp.digicert.com `
       -HashAlgorithm SHA256
 
 - name: Build MSI
   shell: pwsh
   run: |
-    .\installer\wix\build.ps1 `
+    .\crates\agent\installer\wix\build.ps1 `
       -ReleaseBinary .\target\release\cmtraceopen-agent.exe `
       -Version $env:VERSION
 
@@ -187,15 +187,15 @@ Pseudocode YAML:
   run: |
     & signtool.exe sign /a /fd sha256 /tr http://timestamp.digicert.com /td sha256 `
       /d "CMTraceOpen Agent Installer" `
-      .\dist\CMTraceOpenAgent.msi
+      .\out\CMTraceOpenAgent-$env:VERSION.msi
 
 - name: Verify all signed artifacts
   shell: pwsh
   run: |
     & signtool.exe verify /pa /v /all .\target\release\cmtraceopen-agent.exe
-    Get-AuthenticodeSignature .\installer\wix\CustomActions\CertCheck.ps1 |
+    Get-AuthenticodeSignature .\crates\agent\installer\wix\CustomActions\CertCheck.ps1 |
       Format-List Status, SignerCertificate, TimeStamperCertificate
-    & signtool.exe verify /pa /v /all .\dist\CMTraceOpenAgent.msi
+    & signtool.exe verify /pa /v /all .\out\CMTraceOpenAgent-$env:VERSION.msi
 ```
 
 The build VM is the only place the Cloud PKI signing cert lives, in
@@ -210,7 +210,9 @@ to inject and no thumbprint to pin in repo config — see
 After signing, confirm with three commands. Each should report
 "Successfully verified" and a chain ending at
 `Gell - PKI Issuing CA` → `Gell - PKI Root CA`
-(per `reference_cloud_pki.md`):
+(the Cloud PKI hierarchy provisioned per
+[`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md);
+the Issuing CA's EKU set includes Code Signing, OID 1.3.6.1.5.5.7.3.3):
 
 ```powershell
 signtool verify /pa /v /all CMTraceOpenAgent.msi
@@ -336,5 +338,7 @@ cases.
 
 **See also:** `02-code-signing.md` for the cert acquisition / CI auth
 story, `01-msi-design.md` §4 for the file inventory this signing flow
-covers, `reference_cloud_pki.md` for the CA chain that signatures
-chain to.
+covers, [`docs/provisioning/03-intune-cloud-pki.md`](../provisioning/03-intune-cloud-pki.md)
+for the Cloud PKI hierarchy (Gell - PKI Root CA → Gell - PKI Issuing CA;
+Issuing CA EKU includes Code Signing, OID 1.3.6.1.5.5.7.3.3) that
+signatures chain to.
