@@ -1,0 +1,112 @@
+name: "cmtraceopen-web: Compose smoke"
+
+# Brings up the full docker-compose stack (api-server + postgres + adminer)
+# and drives the bundle-ingest happy path end-to-end with tools/ship-bundle.sh.
+# Catches Dockerfile regressions, env-var contract drift, and full-stack
+# ingest path bugs that the per-crate unit tests in ci.yml can't see.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  compose-smoke:
+    name: docker compose ingest smoke
+    runs-on: ubuntu-latest
+    steps:
+      # Submodule needed: api-server depends on cmtraceopen-parser via a
+      # path dep into ./cmtraceopen. See ci.yml for why not `recursive`.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Cache buildx layers
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-compose-${{ hashFiles('crates/api-server/Dockerfile', 'Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-buildx-compose-
+
+      - name: Bring up stack
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build
+
+      - name: Wait for /healthz
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:8080/healthz; then
+              echo; echo "api-server healthy after ${i} attempts"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "api-server never became healthy; recent logs:" >&2
+          docker compose logs --tail=100 >&2
+          exit 1
+
+      - name: Build test fixture
+        run: bash tools/fixtures/build.sh
+
+      - name: Smoke ingest (ship-bundle)
+        id: ship
+        run: |
+          out=$(bash tools/ship-bundle.sh \
+            --endpoint http://localhost:8080 \
+            --device-id ci-smoke \
+            --bundle tools/fixtures/test-bundle.zip)
+          echo "$out"
+          echo "$out" | grep -E '^OK[[:space:]]+device_id=ci-smoke[[:space:]]+session_id=[0-9a-f-]+.*parse_state=pending' \
+            || { echo "ship-bundle output did not match expected OK line" >&2; exit 1; }
+          sid=$(echo "$out" | sed -nE 's/.*session_id=([0-9a-f-]+).*/\1/p' | head -1)
+          echo "session_id=${sid}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify session listed for device
+        run: |
+          json=$(bash tools/query.sh sessions ci-smoke http://localhost:8080)
+          echo "$json"
+          count=$(echo "$json" | jq '.items | length')
+          if [ "${count}" -lt 1 ]; then
+            echo "expected >=1 session for ci-smoke, got ${count}" >&2
+            exit 1
+          fi
+
+      - name: Wait for parse worker (pending -> ok)
+        run: |
+          sleep 5
+          for i in {1..15}; do
+            state=$(bash tools/query.sh sessions ci-smoke http://localhost:8080 \
+              | jq -r '.items[0].parseState')
+            echo "attempt ${i}: parseState=${state}"
+            [ "${state}" = "ok" ] && exit 0
+            sleep 1
+          done
+          echo "parse_state never reached ok" >&2
+          docker compose logs api-server | tail -50 >&2
+          exit 1
+
+      - name: Verify entries returned
+        run: |
+          sid='${{ steps.ship.outputs.session_id }}'
+          n=$(curl -fsS "http://localhost:8080/v1/sessions/${sid}/entries" | jq '.items | length')
+          echo "entries=${n}"
+          if [ "${n}" -lt 1 ]; then
+            echo "expected >0 entries for session ${sid}, got ${n}" >&2
+            exit 1
+          fi
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          echo "=== docker compose ps ==="; docker compose ps || true
+          echo "=== docker compose logs ==="; docker compose logs || true
+
+      - name: Tear down stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
