@@ -24,7 +24,7 @@ On a managed Windows device (typically deployed via MSI → service):
    (`%ProgramData%\CMTraceOpen\Agent\state.db`), chunk them, and upload to
    the api-server's ingest endpoint with resume-on-reconnect semantics.
 
-## What it does *today* (Wave 2 M1)
+## What it does *today* (Wave 2 M1+)
 
 - Builds on Windows and Linux via `#[cfg(target_os = "windows")]` gates.
 - Loads `AgentConfig` from either a TOML file or `CMTRACE_*` env vars.
@@ -38,8 +38,12 @@ On a managed Windows device (typically deployed via MSI → service):
 - **Uploader**: chunked resumable upload to the api-server's
   `/v1/ingest/bundles` protocol (init → chunks → finalize) with
   exponential-backoff retry (1s / 5s / 30s).
+- **Collection scheduler**: fires evidence collection on a configurable
+  cadence (interval, cron, or manual). Runs as a sibling task to the
+  queue drainer in the service dispatcher's tokio runtime. Applies ±N
+  minutes jitter to spread fleet-wide load. See [Scheduler](#scheduler) below.
 - **`--oneshot`**: collect + enqueue + drain once and exit. Default
-  mode is a foreground daemon with interval-driven collection and a
+  mode is a daemon with the scheduler driving collection and a
   30-second drain loop.
 
 ## Config
@@ -48,11 +52,13 @@ Two sources, listed in order of precedence for `from_env_or_default`
 (defaults < env). A full file load via `AgentConfig::from_file` replaces
 all fields (with `#[serde(default)]` filling gaps).
 
+### Top-level knobs
+
 | TOML key                | Env var                        | Default                         |
 |-------------------------|--------------------------------|---------------------------------|
 | `api_endpoint`          | `CMTRACE_API_ENDPOINT`         | `https://api.corp.example.com`  |
 | `request_timeout_secs`  | `CMTRACE_REQUEST_TIMEOUT_SECS` | `60`                            |
-| `evidence_schedule`     | `CMTRACE_EVIDENCE_SCHEDULE`    | `0 3 * * *`                     |
+| `evidence_schedule`     | `CMTRACE_EVIDENCE_SCHEDULE`    | `0 3 * * *` *(deprecated)*      |
 | `queue_max_bundles`     | `CMTRACE_QUEUE_MAX_BUNDLES`    | `50`                            |
 | `log_level`             | `CMTRACE_LOG_LEVEL`            | `info`                          |
 | `device_id`             | `CMTRACE_DEVICE_ID`            | *(hostname fallback)*           |
@@ -60,6 +66,41 @@ all fields (with `#[serde(default)]` filling gaps).
 | `tls_client_cert_pem`   | `CMTRACE_TLS_CLIENT_CERT`      | `None` (no client cert)         |
 | `tls_client_key_pem`    | `CMTRACE_TLS_CLIENT_KEY`       | `None`                          |
 | `tls_ca_bundle_pem`     | `CMTRACE_TLS_CA_BUNDLE`        | `None` (use OS native roots)    |
+
+### Scheduler (`[collection.schedule]`)
+
+| TOML key                       | Env var                              | Default       | Description                                              |
+|--------------------------------|--------------------------------------|---------------|----------------------------------------------------------|
+| `collection.schedule.mode`     | `CMTRACE_SCHEDULE_MODE`              | `interval`    | `interval` \| `cron` \| `manual`                        |
+| `collection.schedule.interval_hours` | `CMTRACE_SCHEDULE_INTERVAL_HOURS` | `24`       | Hours between collections (used when `mode = interval`) |
+| `collection.schedule.cron_expr`| `CMTRACE_SCHEDULE_CRON_EXPR`         | `0 3 * * *`   | 5-field cron expression, local time (used when `mode = cron`) |
+| `collection.schedule.jitter_minutes` | `CMTRACE_SCHEDULE_JITTER_MINUTES` | `30`       | Randomize fire time ±N minutes to spread fleet load      |
+
+Example TOML snippets:
+
+```toml
+# Default: collect every 24 hours, ±30 min jitter
+[collection.schedule]
+mode = "interval"
+interval_hours = 24
+jitter_minutes = 30
+
+# Daily at 03:00 local time, ±10 min jitter
+[collection.schedule]
+mode = "cron"
+cron_expr = "0 3 * * *"
+jitter_minutes = 10
+
+# Every Monday at 02:00 local time, no jitter
+[collection.schedule]
+mode = "cron"
+cron_expr = "0 2 * * 1"
+jitter_minutes = 0
+
+# Disable automatic collection (trigger via --oneshot instead)
+[collection.schedule]
+mode = "manual"
+```
 
 The file is expected at `%ProgramData%\CMTraceOpen\Agent\config.toml` in
 production, but `from_file` takes any `&Path`.
@@ -133,6 +174,40 @@ winget install NASM.NASM
 
 If `cargo check -p agent` fails with `Could not find nasm` or
 `cmake: command not found`, install the toolchain above and re-run.
+
+## Scheduler
+
+The `CollectionScheduler` (`crates/agent/src/scheduler.rs`) drives evidence
+collection on a configurable cadence. It runs as a sibling task to the queue
+drainer in the service dispatcher's tokio runtime.
+
+### Modes
+
+| Mode       | Behaviour                                                                      |
+|------------|--------------------------------------------------------------------------------|
+| `interval` | Fires every `interval_hours` hours (default: 24). Simplest setup.             |
+| `cron`     | Fires according to a 5-field cron expression in `cron_expr` (local time).     |
+| `manual`   | Never fires automatically. Use `--oneshot` or an external trigger instead.    |
+
+### Jitter
+
+To prevent a fleet of 1000+ devices hitting the server simultaneously, the
+scheduler shifts each device's fire time by a random offset drawn uniformly
+from `[-jitter_minutes, +jitter_minutes]`. With the default `jitter_minutes =
+30`, two devices that would otherwise fire at 03:00 may fire anywhere between
+02:30 and 03:30.
+
+Set `jitter_minutes = 0` to disable jitter (useful for manual testing or when
+an external load-balancing mechanism is in place).
+
+### Wiring
+
+In daemon mode (`main.rs`), the scheduler runs as a tokio task alongside the
+30-second drain loop. When ctrl-c (or the Windows service STOP control) is
+received, a stop channel message is sent. The scheduler receives it in its
+`select!` loop and exits cleanly, even if a collection pass is in progress
+(the collection itself is not interrupted — the stop is honoured on the next
+`select!` iteration).
 
 ## Not yet in scope
 
