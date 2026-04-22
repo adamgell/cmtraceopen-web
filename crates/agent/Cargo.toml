@@ -25,21 +25,49 @@ serde_json = "1"
 thiserror = "2"
 toml = "0.8"
 common-wire = { path = "../common-wire" }
-# Chunked upload client. Intentionally NO TLS feature here — both of the
-# pure-Rust options on reqwest 0.12 pull a cryptoprovider transitive that
-# breaks our build:
-#   * `rustls-tls` (webpki) → pulls `ring`, which needs `clang` to build
-#     on aarch64-windows dev boxes (docs.rs/cc requirements). Ubuntu CI
-#     is fine; the developer experience isn't.
-#   * `rustls-tls-no-provider` + aws-lc-rs → pulls `aws-lc-sys`, which
-#     needs cmake + NASM and actively fails to link on aarch64-windows.
-# The rest of the workspace (api-server, common-wire) already avoids
-# both of those transitively — see api-server's `tls-none` sqlx feature.
-# Wave 2 M2 adds mTLS via a hand-picked provider once the rustls-platform
-# story settles; until then the agent talks plaintext HTTP to the
-# api-server (or to a TLS-terminating reverse proxy that fronts it in
-# production). `stream` is retained for future body-stream work.
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+# Chunked upload client. We hand reqwest a pre-built rustls `ClientConfig`
+# via `use_preconfigured_tls(..)`, so we deliberately pick the
+# `*-no-provider` feature variants — the non-suffixed
+# (`rustls-tls-manual-roots`, `rustls-tls-native-roots`) variants
+# transitively enable `__rustls-ring`, which would pull the `ring`
+# crate back in and double-link the crypto core. We want the choice
+# of provider to live in *our* code (see the `rustls` dep below) so
+# the Wave 3 mTLS path can attach a client cert chain through the same
+# ClientConfig.
+#
+# `stream` is kept so the future body-streaming uploader can swap in
+# without another features churn.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls-manual-roots-no-provider",
+    "rustls-tls-native-roots-no-provider",
+] }
+# Crypto provider for rustls. We pick `aws-lc-rs` over `ring` for two
+# reasons:
+#   * No `clang` build dep on Linux *or* Windows. `ring` wants clang on
+#     aarch64-windows; `aws-lc-rs` builds with cmake + NASM, both of
+#     which are present on the GitHub Ubuntu/Windows CI images by
+#     default. (The dev box doesn't have NASM yet — see README.)
+#   * FIPS-ready crypto core (FIPS 140-3 cert in flight upstream),
+#     which matters for the regulated-customer side of the deployment
+#     story even if we don't formally claim FIPS compliance today.
+# The provider is installed once at startup in `uploader.rs`.
+# Re-list `logging`, `std`, `tls12` — they're in rustls's default feature
+# set but `default-features = false` strips everything. We DO want them
+# (TLS 1.2 fallback for older corp proxies; std for the default
+# `BufReader` impls; logging so rustls handshake errors land in our
+# tracing pipeline). What we DON'T want is the `prefer-post-quantum`
+# default, which is debatable and adds bytes-on-the-wire we haven't
+# vetted with the api-server's TLS terminator yet.
+rustls = { version = "0.23", default-features = false, features = [
+    "aws-lc-rs",
+    "logging",
+    "std",
+    "tls12",
+] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
 # Zip: drop default features so bzip2 / deflate64 / zstd / xz don't land on
 # the transitive graph. `deflate` alone matches the api-server's evidence-zip
 # reader (see crates/api-server/Cargo.toml).

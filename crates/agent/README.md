@@ -57,9 +57,38 @@ all fields (with `#[serde(default)]` filling gaps).
 | `log_level`             | `CMTRACE_LOG_LEVEL`            | `info`                          |
 | `device_id`             | `CMTRACE_DEVICE_ID`            | *(hostname fallback)*           |
 | `log_paths`             | *(no env override)*            | CCM + IME + DSRegCmd trees      |
+| `tls_client_cert_pem`   | `CMTRACE_TLS_CLIENT_CERT`      | `None` (no client cert)         |
+| `tls_client_key_pem`    | `CMTRACE_TLS_CLIENT_KEY`       | `None`                          |
+| `tls_ca_bundle_pem`     | `CMTRACE_TLS_CA_BUNDLE`        | `None` (use OS native roots)    |
 
 The file is expected at `%ProgramData%\CMTraceOpen\Agent\config.toml` in
 production, but `from_file` takes any `&Path`.
+
+## TLS
+
+The agent uses `rustls` with the `aws-lc-rs` crypto provider. By default
+it:
+
+* Trusts the platform's native root store (via `rustls-native-certs`).
+* Does *not* present a client certificate.
+* Speaks plaintext HTTP fine when the configured `api_endpoint` starts
+  with `http://` (handy for local dev against a loopback api-server).
+
+To opt into mutual TLS (Wave 3), set both of these to PEM-encoded files:
+
+```toml
+tls_client_cert_pem = "C:\\ProgramData\\CMTraceOpen\\Agent\\client.crt"
+tls_client_key_pem  = "C:\\ProgramData\\CMTraceOpen\\Agent\\client.key"
+```
+
+Or override the trusted root set with a custom CA bundle:
+
+```toml
+tls_ca_bundle_pem = "C:\\ProgramData\\CMTraceOpen\\Agent\\corp-ca.pem"
+```
+
+Server-side mTLS enforcement is **not** yet wired up; presenting a
+client cert today is harmless and forward-compatible.
 
 ## Building
 
@@ -73,15 +102,48 @@ cargo test    -p agent
 On Linux these all succeed; the `windows-service` / `windows` crates are
 gated behind `cfg(target_os = "windows")` in `Cargo.toml`.
 
+### Build prerequisites for `aws-lc-rs`
+
+The agent now uses `rustls` + `aws-lc-rs` for TLS (see `Cargo.toml` for
+why we picked `aws-lc-rs` over `ring`). Building `aws-lc-sys` requires
+the following native toolchain bits:
+
+* **cmake** ≥ 3.0
+* **NASM** ≥ 2.13 (x86 / x86_64 only — needed for the assembler-tuned
+  crypto primitives)
+* A C/C++ compiler (clang or MSVC `cl.exe`; gcc works on Linux)
+* **Go** ≥ 1.18 — the `aws-lc-fips-sys` build script invokes `go` to
+  drive the upstream BoringSSL-derived build harness; only required if
+  you opt into the FIPS feature, but worth listing for completeness
+
+These are present on GitHub-hosted runners (`ubuntu-latest`,
+`windows-latest`, `macos-latest`) by default. On a clean dev box:
+
+```bash
+# Ubuntu / Debian
+sudo apt-get install -y cmake nasm build-essential
+
+# macOS (Homebrew)
+brew install cmake nasm
+
+# Windows (winget)
+winget install Kitware.CMake
+winget install NASM.NASM
+```
+
+If `cargo check -p agent` fails with `Could not find nasm` or
+`cmake: command not found`, install the toolchain above and re-run.
+
 ## Not yet in scope
 
 - **Windows service registration** (`windows_service::service_dispatcher`).
   Main loop runs as a foreground daemon; `sc.exe create` + `sc.exe start`
   works for hand-testing until Wave 2 M2 wires the real SCM integration.
-- mTLS client cert loading (Wave 3).
-- TLS at the reqwest layer — see the big comment in `Cargo.toml`; the
-  agent currently talks plaintext HTTP, so production deployments front
-  the api-server with a TLS-terminating reverse proxy.
+- mTLS *enforcement* — the client now ships with rustls and can attach a
+  client certificate when `tls_client_cert_pem` + `tls_client_key_pem`
+  are configured (see TLS section below). Server-side mTLS enforcement
+  arrives in Wave 3; until then the cert (if any) is presented but the
+  api-server doesn't require it.
 - SQLite cursor DB — flat-file queue is good enough for MVP.
 - MSI packaging (WiX).
 - HKLM registry overrides and ADMX policy ingestion.

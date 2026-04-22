@@ -34,6 +34,7 @@ use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
 use cmtraceopen_agent::collectors::logs::LogsCollector;
 use cmtraceopen_agent::config::AgentConfig;
 use cmtraceopen_agent::queue::{Queue, QueueState};
+use cmtraceopen_agent::tls::TlsClientOptions;
 use cmtraceopen_agent::uploader::{Uploader, UploaderConfig};
 use cmtraceopen_agent::banner;
 use tokio::signal;
@@ -94,11 +95,18 @@ async fn run(config: AgentConfig, oneshot: bool) -> Result<(), Box<dyn std::erro
     tokio::fs::create_dir_all(&work_root).await?;
 
     let orchestrator = build_orchestrator(&config, work_root.clone());
-    let uploader = Uploader::new(UploaderConfig::new(
-        config.api_endpoint.clone(),
-        config.resolved_device_id(),
-        Duration::from_secs(config.request_timeout_secs),
-    ))?;
+    let uploader = Uploader::new(
+        UploaderConfig::new(
+            config.api_endpoint.clone(),
+            config.resolved_device_id(),
+            Duration::from_secs(config.request_timeout_secs),
+        )
+        .with_tls(TlsClientOptions {
+            client_cert_pem: config.tls_client_cert_pem.clone(),
+            client_key_pem: config.tls_client_key_pem.clone(),
+            ca_bundle_pem: config.tls_ca_bundle_pem.clone(),
+        }),
+    )?;
 
     if oneshot {
         // One pass: collect + enqueue + drain once, exit.

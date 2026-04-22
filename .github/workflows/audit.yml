@@ -44,3 +44,8 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # The action doesn't honor `audit.toml` at the repo root reliably
+          # (settings dump shows ignore=[] even with the file present), so
+          # pass ignores as input. Comments live in audit.toml for the
+          # human-readable rationale; the IDs are duplicated here.
+          ignore: RUSTSEC-2023-0071
