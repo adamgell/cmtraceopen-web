@@ -40,11 +40,17 @@ base64 = "0.22"
 # Operator bearer-token auth (Entra ID / Azure AD). `jsonwebtoken` drags in
 # `ring` transitively and we have a workspace rule against ring (see README);
 # `jwt-simple` ships with pure-rust crypto (rsa / p256 / ed25519-dalek) and
-# avoids ring entirely. `reqwest` is configured with `native-tls` (Schannel
-# on Windows, SecureTransport on macOS, OpenSSL on Linux) for the same
-# reason — `rustls-tls` pulls ring unless swapped to aws-lc-rs.
+# avoids ring entirely.
+#
+# `reqwest` runs on rustls + aws-lc-rs to match the agent (PR #37) and the
+# Wave 3 mTLS stack. We pick `rustls-tls-native-roots-no-provider` rather
+# than `rustls-tls-native-roots` because the latter transitively pulls
+# `__rustls-ring`, which would re-introduce ring; the `-no-provider` variant
+# lets us install aws-lc-rs explicitly via the `rustls` crate. The crypto
+# provider is installed exactly once at startup in `main.rs` (see
+# `rustls::crypto::aws_lc_rs::default_provider().install_default()`).
 jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
-reqwest = { version = "0.12", default-features = false, features = ["native-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots-no-provider"] }
 # Operator-auth JWKS cache needs non-blocking read-heavy access.
 parking_lot = "0.12"
 # Parse-on-ingest pipeline. Path-dep on the sibling cmtraceopen submodule;
@@ -71,7 +77,12 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # (`cargo check -p api-server --no-default-features`). When the feature
 # is off, the `tls_enabled` config flag is unconditionally `false`.
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"], optional = true }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"], optional = true }
+# rustls is non-optional because reqwest's `rustls-tls-native-roots-no-provider`
+# feature pulls rustls regardless, and we install the aws-lc-rs provider once
+# at startup for both the reqwest client (JWKS fetch) and the axum-server TLS
+# stack (Wave 3 mTLS). Adding `std` here is required for axum-server's
+# tls-rustls-no-provider config; reqwest doesn't care.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-pemfile = { version = "2", optional = true }
 # `webpki` is pulled transitively by `rustls`, but we depend on it
 # explicitly so the `WebPkiClientVerifier` builder path is available.
@@ -90,7 +101,6 @@ default = ["mtls"]
 # device-identity surface is the legacy `X-Device-Id` header.
 mtls = [
     "dep:axum-server",
-    "dep:rustls",
     "dep:rustls-pemfile",
     "dep:rustls-webpki",
     "dep:x509-parser",
@@ -116,10 +126,11 @@ default-features = false
 features = ["aws-lc-rs"]
 
 [dev-dependencies]
-# Ingest integration tests use reqwest with json-only features (native-tls
-# feature is already pulled in via the main `reqwest` entry, so no extra
-# build cost here — this entry exists so the test-only client can hit the
-# local loopback server over plain HTTP without the tls stack complaining).
+# Ingest integration tests use reqwest with json-only features. The TLS
+# stack is already pulled in via the main `reqwest` entry (rustls +
+# aws-lc-rs, see above), so this dev entry exists so the test-only client
+# can hit the local loopback server over plain HTTP without re-paying for
+# the tls feature compile.
 # The operator-auth integration test signs short-lived tokens with jwt-simple.
 jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
 tempfile = "3"
