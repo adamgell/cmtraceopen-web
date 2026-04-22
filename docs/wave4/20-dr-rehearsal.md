@@ -76,7 +76,9 @@ or provider outage). Restore the full stack from off-host backups.
 
 #### Pre-conditions (verify before starting the clock)
 
-- [ ] Off-host backup set from the previous night exists and is accessible:
+- [ ] Off-host backup set from the previous night exists and is accessible
+  **from the operator's workstation** (not only from the lost BigMac26 —
+  that's the failure scenario):
   ```bash
   ls -lh /backup/cmtraceopen/$(date -d yesterday +%F)/
   # expect: cmtraceopen.sql  blobs/
@@ -85,6 +87,8 @@ or provider outage). Restore the full stack from off-host backups.
 - [ ] Docker + Docker Compose installed on the replacement host.
 - [ ] `docker-compose.yml` and `.env` are checked into source control (no
   secrets-only-on-host).
+- [ ] Pre-shared SSH key access from the operator's workstation to the
+  replacement host (`${NEWHOST}`) is confirmed before the clock starts.
 
 #### Action sequence
 
@@ -119,9 +123,11 @@ or provider outage). Restore the full stack from off-host backups.
    docker stop pg-restore
    ```
 
-5. **[T+35–50 min]** Restore blob store:
+5. **[T+35–50 min]** Restore blob store. Note: no `--delete` — the
+   destination is a fresh host, and append-only semantics match the
+   `tools/ops/blob-backup.sh` model (PR #96).
    ```bash
-   rsync -avz --delete \
+   rsync -avz \
      /backup/cmtraceopen/${BACKUP_DATE}/blobs/ \
      ${NEWHOST}:/var/lib/cmtraceopen/data/blobs/
    ```
@@ -146,14 +152,20 @@ or provider outage). Restore the full stack from off-host backups.
 9. **[T+85–90 min]** Verify agent re-queued bundles start arriving (tail
    the api-server log for ingest events for ~5 min).
 
-10. **[T+90]** Note end time. Tear down the test host (do **not** promote to
-    production without a separate change-management approval).
+10. **[T+90]** Note end time. **Stop services** on the test host (`docker
+    compose down`) but **retain disks/volumes for ≥ 7 days** for
+    post-mortem reference. Do not `rm -rf` the restored data — it's the
+    only successful restore artifact and is invaluable if the
+    post-mortem surfaces additional questions. Do **not** promote the
+    test host to production without a separate change-management approval.
 
 #### Success criteria
 
 - [ ] `GET /healthz` returns HTTP 200 on replacement host.
 - [ ] `GET /readyz` returns HTTP 200 on replacement host.
-- [ ] Session count after restore matches the pre-drill snapshot ± 0 rows.
+- [ ] Session count loss is **within the 24h RPO budget** (some rows lost
+  is expected; the drill PASSes if loss ≤ 24h of pre-drill ingest rate
+  and FAILs if loss > 24h or rows are *added* unexpectedly).
 - [ ] At least one agent-submitted bundle is visible in the logs after
   restore.
 - [ ] Total elapsed time ≤ 2 h.
@@ -214,13 +226,23 @@ take longer)
    ```
 
 3. **[T+15–30 min]** For each missing blob, mark the corresponding bundle
-   rows as `pending_redelivery` so the api-server will re-accept them:
+   rows as `pending_redelivery` so the api-server will re-accept them.
+   Postgres can't `SELECT FROM` a filesystem path directly, so load the
+   file into a temp table via `\copy` first:
    ```bash
-   # Adapt session_ids from the missing-blobs list
-   psql -U cmtraceopen -d cmtraceopen -c \
-     "UPDATE bundles SET status = 'pending_redelivery'
-      WHERE blob_path IN (SELECT * FROM /tmp/missing-blobs.txt);"
+   psql -U cmtraceopen -d cmtraceopen <<'SQL'
+   BEGIN;
+   CREATE TEMP TABLE missing_blobs (blob_path text);
+   \copy missing_blobs FROM '/tmp/missing-blobs.txt'
+   UPDATE bundles
+      SET status = 'pending_redelivery'
+    WHERE blob_path IN (SELECT blob_path FROM missing_blobs);
+   COMMIT;
+   SQL
    ```
+   (Alternative: `xargs` the file contents into a comma-separated `IN (...)`
+   list, but `\copy` to a temp table scales to thousands of rows without
+   hitting psql's command-line length limit.)
 
 4. **[T+30–45 min]** Trigger re-upload from a test agent by cycling the
    cmtraceopen-agent service:
@@ -267,43 +289,67 @@ continue ingesting.
   (simulates devices in the field during the outage).
 - [ ] You have a second test device with **no cert yet** (simulates a newly
   enrolled device that would be blocked).
-- [ ] Backup of `CMTRACE_CLIENT_CA_BUNDLE` value is noted:
-  ```bash
-  docker compose exec api-server \
-    printenv CMTRACE_CLIENT_CA_BUNDLE | md5sum
-  ```
+- [ ] Trust bundle (`CMTRACE_CLIENT_CA_BUNDLE`) is **left intact**
+  throughout this drill — a real Cloud PKI tenant outage is a
+  CDP/OCSP-reachability failure, not a trust-store mutation. Mutating
+  the trust bundle would simulate the wrong failure mode.
+- [ ] You have host-level (or network-level) ability to block outbound
+  resolution of the Cloud PKI CDP/OCSP endpoints from the test devices.
 
 #### Action sequence
 
 1. **[T+0]** Note start time.
 
-2. **[T+0–10 min]** Simulate PKI outage: comment out the live Cloud PKI
-   issuing CA from `CMTRACE_CLIENT_CA_BUNDLE` in `.env`, restart the
-   api-server:
-   ```bash
-   # In .env, change CMTRACE_CLIENT_CA_BUNDLE to a stub / expired cert
-   docker compose up -d api-server
+2. **[T+0–10 min]** Simulate PKI outage by blocking CDP/OCSP reachability
+   from the test devices — DO NOT mutate the trust bundle. Pick whichever
+   layer is available in the test environment:
+
+   **Option A — host-level (Windows test device):** add a `hosts` entry
+   that routes the CDP host to a black hole.
+   ```powershell
+   # Find the actual CDP host from a freshly issued cert
+   certutil -dump <cert.cer> | Select-String -Pattern "URL=http"
+   # Then in C:\Windows\System32\drivers\etc\hosts:
+   # 127.0.0.1  primary-cdn.pki.azure.net
+   ipconfig /flushdns
    ```
 
-3. **[T+10–20 min]** Confirm the second test device (no cert) cannot ingest:
-   ```bash
-   # On the uncertified device — expect TLS handshake failure
-   curl -v https://bigmac26/v1/bundles/start 2>&1 | grep -i "alert\|error"
+   **Option B — network-level (preferred, mimics real outage):** add a
+   deny rule on the test-environment firewall blocking outbound 443 to
+   the CDP/OCSP IP ranges (or to `*.pki.azure.net` if your firewall
+   supports FQDN rules).
+
+   Verify the block is active before proceeding:
+   ```powershell
+   # Should fail / time out, not return cert content
+   Invoke-WebRequest -Uri "http://primary-cdn.pki.azure.net/..." -TimeoutSec 5
    ```
+
+3. **[T+10–20 min]** Confirm the second test device (no cert) cannot
+   complete enrollment — SCEP/EST exchange will fail because Cloud PKI
+   itself is unreachable. The device should log a clear "PKI unreachable"
+   entry, not a TLS handshake failure.
 
 4. **[T+20–35 min]** Confirm the first test device (valid cert) **can**
-   still ingest using the retained old CA in the bundle:
+   still ingest. The trust bundle is intact, so mTLS succeeds; the only
+   thing blocked is the CDP/OCSP fetch (which the agent should treat as
+   "soft-fail" per the dual-CA design):
    ```bash
    docker compose logs -f api-server | grep "bundle_ingest"
    ```
-   If the old CA was also removed, bundles queue client-side. Verify the
-   Windows event log on the test device shows `QueuedForRetry` entries, not
-   dropped bundles.
+   Verify the Windows event log on the certified device shows successful
+   ingest events (no `QueuedForRetry` for cert-related reasons — only for
+   actual transport failures, if any).
 
-5. **[T+35–50 min]** Restore the full CA bundle (simulate PKI coming back):
-   ```bash
-   # Restore CMTRACE_CLIENT_CA_BUNDLE to original value
-   docker compose up -d api-server
+5. **[T+35–50 min]** Restore CDP/OCSP reachability (simulate PKI coming back):
+   ```powershell
+   # Option A: remove the hosts entry, then:
+   ipconfig /flushdns
+   # Option B: remove the firewall deny rule
+   ```
+   Confirm reachability is back:
+   ```powershell
+   Invoke-WebRequest -Uri "http://primary-cdn.pki.azure.net/..." -TimeoutSec 5
    ```
 
 6. **[T+50–70 min]** Restart the cmtraceopen-agent on both test devices and
@@ -319,7 +365,10 @@ continue ingesting.
 8. **[T+80–90 min]** Document the dual-CA window boundaries in the
    history entry (see §5).
 
-9. **[T+90]** Note end time. Restore `.env` to production values.
+9. **[T+90]** Note end time. Confirm CDP/OCSP block is fully removed.
+   The `.env` / trust bundle should be unchanged from start of drill —
+   if it was modified, that's a deviation from the runbook and needs
+   noting in the post-mortem.
 
 #### Success criteria
 
@@ -360,7 +409,11 @@ safe in blob store and can be re-associated)
 
 #### Action sequence
 
-1. **[T+0]** Note start time. Record current row counts as baseline:
+1. **[T+0]** Note start time. Record current row counts as baseline.
+   `pg_stat_user_tables.n_live_tup` is an autovacuum-maintained
+   *estimate* and can be off by hundreds of rows — fine for sanity
+   checks at this scale, but use `SELECT count(*)` on individual tables
+   if you need a precise figure for the post-mortem.
    ```bash
    psql -U cmtraceopen -d cmtraceopen -c \
      "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY relname;"
