@@ -70,7 +70,9 @@ pub fn default_rules() -> Vec<RedactionRule> {
         },
         RedactionRule {
             name: "guid".into(),
-            regex: r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}".into(),
+            // `\b` anchors so a longer hex token containing a 36-char
+            // GUID-shaped substring isn't partially mangled.
+            regex: r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b".into(),
             replacement: "<GUID>".into(),
         },
         RedactionRule {
@@ -80,9 +82,25 @@ pub fn default_rules() -> Vec<RedactionRule> {
         },
         RedactionRule {
             name: "ipv4_internal".into(),
-            // Corp 10.x range only; public IPs are left intact for diagnostics.
-            regex: r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b".into(),
+            // All three RFC 1918 private blocks: 10.0.0.0/8, 172.16.0.0/12,
+            // 192.168.0.0/16. Public IPs are left intact for diagnostics.
+            regex: concat!(
+                r"\b(?:",
+                r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}",
+                r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}",
+                r"|192\.168\.\d{1,3}\.\d{1,3}",
+                r")\b",
+            ).into(),
             replacement: "<INTERNAL_IP>".into(),
+        },
+        RedactionRule {
+            name: "windows_sid".into(),
+            // Domain SIDs of the form S-1-5-21-X-Y-Z-RID. Common in
+            // dsregcmd /status output, Group Policy logs, security event
+            // exports. The constant `S-1-5-21-` prefix scopes this to
+            // domain principals (skips well-known SIDs like S-1-5-18).
+            regex: r"\bS-1-5-21-\d+-\d+-\d+-\d+\b".into(),
+            replacement: "<SID>".into(),
         },
     ]
 }
@@ -321,5 +339,82 @@ mod tests {
         }];
         let err = Redactor::from_rules(&rules).unwrap_err();
         assert!(err.to_string().contains("bad"));
+    }
+
+    /// `\b` anchors must prevent the GUID rule from chewing on longer hex
+    /// tokens (e.g. a 64-char SHA-256 with a GUID-shaped substring).
+    #[test]
+    fn guid_anchors_protect_longer_hex_tokens() {
+        let r = redactor_with_defaults();
+        // `aabbccdd-eeff-0011-2233-445566778899` is a valid GUID. Embed
+        // it inside a longer hex run with no separators on either side.
+        let input = "abcdef0aabbccdd-eeff-0011-2233-445566778899abcdef";
+        let result = r.apply(input);
+        // Should NOT have replaced the middle (no word-boundary either side).
+        assert_eq!(result, input, "GUID inside longer hex must NOT be redacted: {result}");
+    }
+
+    /// Standalone GUID still gets redacted.
+    #[test]
+    fn standalone_guid_still_redacted() {
+        let r = redactor_with_defaults();
+        let input = "id=aabbccdd-eeff-0011-2233-445566778899 status=ok";
+        let result = r.apply(input);
+        assert!(result.contains("<GUID>"), "standalone GUID should be redacted: {result}");
+    }
+
+    /// 192.168.0.0/16 must redact.
+    #[test]
+    fn ipv4_192_168_is_redacted() {
+        let r = redactor_with_defaults();
+        let input = "Reaching gateway 192.168.1.1 for sync";
+        let result = r.apply(input);
+        assert_eq!(result, "Reaching gateway <INTERNAL_IP> for sync");
+    }
+
+    /// 172.16.0.0/12 must redact (172.16-172.31 second-octet).
+    #[test]
+    fn ipv4_172_16_is_redacted() {
+        let r = redactor_with_defaults();
+        for (input, expected) in &[
+            ("From 172.16.0.5 to host", "From <INTERNAL_IP> to host"),
+            ("From 172.20.10.1 to host", "From <INTERNAL_IP> to host"),
+            ("From 172.31.255.254 to host", "From <INTERNAL_IP> to host"),
+        ] {
+            let result = r.apply(input);
+            assert_eq!(&result, expected);
+        }
+    }
+
+    /// 172.x.x.x outside the /12 must NOT be redacted.
+    #[test]
+    fn ipv4_172_outside_12_preserved() {
+        let r = redactor_with_defaults();
+        for input in &[
+            "Reaching public 172.15.0.1 host",
+            "Reaching public 172.32.0.1 host",
+        ] {
+            let result = r.apply(input);
+            assert_eq!(&result, input, "non-RFC-1918 172.x must be preserved");
+        }
+    }
+
+    /// SID redaction (Windows domain principals).
+    #[test]
+    fn windows_sid_is_redacted() {
+        let r = redactor_with_defaults();
+        let input = "User S-1-5-21-1004336348-1177238915-682003330-1013 logged on";
+        let result = r.apply(input);
+        assert_eq!(result, "User <SID> logged on");
+    }
+
+    /// Well-known SIDs (LocalSystem, etc.) are NOT touched by the domain-SID
+    /// rule because they don't have the `21-` sub-authority prefix.
+    #[test]
+    fn well_known_sid_preserved() {
+        let r = redactor_with_defaults();
+        let input = "Service running as S-1-5-18";
+        let result = r.apply(input);
+        assert_eq!(result, input);
     }
 }

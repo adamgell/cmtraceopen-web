@@ -215,6 +215,59 @@ async fn bundle_has_no_pii_after_redaction() {
     assert!(found_log, "log file must be present in the bundle");
 }
 
+/// `manifest.json` carries a UUID-v7 bundleId. The GUID rule (with
+/// `\b` anchors) would otherwise rewrite it to `<GUID>` and destroy
+/// forensic provenance. The skip list in `redact_staging_dir` must
+/// preserve the file untouched even when redaction is enabled.
+#[tokio::test]
+async fn bundle_manifest_json_is_not_redacted() {
+    let src = TempDir::new().unwrap();
+    std::fs::write(src.path().join("noise.log"), "nothing sensitive\n").unwrap();
+
+    let work = TempDir::new().unwrap();
+    let pattern = format!(
+        "{}/*.log",
+        src.path().to_string_lossy().replace('\\', "/")
+    );
+
+    let redactor = default_redactor();
+    let orch = EvidenceOrchestrator::new(
+        LogsCollector::new(vec![pattern]),
+        EventLogsCollector::with_defaults(),
+        DsRegCmdCollector::new(),
+        work.path().to_path_buf(),
+        redactor,
+    );
+
+    let bundle = orch.collect_once().await.expect("collect");
+    let bytes = std::fs::read(&bundle.zip_path).unwrap();
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).unwrap();
+
+    let mut found_manifest = false;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).unwrap();
+        if entry.name().ends_with("manifest.json") {
+            found_manifest = true;
+            let mut content = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut content).unwrap();
+            // The bundleId must STILL be a valid GUID (not <GUID>).
+            assert!(
+                !content.contains("<GUID>"),
+                "manifest.json must not be redacted: {content}"
+            );
+            // Must still contain the bundleId field with a UUID-shaped
+            // value matching the bundle metadata.
+            let expected = bundle.metadata.bundle_id.to_string();
+            assert!(
+                content.contains(&expected),
+                "manifest.json should retain its bundleId {expected}: {content}"
+            );
+        }
+    }
+    assert!(found_manifest, "manifest.json must be present in the bundle");
+}
+
 #[tokio::test]
 async fn bundle_with_disabled_redaction_preserves_pii() {
     let src = TempDir::new().unwrap();
