@@ -282,6 +282,14 @@ fn describe_metrics() {
         "cmtrace_db_connections_in_use",
         "Metadata-store pool connections currently checked out (size - idle)."
     );
+    #[cfg(feature = "crl")]
+    describe_counter!(
+        "cmtrace_crl_revocations_total",
+        "CRL revocation lookups in the DeviceIdentity extractor, labeled by \
+         result: rejected (serial in CRL) | unknown_fail_open (cache cold, \
+         allowed by crl_fail_open=true) | unknown_fail_closed (cache cold, \
+         rejected with 503)."
+    );
 }
 
 fn init_tracing() {

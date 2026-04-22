@@ -62,7 +62,7 @@ pub use device_identity::{
 pub mod crl;
 
 #[cfg(feature = "crl")]
-pub use crl::{CrlCache, CrlError};
+pub use crl::{CrlCache, CrlError, RevocationStatus};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

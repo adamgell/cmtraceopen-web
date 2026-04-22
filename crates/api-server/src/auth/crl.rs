@@ -305,6 +305,12 @@ impl CrlCache {
     /// Once at least one CRL is cached the fail-open knob no longer
     /// affects this method — we have *some* revocation data, so we use
     /// it. The knob is purely about how to behave when we have *none*.
+    ///
+    /// Prefer [`Self::revocation_status`] in new call sites — it
+    /// distinguishes "explicitly revoked" from "unknown (cache cold)" so
+    /// the caller can apply per-policy fallbacks (different HTTP status
+    /// codes, separate metric labels) instead of getting the
+    /// `fail_open`-collapsed bool.
     pub fn is_revoked(&self, serial: &[u8]) -> bool {
         let entries = self.entries.read();
         if entries.is_empty() {
@@ -313,6 +319,33 @@ impl CrlCache {
         entries
             .values()
             .any(|entry| entry.revoked_serials.contains(serial))
+    }
+
+    /// Three-valued revocation lookup. Lets the caller distinguish:
+    ///
+    /// - [`RevocationStatus::Revoked`] — `serial` appears in at least
+    ///   one cached CRL. Always reject.
+    /// - [`RevocationStatus::NotRevoked`] — at least one CRL is cached
+    ///   AND `serial` does not appear in any of them. Always accept.
+    /// - [`RevocationStatus::Unknown`] — no CRLs cached yet (cold
+    ///   start, every fetch has failed). Caller decides per
+    ///   `Config::crl_fail_open` whether to allow or reject.
+    ///
+    /// This is the API the `DeviceIdentity` extractor consumes. See
+    /// `docs/wave4/06-crl-wiring.md` for the decision matrix.
+    pub fn revocation_status(&self, serial: &[u8]) -> RevocationStatus {
+        let entries = self.entries.read();
+        if entries.is_empty() {
+            return RevocationStatus::Unknown;
+        }
+        if entries
+            .values()
+            .any(|entry| entry.revoked_serials.contains(serial))
+        {
+            RevocationStatus::Revoked
+        } else {
+            RevocationStatus::NotRevoked
+        }
     }
 
     /// Test-only helper: install a CRL entry directly without HTTP.
@@ -339,6 +372,21 @@ pub enum CrlError {
 
     #[error("CRL response too large: {0} bytes (cap is {MAX_CRL_BYTES})")]
     TooLarge(u64),
+}
+
+/// Outcome of a [`CrlCache::revocation_status`] lookup. The
+/// `DeviceIdentity` extractor maps these onto HTTP responses + metric
+/// labels per the matrix in `docs/wave4/06-crl-wiring.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevocationStatus {
+    /// Serial appears in at least one cached CRL — reject.
+    Revoked,
+    /// At least one CRL is cached and the serial isn't in any of them
+    /// — accept.
+    NotRevoked,
+    /// No CRLs cached yet (cold start / every fetch has failed). Caller
+    /// applies `Config::crl_fail_open` to decide allow vs reject.
+    Unknown,
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +619,28 @@ mod tests {
         assert!(cache.is_revoked(&[0x01]));
         assert!(cache.is_revoked(&[0xDE, 0xAD, 0xBE, 0xEF]));
         assert!(!cache.is_revoked(&[0x02]), "non-revoked serial must not match");
+    }
+
+    #[test]
+    fn revocation_status_three_valued_lookup() {
+        let cache = CrlCache::new(
+            ["http://example.invalid/crl".to_string()],
+            Duration::from_secs(3600),
+            false,
+        );
+        // Cold cache — never had a successful fetch, so Unknown
+        // regardless of fail_open.
+        assert_eq!(cache.revocation_status(&[0x01]), RevocationStatus::Unknown);
+
+        let url: Url = "http://example.invalid/crl".parse().unwrap();
+        cache.insert_for_test(url, vec![vec![0x42]]);
+
+        assert_eq!(cache.revocation_status(&[0x42]), RevocationStatus::Revoked);
+        assert_eq!(
+            cache.revocation_status(&[0x99]),
+            RevocationStatus::NotRevoked,
+            "warm cache + serial-not-in-CRL must yield NotRevoked, not Unknown",
+        );
     }
 
     #[test]
