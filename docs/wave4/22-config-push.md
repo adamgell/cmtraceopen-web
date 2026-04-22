@@ -153,7 +153,7 @@ CREATE TABLE default_config_override (
 | File | Change |
 |------|--------|
 | `crates/common-wire/src/lib.rs` | Added `AgentConfigOverride` DTO + `config` sub-module |
-| `crates/api-server/migrations/0003_device_config.sql` | **NEW** — config tables |
+| `crates/api-server/migrations/0004_device_config.sql` | **NEW** — config tables |
 | `crates/api-server/src/storage/mod.rs` | Added `ConfigStore` trait |
 | `crates/api-server/src/storage/meta_sqlite.rs` | Implemented `ConfigStore` |
 | `crates/api-server/src/routes/config.rs` | **NEW** — `GET /v1/config/{device_id}` |
