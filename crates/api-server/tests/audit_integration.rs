@@ -52,10 +52,12 @@ async fn start_server() -> AuditTestServer {
             .expect("sqlite"),
     );
     let audit: Arc<AuditSqliteStore> = Arc::new(meta.audit_store());
+    let configs: Arc<dyn api_server::storage::ConfigStore> = meta.clone();
 
     let state = AppState::full_with_audit(
         meta,
         blobs,
+        configs,
         "127.0.0.1:0".to_string(),
         api_server::auth::AuthState {
             mode: api_server::auth::AuthMode::Disabled,
