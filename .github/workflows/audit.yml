@@ -1,0 +1,46 @@
+name: "cmtraceopen-web: cargo-audit"
+
+# Runs `cargo audit` (via the official rustsec/audit-check action, which
+# wraps the rustsec/advisory-db) against Cargo.lock. Catches new RustSec
+# advisories without waiting for Dependabot to file an alert.
+#
+# Triggers:
+#   - Weekly cron (Monday 13:00 UTC ≈ 09:00 ET) so we get a regular baseline
+#     even on quiet weeks.
+#   - workflow_dispatch for ad-hoc runs.
+#   - pull_request that touches Cargo.toml or Cargo.lock — fails the PR if
+#     a dep bump pulls in a known-vulnerable crate.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+
+permissions:
+  contents: read
+  # rustsec/audit-check posts annotations + an issue comment on advisories.
+  issues: write
+  # Required so the action can write Check Run annotations on PRs.
+  checks: write
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      # cmtraceopen is a git submodule at ./cmtraceopen; the root Cargo.lock
+      # path-depends on `./cmtraceopen/crates/cmtraceopen-parser`, so without
+      # the submodule cargo can't resolve the lockfile.
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
