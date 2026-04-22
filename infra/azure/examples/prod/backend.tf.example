@@ -1,0 +1,16 @@
+###############################################################################
+# Remote-state backend example. Copy to backend.tf and update the storage
+# account name + container to match your existing Terraform state account.
+#
+# Don't commit your real backend config either — the storage account name
+# is enough to scope an attack at your tfstate.
+###############################################################################
+
+terraform {
+  backend "azurerm" {
+    resource_group_name  = "rg-tfstate-prod"
+    storage_account_name = "<your-tfstate-storage-account>"
+    container_name       = "tfstate"
+    key                  = "cmtraceopen/prod.tfstate"
+  }
+}

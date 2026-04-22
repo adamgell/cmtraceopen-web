@@ -1,0 +1,17 @@
+# Local Terraform state — never commit. Provider plugins, init metadata.
+.terraform/
+.terraform.lock.hcl
+
+# State files (callers shouldn't apply against the example dir, but if they do...)
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+
+# Backend overrides + caller secrets
+backend.tf
+*.auto.tfvars
+
+# Allow the example tfvars (placeholders only, no real secrets)
+!examples/**/terraform.tfvars
+!examples/**/backend.tf.example
