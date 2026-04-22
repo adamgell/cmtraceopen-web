@@ -1,0 +1,126 @@
+name: "cmtraceopen-web: CodeQL"
+
+# CodeQL static analysis for Rust + JavaScript/TypeScript. Required by the
+# repo's "Copilot review for default branch" ruleset (rule type
+# `code_scanning`, threshold `high_or_higher`). Without this workflow, every
+# PR hangs waiting on a check that never runs.
+#
+# Languages covered:
+#   - rust         → all crates under crates/ + cmtrace-wasm/ (via the
+#                    cmtraceopen submodule path-dep too)
+#   - javascript   → src/ (Vite + React 19 + TypeScript viewer); CodeQL's
+#                    `javascript` analysis pack covers TypeScript natively
+#                    via tree-sitter — no separate `typescript` language
+#                    needed.
+#
+# Schedule: weekly Mon 14:00 UTC so a code-scanning baseline lands even on
+# quiet weeks. PR runs catch new issues before merge. Push-to-main runs
+# update the dismissal-tracking baseline.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 14 * * 1"
+  # Manual trigger for ad-hoc rescans (e.g., after upgrading codeql-action).
+  workflow_dispatch:
+
+permissions:
+  # Required by codeql-action to write findings as Check Runs + dismissed
+  # alerts on the security tab.
+  security-events: write
+  # actions:read needed when uploading SARIF from a private repo.
+  actions: read
+  # contents:read for checkout.
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both languages share the same checkout + setup, so matrix is the
+        # cleanest split. Rust takes 5–10 min on first run (compiles workspace);
+        # JS finishes in <2 min.
+        language: ["rust", "javascript"]
+
+    steps:
+      # Checkout — submodules:true because cmtrace-wasm path-deps on
+      # ./cmtraceopen/crates/cmtraceopen-parser. CodeQL's Rust analysis follows
+      # the path dep and analyzes the parser crate too. See ci.yml line 26-33
+      # for the same convention + rationale (no `recursive`).
+      - name: Checkout (with submodules)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      # Rust toolchain — pin matches rust-toolchain.toml (1.90). dtolnay's
+      # action honors the file automatically; specifying `stable` here would
+      # collide with the pin.
+      - name: Setup Rust
+        if: matrix.language == 'rust'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          # Empty toolchain → defer to rust-toolchain.toml.
+          toolchain: ""
+          components: clippy
+
+      # aws-lc-sys (transitive via rustls) needs cmake + nasm + clang at C
+      # build time. CodeQL's autobuild calls `cargo build` which triggers the
+      # whole tree, so install the same toolchain ci.yml uses (these come
+      # for free on ubuntu-latest these days but call out explicitly so a
+      # runner-image regression doesn't silently break us).
+      - name: Install Rust C-build deps
+        if: matrix.language == 'rust'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config ca-certificates cmake nasm clang
+
+      - name: Cache Rust dependencies
+        if: matrix.language == 'rust'
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-codeql-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-codeql-cargo-
+
+      - name: Setup Node
+        if: matrix.language == 'javascript'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+
+      # Initialize CodeQL — picks the language and registers the queries.
+      # Default query suite (`security-and-quality`) covers the security
+      # alerts the ruleset's `high_or_higher` threshold gates on, plus a
+      # broader quality set that surfaces bugs like null-deref, unused
+      # results, etc. Using the suite (not just `security`) gives Copilot's
+      # `code_quality` rule something to find too.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4e828ff8d448a8a6e532957b1811f387a63867e8 # v3.29.0
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+
+      # Autobuild: compiles the project so CodeQL can extract the typed AST.
+      # For Rust this runs `cargo build --workspace` under the hood; for JS
+      # autobuild is a no-op (CodeQL parses .ts/.tsx directly via tree-sitter).
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@4e828ff8d448a8a6e532957b1811f387a63867e8 # v3.29.0
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@4e828ff8d448a8a6e532957b1811f387a63867e8 # v3.29.0
+        with:
+          category: "/language:${{ matrix.language }}"
