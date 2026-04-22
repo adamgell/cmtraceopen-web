@@ -359,6 +359,12 @@ pub trait MetadataStore: Send + Sync + 'static {
         before: Option<(DateTime<Utc>, Uuid)>,
     ) -> Result<Vec<SessionRow>, StorageError>;
 
+    /// Most recently ingested sessions across **all** devices, ordered by
+    /// `ingested_utc DESC`. Used by the dev status page (`GET /`) to surface
+    /// a "recent bundles" panel without the operator having to know a
+    /// specific device id up front. Returns up to `limit` rows.
+    async fn recent_sessions(&self, limit: u32) -> Result<Vec<SessionRow>, StorageError>;
+
     /// Flip `sessions.parse_state` to `ok` / `partial` / `failed` after the
     /// background parse worker finishes. Any other value is accepted
     /// verbatim so callers can add granular states later (e.g. `timeout`)
