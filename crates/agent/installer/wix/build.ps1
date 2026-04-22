@@ -136,7 +136,10 @@ wix.exe not found. Install WiX v4 with:
 $OutFile = Join-Path $OutDir "CMTraceOpenAgent-$Version.msi"
 
 $WxsFiles = @(
-    'Variables.wxi',
+    # Variables.wxi is NOT listed here -- .wxi is an include-only source,
+    # consumed by the other .wxs files via <?include Variables.wxi ?>.
+    # Passing it as a top-level compilation unit makes WiX v4 reject it
+    # with WIX0048 ("document element 'Include' is invalid").
     'Product.wxs',
     'Files.wxs',
     'Service.wxs',
