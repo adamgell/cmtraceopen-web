@@ -1,24 +1,33 @@
 # CMTrace Open — local development stack.
 #
-# Bring up the API server + Postgres with:
+# Default: pulls the published api-server image from GHCR (no local build).
+# Override with `--build` to compile from source instead:
 #
-#   docker compose up --build
+#   docker compose up                 # pull ghcr.io/adamgell/cmtraceopen-api:0.1.0
+#   docker compose up --build         # build from crates/api-server/Dockerfile
+#
+# The CMTRACE_API_IMAGE env var lets you point at a different tag without
+# editing this file (useful for testing release candidates):
+#
+#   CMTRACE_API_IMAGE=ghcr.io/adamgell/cmtraceopen-api:0.2.0-rc.1 \
+#     docker compose up
 #
 # Targets Colima on Apple Silicon (native linux/arm64) and Docker Desktop on
-# Linux / x86_64 equally — no platform overrides needed.
-#
-# Postgres is wired in now even though the api-server doesn't persist anything
-# yet; that way CMTRACE_DATABASE_URL is already connected when storage lands
-# in a follow-up.
+# Linux / x86_64 equally — the GHCR image is multi-arch (linux/amd64 +
+# linux/arm64) so no platform overrides needed.
 
 name: cmtraceopen-dev
 
 services:
   api-server:
+    image: ${CMTRACE_API_IMAGE:-ghcr.io/adamgell/cmtraceopen-api:0.1.0}
     build:
+      # `--build` (or `docker compose build`) still works for local source
+      # iteration — the build block is retained but no longer the default
+      # path. Tag the locally-built image as ${CMTRACE_API_IMAGE} so the
+      # service uses it instead of pulling.
       context: .
       dockerfile: crates/api-server/Dockerfile
-    image: cmtraceopen-api:dev
     ports:
       - "8080:8080"
     environment:
