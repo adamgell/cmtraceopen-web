@@ -1,0 +1,15 @@
+[advisories]
+# RUSTSEC-2023-0071 — Marvin attack on `rsa` (timing sidechannel during RSA
+# private-key operations). Pulled transitively via `jwt-simple` ->
+# pkcs1/pkcs8 -> `rsa` for RSA-signed JWT validation in operator auth.
+#
+# Why ignored: no patched version is published; the rsa crate maintainers
+# are working on a constant-time rewrite. The api-server's RSA usage is
+# server-side JWT signature *verification* against Entra-issued tokens —
+# we don't sign with private RSA keys, so the leak surface is verification
+# only. The advisory's CVSS notes attacker must observe network timing of
+# operations using a private key; verification doesn't qualify. Revisit
+# whenever `cargo audit` flags a fixed-version landed.
+#
+# Tracking: https://github.com/RustCrypto/RSA/issues/19
+ignore = ["RUSTSEC-2023-0071"]

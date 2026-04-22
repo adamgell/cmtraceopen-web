@@ -114,6 +114,7 @@ impl UploaderConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct Uploader {
     client: Client,
     cfg: UploaderConfig,
