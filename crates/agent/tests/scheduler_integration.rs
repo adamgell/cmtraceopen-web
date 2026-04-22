@@ -16,6 +16,7 @@ use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
 use cmtraceopen_agent::collectors::logs::LogsCollector;
 use cmtraceopen_agent::config::{ScheduleConfig, ScheduleMode};
 use cmtraceopen_agent::queue::{Queue, QueuedBundle};
+use cmtraceopen_agent::redact::Redactor;
 use cmtraceopen_agent::scheduler::{apply_jitter, CollectionScheduler};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -37,6 +38,7 @@ fn make_orchestrator(source_dir: &TempDir, work_dir: &TempDir) -> EvidenceOrches
         EventLogsCollector::with_defaults(), // NotSupported on Linux — fine
         DsRegCmdCollector::new(),            // NotSupported on Linux — fine
         work_dir.path().to_path_buf(),
+        Redactor::noop(),                    // PR #86 added redaction; tests use no-op
     )
 }
 
