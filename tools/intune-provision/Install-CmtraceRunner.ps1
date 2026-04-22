@@ -304,16 +304,18 @@ $svcName     = "actions.runner.$repoSegment.$RunnerName"
 $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
 if (-not $svc) {
     Write-Host "Creating Windows service '$svcName' ..." -ForegroundColor Cyan
-    # sc.exe wants binPath= as a single quoted token that includes both
-    # the executable path AND any arguments. Build the full command line
-    # and hand it to cmd.exe so the quoting survives.
+    # sc.exe quirk: `key=` tokens (binPath=, start=, obj=) MUST be a
+    # separate argv token from their values, with a literal space between.
+    # PowerShell's call operator passes each array element as its own argv
+    # entry and quotes only values with whitespace, which is exactly what
+    # sc.exe wants. Using cmd.exe /c here breaks the quoting.
     $runnerExe    = Join-Path $InstallDir 'bin\Runner.Listener.exe'
     $binPathValue = "$runnerExe run"
-    $scCmd = 'sc.exe create "' + $svcName + '" binPath= "' + $binPathValue + '" start= auto obj= "NT AUTHORITY\NETWORK SERVICE"'
-    cmd.exe /c $scCmd | Write-Host
+    Write-Host "  binPath= $binPathValue" -ForegroundColor DarkGray
+    & sc.exe create $svcName 'binPath=' $binPathValue 'start=' 'auto' 'obj=' 'NT AUTHORITY\NETWORK SERVICE'
     if ($LASTEXITCODE -ne 0) { throw "sc.exe create failed with exit code $LASTEXITCODE." }
-    cmd.exe /c ('sc.exe config "' + $svcName + '" DisplayName= "GitHub Actions Runner (' + $RunnerName + ')"') | Out-Null
-    cmd.exe /c ('sc.exe description "' + $svcName + '" "cmtraceopen self-hosted GitHub Actions runner"') | Out-Null
+    & sc.exe config $svcName 'DisplayName=' "GitHub Actions Runner ($RunnerName)" | Out-Null
+    & sc.exe description $svcName 'cmtraceopen self-hosted GitHub Actions runner' | Out-Null
     $svc = Get-Service -Name $svcName -ErrorAction Stop
 } else {
     Write-Host "Service '$svcName' already exists." -ForegroundColor DarkGray
