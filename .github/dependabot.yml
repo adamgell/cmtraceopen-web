@@ -1,0 +1,87 @@
+version: 2
+updates:
+  # Cargo (workspace root)
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "adamgell"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "cargo"
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+
+  # Cargo (cmtrace-wasm self-hosting workspace)
+  - package-ecosystem: "cargo"
+    directory: "/cmtrace-wasm"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "adamgell"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "cargo"
+    groups:
+      patch-updates:
+        update-types:
+          - "patch"
+
+  # npm (root)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "adamgell"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "npm"
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+
+  # Docker (api-server base images)
+  - package-ecosystem: "docker"
+    directory: "/crates/api-server"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "adamgell"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "docker"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "adamgell"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "ci"
