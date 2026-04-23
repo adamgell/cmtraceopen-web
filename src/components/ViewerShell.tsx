@@ -15,6 +15,8 @@ import type { ParseResult } from "../lib/log-types";
 import { LocalMode, type LocalModeHandle } from "./LocalMode";
 import { ApiMode, type ApiModeHandle } from "./ApiMode";
 import { DevicesPanel } from "./DevicesPanel";
+import { DeviceLogViewer } from "./DeviceLogViewer";
+import type { DeviceSummary } from "../lib/log-types";
 import { AuthSettings } from "./AuthSettings";
 import { StatusBar } from "./StatusBar";
 import { TabStrip } from "./layout/TabStrip";
@@ -102,6 +104,12 @@ export function ViewerShell() {
   const [loaded, setLoaded] = useState<LoadedSummary | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() =>
     loadSidebarCollapsed(),
+  );
+  /** When set, DeviceLogViewer renders as a full-screen overlay on top
+   *  of the normal shell. Set by DevicesPanel's "See logs" action;
+   *  cleared by the viewer's back button or Esc. */
+  const [logViewerDevice, setLogViewerDevice] = useState<DeviceSummary | null>(
+    null,
   );
 
   const localRef = useRef<LocalModeHandle>(null);
@@ -257,7 +265,7 @@ export function ViewerShell() {
           {mode === "local" ? (
             <LocalMode ref={localRef} onLoaded={handleLoaded} />
           ) : mode === "devices" ? (
-            <DevicesPanel />
+            <DevicesPanel onSeeLogs={setLogViewerDevice} />
           ) : mode === "diff" ? (
             <DiffMode />
           ) : (
@@ -282,6 +290,12 @@ export function ViewerShell() {
         }
         badges={<span>mode: {mode}</span>}
       />
+      {logViewerDevice && (
+        <DeviceLogViewer
+          device={logViewerDevice}
+          onClose={() => setLogViewerDevice(null)}
+        />
+      )}
     </div>
   );
 }

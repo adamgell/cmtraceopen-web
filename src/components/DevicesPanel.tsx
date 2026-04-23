@@ -32,7 +32,14 @@ type FetchState<T> =
   | { status: "ok"; data: T }
   | { status: "error"; error: string };
 
-export function DevicesPanel() {
+export interface DevicesPanelProps {
+  /** Fired when the operator clicks "See logs" on a row. When omitted the
+   *  action button is hidden so the panel still works in contexts that
+   *  don't route to a full-screen log viewer. */
+  onSeeLogs?: (device: DeviceSummary) => void;
+}
+
+export function DevicesPanel({ onSeeLogs }: DevicesPanelProps = {}) {
   // All pages accumulated so far (we load page-by-page on "Load more").
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [fetchState, setFetchState] = useState<FetchState<null>>({ status: "idle" });
@@ -181,6 +188,7 @@ export function DevicesPanel() {
             devices={filtered}
             disabledIds={disabledIds}
             onDisable={handleDisableClick}
+            onSeeLogs={onSeeLogs}
           />
         )}
         {hasMore && (
@@ -296,10 +304,12 @@ function DeviceTable({
   devices,
   disabledIds,
   onDisable,
+  onSeeLogs,
 }: {
   devices: DeviceSummary[];
   disabledIds: Set<string>;
   onDisable: (d: DeviceSummary) => void;
+  onSeeLogs?: (d: DeviceSummary) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rowVirtualizer = useVirtualizer({
@@ -309,7 +319,7 @@ function DeviceTable({
     overscan: 8,
   });
 
-  const gridTemplate = "minmax(180px, 2fr) minmax(140px, 2fr) 180px 110px 110px";
+  const gridTemplate = "minmax(180px, 2fr) minmax(140px, 2fr) 180px 110px 210px";
 
   return (
     <div
@@ -394,32 +404,44 @@ function DeviceTable({
                 <StatusPill status={effectiveStatus} />
               </BodyCell>
               <BodyCell>
-                <RoleGate
-                  role={ROLE_ADMIN}
-                  fallback={
-                    <button type="button" disabled style={disabledActionBtn()}>
-                      Disable
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  {onSeeLogs && (
+                    <button
+                      type="button"
+                      onClick={() => onSeeLogs(d)}
+                      title={`Open full-screen log viewer for ${d.hostname ?? d.deviceId}`}
+                      style={seeLogsBtn()}
+                    >
+                      See logs →
                     </button>
-                  }
-                >
-                  <button
-                    type="button"
-                    onClick={() => onDisable(d)}
-                    disabled={effectiveStatus !== "active"}
-                    style={
-                      effectiveStatus !== "active"
-                        ? disabledActionBtn()
-                        : dangerBtn()
-                    }
-                    title={
-                      effectiveStatus !== "active"
-                        ? `Device is already ${effectiveStatus}`
-                        : `Disable device ${d.deviceId}`
+                  )}
+                  <RoleGate
+                    role={ROLE_ADMIN}
+                    fallback={
+                      <button type="button" disabled style={disabledActionBtn()}>
+                        Disable
+                      </button>
                     }
                   >
-                    Disable
-                  </button>
-                </RoleGate>
+                    <button
+                      type="button"
+                      onClick={() => onDisable(d)}
+                      disabled={effectiveStatus !== "active"}
+                      style={
+                        effectiveStatus !== "active"
+                          ? disabledActionBtn()
+                          : dangerBtn()
+                      }
+                      title={
+                        effectiveStatus !== "active"
+                          ? `Device is already ${effectiveStatus}`
+                          : `Disable device ${d.deviceId}`
+                      }
+                    >
+                      Disable
+                    </button>
+                  </RoleGate>
+                </div>
               </BodyCell>
             </div>
           );
@@ -740,6 +762,25 @@ function disabledActionBtn(): React.CSSProperties {
     ...secondaryBtn(),
     opacity: 0.45,
     cursor: "not-allowed",
+  };
+}
+
+/**
+ * Primary row-action: opens the full-screen device log viewer. Uses the
+ * brand ramp for a visible "go here" affordance that's clearly separate
+ * from the destructive Disable action.
+ */
+function seeLogsBtn(): React.CSSProperties {
+  return {
+    padding: "4px 10px",
+    fontSize: 12,
+    border: `1px solid ${tokens.colorBrandStroke1}`,
+    background: tokens.colorBrandBackground,
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    color: tokens.colorNeutralForegroundOnBrand,
+    fontWeight: 600,
+    letterSpacing: "0.01em",
   };
 }
 
