@@ -42,11 +42,14 @@ pub const MAX_EVIDENCE_ZIP_BYTES: u64 = 50 * 1024 * 1024;
 /// Four-state semantic (introduced after the IisW3c classifier fix showed
 /// that real-world bundles virtually never hit zero fallbacks):
 ///   - `ok`                — every file parsed cleanly, zero fallbacks.
-///   - `ok-with-fallbacks` — every file produced entries, but at least one
-///     file's parser couldn't match some lines (minor fallback noise). This
-///     is the expected steady state for real Windows logs.
-///   - `partial`           — bundle was empty OR at least one file produced
-///     zero entries (parser completely failed on a file).
+/// ///   - `ok-with-fallbacks` — every file either parsed cleanly or was empty,
+///     BUT at least one file's parser emitted fallback errors on some lines
+///     (minor noise). This is the expected steady state for real Windows
+///     logs.
+///   - `partial`           — bundle was empty, OR at least one file produced
+///     zero entries AND >0 parse errors (parser saw content and failed to
+///     match any of it — a truly broken file). Note: a legitimately-empty
+///     file (`entries=0`, `errors=0`) is benign and does NOT flip partial.
 ///   - `failed`            — the parse worker itself panicked / hit a fatal
 ///     error before writing anything.
 const STATE_OK: &str = "ok";
@@ -140,11 +143,12 @@ pub async fn parse_session(
 /// Internal result of a successful parse. See the STATE_* docstring for the
 /// full four-state rubric. Short version:
 ///   - `Ok`                — every file was clean (0 fallbacks, >0 entries).
-///   - `OkWithFallbacks`   — every file produced entries, but some parsers
-///     emitted fallback errors on un-matched lines. Steady state for real
-///     Windows logs (CCM fallback ratio ~0.05%, MSI 1-2%, etc.).
-///   - `Partial`           — bundle empty OR at least one file produced
-///     zero entries (parser shape-matched but emitted nothing).
+///   - `OkWithFallbacks`   — at least one parser emitted fallback errors on
+///     un-matched lines but no file looked "broken" (zero entries + errors).
+///     Steady state for real Windows logs (CCM fallback ratio ~0.05%, etc.).
+///   - `Partial`           — bundle empty OR at least one file had zero
+///     entries AND >0 parse errors (parser saw content, matched nothing).
+///     Legitimately-empty files (entries=0, errors=0) are benign.
 enum ParseOutcome {
     Ok,
     OkWithFallbacks,
@@ -196,15 +200,18 @@ async fn parse_evidence_zip(
 
     // Track the two error signals separately so we can distinguish "noisy
     // but usable" (fallback errors on some lines of otherwise-parsing files)
-    // from "actually broken" (a file the parser couldn't extract anything
-    // from). See ParseOutcome variants for the mapping.
+    // from "actually broken" (a file the parser TRIED to extract from and
+    // failed). Legitimately-empty files (setup_stderr.log on success runs,
+    // etc.) have entries=0 AND errors=0 and must not trigger partial — only
+    // the combination entries=0 + errors>0 means "parser saw content and
+    // couldn't match any of it." See ParseOutcome variants for the mapping.
     let mut any_file_had_fallbacks = false;
     let mut any_file_produced_nothing = false;
     for file in parsed {
         if file.parse_error_count > 0 {
             any_file_had_fallbacks = true;
         }
-        if file.entries.is_empty() {
+        if file.entries.is_empty() && file.parse_error_count > 0 {
             any_file_produced_nothing = true;
         }
 
@@ -564,8 +571,11 @@ mod tests {
 
     #[test]
     fn classify_outcome_broken_file_is_partial() {
-        // A file that produced zero entries (parser matched nothing) still
-        // trips partial regardless of fallback state.
+        // "Broken" file = the CALLER has pre-filtered to entries=0 AND
+        // errors>0. The classify_outcome function receives that as
+        // `any_file_produced_nothing = true`. Legitimately-empty files
+        // (entries=0, errors=0) are excluded upstream and never reach here
+        // as a broken signal.
         assert!(matches!(
             classify_outcome(false, true, false),
             ParseOutcome::Partial
@@ -573,6 +583,20 @@ mod tests {
         assert!(matches!(
             classify_outcome(false, true, true),
             ParseOutcome::Partial
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_empty_files_benign_when_no_broken() {
+        // If the only "anomaly" is parse_error_count > 0 on some files (no
+        // file had entries=0 + errors>0), we should land in OkWithFallbacks,
+        // NOT Partial. Empty files (entries=0, errors=0) don't set the
+        // any_file_produced_nothing flag in the caller, so this is the
+        // expected classify_outcome input for the "4 empty files + 24 noisy
+        // files" real-world session.
+        assert!(matches!(
+            classify_outcome(false, false, true),
+            ParseOutcome::OkWithFallbacks
         ));
     }
 
