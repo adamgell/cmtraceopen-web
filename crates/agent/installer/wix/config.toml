@@ -17,9 +17,12 @@ api_endpoint = "http://192.168.2.50:8080"
 # WAN links.
 request_timeout_secs = 60
 
-# Cron-like schedule for the evidence collector. Runs once a day at 03:00
-# local time by default. Format: standard 5-field cron (min hour dom mon dow).
-evidence_schedule = "0 3 * * *"
+# Cron-like schedule for the evidence collector. Runs every 15 minutes in
+# this dev deploy so we get near-real-time log flow to the api-server while
+# the pipeline is still being exercised end-to-end. Flip back to something
+# like "0 3 * * *" once cadence-driven upload cost is actually a concern.
+# Format: standard 5-field cron (min hour dom mon dow).
+evidence_schedule = "*/15 * * * *"
 
 # Maximum bundles the on-disk upload queue will hold before it starts
 # dropping the oldest. Each bundle is roughly 5-50 MB depending on log
