@@ -374,6 +374,7 @@ fn render_html(
   <section class="card">
     <h2>Companion tools</h2>
     <ul class="links">
+      <li><a href="http://{host_only}:5173/">CMTrace Open viewer</a></li>
       <li><a href="http://{host_only}:8082">Adminer (Postgres UI)</a></li>
     </ul>
   </section>

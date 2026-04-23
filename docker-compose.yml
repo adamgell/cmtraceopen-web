@@ -41,7 +41,10 @@ services:
       # issued to cmtraceopen-viewer are validated against these values.
       CMTRACE_AUTH_MODE: enabled
       CMTRACE_ENTRA_TENANT_ID: 00c171a4-0053-4cae-ab80-0bd18db2e0fc
-      CMTRACE_ENTRA_AUDIENCE: api://b2990298-7cdd-4426-b311-2df0221b6eca
+      # v2 Entra tokens put the bare application GUID in `aud`, not the
+      # api://<guid> URI form (which is v1). Since the API app is now
+      # pinned to requestedAccessTokenVersion=2, match the bare form.
+      CMTRACE_ENTRA_AUDIENCE: b2990298-7cdd-4426-b311-2df0221b6eca
       CMTRACE_ENTRA_JWKS_URI: https://login.microsoftonline.com/00c171a4-0053-4cae-ab80-0bd18db2e0fc/discovery/v2.0/keys
       CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace
     volumes:
