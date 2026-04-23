@@ -241,7 +241,12 @@ export const LocalMode = forwardRef<LocalModeHandle, LocalModeProps>(
                       appearance="subtle"
                       disabled={!!existing}
                       onClick={() => {
-                        if (!existing) workspace.pin(candidate);
+                        if (existing) return;
+                        const id = workspace.pin(candidate);
+                        // Cache the parsed entries in-memory so Diff mode
+                        // can diff the local file without re-parsing.
+                        // Dropped on page reload by design.
+                        workspace.setLocalEntries(id, state.result.entries);
                       }}
                     >
                       {existing ? "Pinned" : "Pin file"}

@@ -165,6 +165,8 @@ export interface ListEntriesOptions {
    * crates/api-server/src/routes/entries.rs).
    */
   file?: string;
+  /** Opaque keyset cursor from a previous page's `nextCursor`. */
+  cursor?: string | null;
   /** AbortSignal so the caller can cancel in-flight requests when filters change. */
   signal?: AbortSignal;
 }
@@ -202,6 +204,7 @@ export function listEntries(
   if (opts.beforeMs != null) params.set("before_ts", String(opts.beforeMs));
   if (opts.q && opts.q.trim() !== "") params.set("q", opts.q);
   if (opts.file && opts.file !== "") params.set("file", opts.file);
+  if (opts.cursor) params.set("cursor", opts.cursor);
   return getJson<Paginated<LogEntryDto>>(
     `/v1/sessions/${encodeURIComponent(sessionId)}/entries?${params.toString()}`,
     opts.signal,

@@ -392,8 +392,40 @@ type DiffLoadState =
   | { status: "error"; message: string }
   | { status: "ready"; diff: LoadedDiff };
 
+const DIFF_ENTRY_CAP = 5000;
+const DIFF_PAGE_SIZE = 500;
+
+/**
+ * Fetch up to `cap` entries for an api-file pin, paging through the
+ * server's cursor until exhausted or the cap is hit. Returns both the
+ * collected entries and whether the cap was reached (truncated flag).
+ */
+async function fetchAllApiEntries(
+  sessionId: string,
+  fileId: string,
+  cap = DIFF_ENTRY_CAP,
+): Promise<{ entries: LogEntry[]; truncated: boolean }> {
+  const out: LogEntry[] = [];
+  let cursor: string | null | undefined;
+  while (out.length < cap) {
+    const remaining = cap - out.length;
+    const limit = Math.min(DIFF_PAGE_SIZE, remaining);
+    const page = await apiListEntries(sessionId, {
+      file: fileId,
+      limit,
+      cursor: cursor ?? undefined,
+    });
+    // Trust the api-client's DTO mapping: the shape matches LogEntry
+    // shape closely enough that the viewer renders it verbatim.
+    out.push(...(page.items as unknown as LogEntry[]));
+    if (!page.nextCursor || page.items.length === 0) break;
+    cursor = page.nextCursor;
+  }
+  return { entries: out, truncated: out.length >= cap };
+}
+
 function DiffMode() {
-  const { items } = useWorkspace();
+  const { items, getLocalEntries } = useWorkspace();
   const [sourceAId, setSourceAId] = useState<string | null>(null);
   const [sourceBId, setSourceBId] = useState<string | null>(null);
   const [load, setLoad] = useState<DiffLoadState>({ status: "idle" });
@@ -414,30 +446,37 @@ function DiffMode() {
   const sameSource =
     bothPicked && sourceA.id === sourceB.id;
 
-  /** Fetch entries for one side of the diff.
+  /** Fetch entries + truncation hint for one side of the diff.
    *
-   * - api-file: call apiListEntries(sessionId, { file: fileId }).
-   * - local-file: not implemented yet. Local entries are only held by
-   *   LocalMode while the file is loaded; there's no cache keyed by pin
-   *   id. Surfaced as a clear error so the operator knows why.
+   * - api-file: paginate apiListEntries up to DIFF_ENTRY_CAP.
+   * - local-file: read from the in-memory cache seeded by LocalMode's
+   *   Pin-file button. The cache is dropped on page reload, so we
+   *   surface a clear error when the operator re-opens the viewer and
+   *   tries to diff a pin they created in a previous session.
    */
   const loadSourceEntries = useCallback(
-    async (pin: PinnedItem): Promise<LogEntry[]> => {
+    async (pin: PinnedItem): Promise<{ entries: LogEntry[]; truncated: boolean }> => {
       if (pin.kind === "api-file") {
-        const page = await apiListEntries(pin.sessionId, {
-          file: pin.fileId,
-          limit: 500,
-        });
-        return page.items as unknown as LogEntry[];
+        return fetchAllApiEntries(pin.sessionId, pin.fileId);
       }
       if (pin.kind === "local-file") {
-        throw new Error(
-          `Local file "${pin.fileName}" can't be diffed yet — local entries aren't cached across mode switches. Pin two API files to diff for now.`,
-        );
+        const cached = getLocalEntries(pin.id);
+        if (!cached || cached.length === 0) {
+          throw new Error(
+            `Local file "${pin.fileName}" isn't in the in-memory cache (probably because the page was reloaded after pinning). Re-open it in Local mode and click Pin file again to refill the cache.`,
+          );
+        }
+        // Cap local sources the same way as API ones so a >5000-entry
+        // file doesn't blow up the classifier.
+        const capped = cached.slice(0, DIFF_ENTRY_CAP);
+        return {
+          entries: capped as LogEntry[],
+          truncated: cached.length > DIFF_ENTRY_CAP,
+        };
       }
       throw new Error(`Unsupported pinned kind: ${(pin as PinnedItem).kind}`);
     },
-    [],
+    [getLocalEntries],
   );
 
   const handleLoadDiff = useCallback(async () => {
@@ -445,7 +484,7 @@ function DiffMode() {
     setLoad({ status: "loading" });
     setSelectedEntryId(null);
     try {
-      const [rawA, rawB] = await Promise.all([
+      const [loadedA, loadedB] = await Promise.all([
         loadSourceEntries(sourceA),
         loadSourceEntries(sourceB),
       ]);
@@ -453,9 +492,12 @@ function DiffMode() {
       // Renumber ids so A and B live in non-overlapping id spaces; the
       // classifier's Map<entry.id, classification> collapses otherwise
       // when both sources happen to have the same auto-increment ids.
-      const entriesA: LogEntry[] = rawA.map((e, i) => ({ ...e, id: i + 1 }));
+      const entriesA: LogEntry[] = loadedA.entries.map((e, i) => ({
+        ...e,
+        id: i + 1,
+      }));
       const idOffset = entriesA.length;
-      const entriesB: LogEntry[] = rawB.map((e, i) => ({
+      const entriesB: LogEntry[] = loadedB.entries.map((e, i) => ({
         ...e,
         id: idOffset + i + 1,
       }));
@@ -466,14 +508,14 @@ function DiffMode() {
       );
 
       const warnings: string[] = [];
-      if (rawA.length === 500) {
+      if (loadedA.truncated) {
         warnings.push(
-          `Source A truncated to 500 entries; older lines are not included.`,
+          `Source A truncated at ${DIFF_ENTRY_CAP.toLocaleString()} entries; older lines are not included.`,
         );
       }
-      if (rawB.length === 500) {
+      if (loadedB.truncated) {
         warnings.push(
-          `Source B truncated to 500 entries; older lines are not included.`,
+          `Source B truncated at ${DIFF_ENTRY_CAP.toLocaleString()} entries; older lines are not included.`,
         );
       }
 

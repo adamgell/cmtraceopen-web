@@ -21,9 +21,11 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ReactElement, ReactNode } from "react";
+import type { LogEntry } from "./log-types";
 
 const STORAGE_KEY = "cmtraceopen-web.workspace";
 
@@ -99,6 +101,15 @@ export interface WorkspaceApi {
    *  will no longer match anything, but that's fine -- consumers already
    *  have to tolerate a stale id during removal races). */
   clear: () => void;
+  /** Attach parsed entries to a local-file pin so Diff mode can reach
+   *  them without re-parsing. Held in memory only (not persisted) because
+   *  entries can be huge; a page reload drops the cache and the operator
+   *  re-pins the file to refill it. No-op for non-local-file kinds. */
+  setLocalEntries: (id: PinnedItemId, entries: readonly LogEntry[]) => void;
+  /** Read the in-memory entries attached to a local-file pin. Returns
+   *  `null` when the pin doesn't exist, isn't a local-file, or its
+   *  entries haven't been cached this session. */
+  getLocalEntries: (id: PinnedItemId) => readonly LogEntry[] | null;
 }
 
 /** Combined state + API shape returned by `useWorkspace`. */
@@ -317,9 +328,31 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): ReactE
     return assignedId;
   }, []);
 
+  // Ephemeral, in-memory only: entries for local-file pins so Diff
+  // mode can reach them. Kept in a ref so updates don't trigger a
+  // re-render of every workspace consumer. Dropped on page reload by
+  // design -- the operator re-pins to refill.
+  const localEntriesCache = useRef<Map<PinnedItemId, readonly LogEntry[]>>(
+    new Map(),
+  );
+
   const unpin = useCallback((id: PinnedItemId) => {
+    localEntriesCache.current.delete(id);
     setState((prev) => removePin(prev, id));
   }, []);
+
+  const setLocalEntries = useCallback(
+    (id: PinnedItemId, entries: readonly LogEntry[]) => {
+      localEntriesCache.current.set(id, entries);
+    },
+    [],
+  );
+
+  const getLocalEntries = useCallback(
+    (id: PinnedItemId): readonly LogEntry[] | null =>
+      localEntriesCache.current.get(id) ?? null,
+    [],
+  );
 
   const setActive = useCallback((id: PinnedItemId | null) => {
     setState((prev) => {
@@ -338,6 +371,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): ReactE
   );
 
   const clear = useCallback(() => {
+    localEntriesCache.current.clear();
     setState((prev) => (prev.items.length === 0 ? prev : { ...prev, items: [] }));
   }, []);
 
@@ -350,8 +384,20 @@ export function WorkspaceProvider({ children }: { children: ReactNode }): ReactE
       setActive,
       findExisting,
       clear,
+      setLocalEntries,
+      getLocalEntries,
     }),
-    [state.items, state.activeId, pin, unpin, setActive, findExisting, clear],
+    [
+      state.items,
+      state.activeId,
+      pin,
+      unpin,
+      setActive,
+      findExisting,
+      clear,
+      setLocalEntries,
+      getLocalEntries,
+    ],
   );
 
   return (
