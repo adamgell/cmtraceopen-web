@@ -522,6 +522,113 @@ jobs:
           retention-days: 30
 
       # -----------------------------------------------------------------------
+      # Extract the MSI's auto-generated ProductCode for the Intune Win32 LOB
+      # detection rule. WiX's Id="*" pattern mints a fresh GUID per build, so
+      # the deploy step needs THIS build's value -- bundling it alongside the
+      # intunewin means the operator doesn't have to read the MSI by hand.
+      # -----------------------------------------------------------------------
+      - name: Extract MSI ProductCode
+        id: product-code
+        shell: pwsh
+        run: |
+          $msi = '${{ steps.build-msi.outputs.msi-path }}'
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($msi, 0))
+          $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("SELECT Value FROM Property WHERE Property = 'ProductCode'"))
+          $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+          $record = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
+          $code = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, 1)
+          $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
+          if (-not $code) { Write-Error "Couldn't read ProductCode from $msi"; exit 1 }
+          Write-Host "ProductCode: $code"
+          "product-code=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          # Write to a small sidecar that ships alongside the intunewin so the
+          # deploy script can read it without re-opening the MSI.
+          $ver = '${{ steps.version.outputs.version }}'
+          $outDir = 'out\intune'
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          Set-Content -Path (Join-Path $outDir 'ProductCode.txt') -Value $code -Encoding utf8
+          Write-Host "Wrote $outDir\ProductCode.txt"
+
+      # -----------------------------------------------------------------------
+      # Pack the signed MSI into a .intunewin payload using the existing
+      # tools/intune-deploy/Pack-CmtraceAgent.ps1. Produces
+      #   out\intune\CMTraceOpenAgent-<ver>.intunewin
+      # alongside the ProductCode.txt, so operators download a single folder
+      # and run Deploy-CmtraceAgent.ps1 against it.
+      # -----------------------------------------------------------------------
+      - name: Pack .intunewin
+        id: pack-intunewin
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.version.outputs.version }}'
+          $msi = '${{ steps.build-msi.outputs.msi-path }}'
+          $staging = 'out\intune-staging'
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          # Intune's content-prep tool wants the MSI at the root of the source
+          # folder, named CMTraceOpenAgent.msi (matches Deploy script defaults).
+          Copy-Item -Path $msi -Destination (Join-Path $staging 'CMTraceOpenAgent.msi') -Force
+          $outDir = 'out\intune'
+          New-Item -ItemType Directory -Path $outDir -Force | Out-Null
+          & .\tools\intune-deploy\Pack-CmtraceAgent.ps1 `
+              -SourceFolder $staging `
+              -OutputFolder $outDir `
+              -SetupFile 'CMTraceOpenAgent.msi' `
+              -Force
+          # IntuneWinAppUtil always names the output after the setup file stem.
+          $produced = Join-Path $outDir 'CMTraceOpenAgent.intunewin'
+          if (-not (Test-Path $produced)) {
+            Write-Error "Expected intunewin not found at $produced"
+            exit 1
+          }
+          $final = Join-Path $outDir ("CMTraceOpenAgent-$ver.intunewin")
+          if (Test-Path $final) { Remove-Item $final -Force }
+          Rename-Item -Path $produced -NewName ("CMTraceOpenAgent-$ver.intunewin")
+          Write-Host "intunewin: $final"
+          "intunewin-path=$final" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "intunewin-name=CMTraceOpenAgent-$ver-intune" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      # -----------------------------------------------------------------------
+      # Upload a combined "intune" artifact (intunewin + ProductCode.txt +
+      # README). The deploy step on the operator's Mac just needs this folder.
+      # -----------------------------------------------------------------------
+      - name: Write intune README
+        shell: pwsh
+        run: |
+          $ver = '${{ steps.version.outputs.version }}'
+          $pc  = '${{ steps.product-code.outputs.product-code }}'
+          $readme = @"
+          cmtraceopen-agent Intune deployment bundle
+          ==========================================
+
+          Build version : $ver
+          ProductCode   : $pc
+          Run id        : ${{ github.run_id }}
+          Commit        : ${{ github.sha }}
+
+          Files in this folder:
+            CMTraceOpenAgent-$ver.intunewin  - Win32 LOB payload for Intune
+            ProductCode.txt                  - MSI ProductCode (detection rule)
+            README.txt                       - this file
+
+          Deploy from any machine with pwsh + Microsoft.Graph modules:
+
+              pwsh ./tools/intune-deploy/Deploy-CmtraceAgent.ps1 ``
+                -DeviceGroupName 'cmtraceopen-testdevices' ``
+                -IntuneWinPath   './CMTraceOpenAgent-$ver.intunewin' ``
+                -MsiProductCode  '$pc'
+          "@
+          Set-Content -Path 'out\intune\README.txt' -Value $readme -Encoding utf8
+
+      - name: Upload intune bundle artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.pack-intunewin.outputs.intunewin-name }}
+          path: out\intune\
+          if-no-files-found: error
+          retention-days: 30
+
+      # -----------------------------------------------------------------------
       # Attach MSI to GitHub Release
       # Only runs on `agent-v*` tag pushes. softprops/action-gh-release creates
       # the Release if it doesn't exist (matching the tag name) and uploads
