@@ -184,6 +184,20 @@ if (-not ($apiApp.IdentifierUris -contains $desiredIdentifierUri)) {
     $apiApp = Get-MgApplication -ApplicationId $apiObjectId
 }
 
+# Ensure the API app issues v2.0 tokens. By default new apps get null
+# here, which makes Entra issue v1 tokens (iss = sts.windows.net/<tid>/).
+# The api-server's expected_issuer() is the v2 form
+# (login.microsoftonline.com/<tid>/v2.0) so v1 tokens fail with
+# "Required issuer mismatch". Setting requestedAccessTokenVersion=2
+# flips the issuer to match.
+$currentVersion = $null
+if ($apiApp.Api) { $currentVersion = $apiApp.Api.RequestedAccessTokenVersion }
+if ($currentVersion -ne 2) {
+    Write-Host "Setting API app requestedAccessTokenVersion=2 (was $currentVersion)" -ForegroundColor Green
+    Update-MgApplication -ApplicationId $apiObjectId -Api @{ requestedAccessTokenVersion = 2 }
+    $apiApp = Get-MgApplication -ApplicationId $apiObjectId
+}
+
 # --- Delegated scope: CmtraceOpen.Query ---------------------------------
 $scopeValue = 'CmtraceOpen.Query'
 $existingScopes = @()
