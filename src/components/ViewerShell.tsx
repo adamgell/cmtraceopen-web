@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Dropdown,
@@ -20,6 +20,11 @@ import { StatusBar } from "./StatusBar";
 import { TabStrip } from "./layout/TabStrip";
 import { Toolbar } from "./layout/Toolbar";
 import { FileSidebar } from "./layout/FileSidebar";
+import { DiffView, type DiffViewState } from "./log-view/DiffView";
+import type { DiffDisplayMode } from "./log-view/DiffHeader";
+import type { LogEntry } from "../lib/log-types";
+import { apiListEntries } from "../lib/api-client";
+import { classifyEntries } from "../lib/diff-entries";
 import { useTheme } from "../lib/theme-context";
 import {
   useWorkspace,
@@ -376,11 +381,24 @@ function TopBar({
  * is picker-only — the "Load diff" button shows a stub explaining the
  * wiring will follow once that loader lands.
  */
+interface LoadedDiff {
+  state: DiffViewState;
+  warnings: string[];
+}
+
+type DiffLoadState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; diff: LoadedDiff };
+
 function DiffMode() {
   const { items } = useWorkspace();
   const [sourceAId, setSourceAId] = useState<string | null>(null);
   const [sourceBId, setSourceBId] = useState<string | null>(null);
-  const [stub, setStub] = useState<string | null>(null);
+  const [load, setLoad] = useState<DiffLoadState>({ status: "idle" });
+  const [selectedEntryId, setSelectedEntryId] = useState<number | null>(null);
+  const [displayMode, setDisplayMode] = useState<DiffDisplayMode>("side-by-side");
 
   const diffable = useMemo(
     () =>
@@ -395,6 +413,115 @@ function DiffMode() {
   const bothPicked = sourceA !== null && sourceB !== null;
   const sameSource =
     bothPicked && sourceA.id === sourceB.id;
+
+  /** Fetch entries for one side of the diff.
+   *
+   * - api-file: call apiListEntries(sessionId, { file: fileId }).
+   * - local-file: not implemented yet. Local entries are only held by
+   *   LocalMode while the file is loaded; there's no cache keyed by pin
+   *   id. Surfaced as a clear error so the operator knows why.
+   */
+  const loadSourceEntries = useCallback(
+    async (pin: PinnedItem): Promise<LogEntry[]> => {
+      if (pin.kind === "api-file") {
+        const page = await apiListEntries(pin.sessionId, {
+          file: pin.fileId,
+          limit: 500,
+        });
+        return page.items as unknown as LogEntry[];
+      }
+      if (pin.kind === "local-file") {
+        throw new Error(
+          `Local file "${pin.fileName}" can't be diffed yet — local entries aren't cached across mode switches. Pin two API files to diff for now.`,
+        );
+      }
+      throw new Error(`Unsupported pinned kind: ${(pin as PinnedItem).kind}`);
+    },
+    [],
+  );
+
+  const handleLoadDiff = useCallback(async () => {
+    if (!sourceA || !sourceB || sameSource) return;
+    setLoad({ status: "loading" });
+    setSelectedEntryId(null);
+    try {
+      const [rawA, rawB] = await Promise.all([
+        loadSourceEntries(sourceA),
+        loadSourceEntries(sourceB),
+      ]);
+
+      // Renumber ids so A and B live in non-overlapping id spaces; the
+      // classifier's Map<entry.id, classification> collapses otherwise
+      // when both sources happen to have the same auto-increment ids.
+      const entriesA: LogEntry[] = rawA.map((e, i) => ({ ...e, id: i + 1 }));
+      const idOffset = entriesA.length;
+      const entriesB: LogEntry[] = rawB.map((e, i) => ({
+        ...e,
+        id: idOffset + i + 1,
+      }));
+
+      const { entryClassification, stats } = classifyEntries(
+        entriesA,
+        entriesB,
+      );
+
+      const warnings: string[] = [];
+      if (rawA.length === 500) {
+        warnings.push(
+          `Source A truncated to 500 entries; older lines are not included.`,
+        );
+      }
+      if (rawB.length === 500) {
+        warnings.push(
+          `Source B truncated to 500 entries; older lines are not included.`,
+        );
+      }
+
+      setLoad({
+        status: "ready",
+        diff: {
+          state: {
+            sourceA: { filePath: sourceA.label },
+            sourceB: { filePath: sourceB.label },
+            entriesA,
+            entriesB,
+            entryClassification,
+            stats,
+            displayMode,
+          },
+          warnings,
+        },
+      });
+    } catch (e) {
+      setLoad({
+        status: "error",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }, [sourceA, sourceB, sameSource, displayMode, loadSourceEntries]);
+
+  // Keep DiffViewState in sync with local displayMode toggle changes
+  // without re-fetching (the classifier result is stable; only the
+  // layout flag changes).
+  useEffect(() => {
+    setLoad((prev) =>
+      prev.status === "ready"
+        ? {
+            status: "ready",
+            diff: {
+              ...prev.diff,
+              state: { ...prev.diff.state, displayMode },
+            },
+          }
+        : prev,
+    );
+  }, [displayMode]);
+
+  // Drop any previous result when the picker changes.
+  useEffect(() => {
+    setLoad({ status: "idle" });
+    setSelectedEntryId(null);
+  }, [sourceAId, sourceBId]);
 
   const renderPicker = (
     label: string,
@@ -428,7 +555,6 @@ function DiffMode() {
         selectedOptions={value ? [value] : []}
         onOptionSelect={(_e, data) => {
           onChange(data.optionValue ?? null);
-          setStub(null);
         }}
       >
         {diffable.map((it) => (
@@ -536,31 +662,66 @@ function DiffMode() {
                 <Button
                   appearance="primary"
                   size="small"
-                  onClick={() =>
-                    setStub(
-                      `Diff between ${sourceA!.label} and ${sourceB!.label} will render here once the two-source entry loader lands.`,
-                    )
-                  }
+                  disabled={load.status === "loading"}
+                  onClick={handleLoadDiff}
                 >
-                  Load diff
+                  {load.status === "loading" ? "Loading…" : "Load diff"}
                 </Button>
               </div>
             </>
           )}
 
-          {stub && (
+          {load.status === "error" && (
             <div
               style={{
                 fontSize: tokens.fontSizeBase300,
-                color: tokens.colorNeutralForeground2,
+                color: tokens.colorPaletteRedForeground1,
                 padding: 12,
-                background: tokens.colorNeutralBackground1,
-                border: `1px solid ${tokens.colorNeutralStroke1}`,
+                background: tokens.colorPaletteRedBackground1,
+                border: `1px solid ${tokens.colorPaletteRedBorder1}`,
                 borderRadius: tokens.borderRadiusMedium,
               }}
             >
-              {stub}
+              {load.message}
             </div>
+          )}
+
+          {load.status === "ready" && (
+            <>
+              {load.diff.warnings.length > 0 && (
+                <div
+                  style={{
+                    fontSize: tokens.fontSizeBase200,
+                    color: tokens.colorPaletteDarkOrangeForeground1,
+                    padding: 8,
+                    background: tokens.colorPaletteYellowBackground2,
+                    border: `1px solid ${tokens.colorPaletteYellowBorderActive}`,
+                    borderRadius: tokens.borderRadiusMedium,
+                  }}
+                >
+                  {load.diff.warnings.join(" · ")}
+                </div>
+              )}
+              <div
+                style={{
+                  flex: 1,
+                  minHeight: 400,
+                  display: "flex",
+                  flexDirection: "column",
+                }}
+              >
+                <DiffView
+                  diffState={load.diff.state}
+                  selectedId={selectedEntryId}
+                  onSelect={setSelectedEntryId}
+                  onChangeDisplayMode={setDisplayMode}
+                  onClose={() => {
+                    setLoad({ status: "idle" });
+                    setSelectedEntryId(null);
+                  }}
+                />
+              </div>
+            </>
           )}
         </>
       )}
