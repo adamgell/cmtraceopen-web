@@ -76,7 +76,18 @@ $ToolSha256 = $null  # e.g. 'A1B2C3...' — leave $null to skip the check (with 
 
 function Resolve-AbsolutePath {
     param([string]$Path)
-    return [System.IO.Path]::GetFullPath((Join-Path -Path (Get-Location) -ChildPath $Path))
+    # [IO.Path]::GetFullPath handles both absolute and relative paths:
+    # - absolute input (`C:\...\foo.exe`) -> returned unchanged after
+    #   canonicalization.
+    # - relative input (`.bin\foo.exe`)   -> resolved against the CWD.
+    # The old `Join-Path (Get-Location) $Path` doubled absolute paths on
+    # PS 7 (`C:\cwd\C:\other\...`), which broke the CI Pack step.
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine((Get-Location).Path, $Path)
+    )
 }
 
 function Get-IntuneWinAppUtil {
