@@ -441,7 +441,9 @@ jobs:
 
           & $script -ReleaseBinary $relBin -Version $ver
 
-          $msi = "out\CMTraceOpenAgent-$ver.msi"
+          # build.ps1 writes the MSI into crates\agent\installer\wix\out\
+          # (its own ScriptDir/out), not relative to the workspace root.
+          $msi = "crates\agent\installer\wix\out\CMTraceOpenAgent-$ver.msi"
           if (-not (Test-Path $msi)) {
             Write-Error "Expected MSI not found: $msi. Check build.ps1 output above."
             exit 1
