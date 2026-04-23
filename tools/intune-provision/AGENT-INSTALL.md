@@ -182,12 +182,23 @@ Get-Content (Get-ChildItem C:\ProgramData\CMTraceOpen\Agent\logs\ | Sort-Object 
 Test-NetConnection <mac-ip> -Port 8080
 ```
 
-If the agent logs show `401 Unauthorized` on POST, the api-server is
-enforcing Entra JWT auth — on HTTP ingest the agent falls back to
-`X-Device-Id`, which requires the api-server to be in `CMTRACE_AUTH_MODE=disabled`
-OR on a separate ingest path that skips operator auth. (The current
-docker-compose has `CMTRACE_AUTH_MODE=enabled` gated by the viewer's JWT;
-the ingest route is a different auth surface — check `crates/api-server/src/auth/device_identity.rs`.)
+If the agent logs show `401 Unauthorized` on POST, the response body
+will say `"missing device identity: present a client certificate
+(mTLS) or X-Device-Id header"`. The agent already sets
+`x-device-id` on every upload (`crates/agent/src/uploader.rs:229`), so
+a 401 here usually means either:
+- the agent's `device_id` config is empty AND the hostname resolver
+  returned something unexpected — check `resolved_device_id` output
+  in the agent logs;
+- a proxy / load balancer between agent and api-server is stripping
+  the header.
+
+Note that `CMTRACE_AUTH_MODE=enabled` on the api-server only gates
+operator/query routes (devices, sessions, entries) via the
+`OperatorPrincipal` Entra JWT extractor. The ingest router uses a
+separate `DeviceIdentity` extractor (mTLS cert SAN URI, reverse-proxy
+cert header, or `X-Device-Id`) and never calls `validate_bearer`, so
+agent uploads keep working in any AuthMode.
 
 ---
 
