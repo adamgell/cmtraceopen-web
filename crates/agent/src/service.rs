@@ -13,11 +13,13 @@
 #![allow(unsafe_code)]
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{error, info, warn};
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 use windows_service::define_windows_service;
 use windows_service::service::{
@@ -60,10 +62,18 @@ fn service_main(args: Vec<OsString>) {
 /// initialise components, report Running, run tasks, report Stopped.
 fn run_service(_args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     // Initialise tracing before anything else so early errors are captured.
-    let config = AgentConfig::from_env_or_default();
-    init_service_tracing(&config.log_level);
+    // The guard has to outlive this function for the non-blocking appender
+    // to flush on drop — bind it to a _guard local that the compiler keeps
+    // alive for the whole run_service scope.
+    let config = load_service_config();
+    let _log_guard = init_service_tracing(&config.log_level);
 
-    info!(service = SERVICE_NAME, "service_main entered");
+    info!(
+        service = SERVICE_NAME,
+        api_endpoint = %config.api_endpoint,
+        schedule = %config.evidence_schedule,
+        "service_main entered"
+    );
 
     // Stop-signal channel shared between the control handler (sender) and the
     // async task loop (receiver).
@@ -163,24 +173,118 @@ fn run_service(_args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn init_service_tracing(log_level: &str) {
+/// `%ProgramData%\CMTraceOpen\Agent` — ships-with-the-MSI layout used by
+/// both the installer's `config.toml` and the file log appender below.
+fn agent_program_data_dir() -> PathBuf {
+    let base = std::env::var("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("C:\\ProgramData"));
+    base.join("CMTraceOpen").join("Agent")
+}
+
+/// Load the config the service actually runs with. Order of precedence:
+///   1. TOML file at `%ProgramData%\CMTraceOpen\Agent\config.toml` (shipped
+///      by the MSI; operator-editable).
+///   2. CMTRACE_* env-var overlay on top of whatever 1 produced.
+///   3. Hardcoded defaults (never the production path — api.corp.example.com
+///      only hits here on a bare CLI test run with no file + no env).
+///
+/// Historical note: the service used to call `from_env_or_default()` directly
+/// which silently ignored the shipped TOML and hit the example.com default.
+/// Every bundle enqueued under that bug failed with a DNS-ish network error
+/// (see queue sidecars with `last_error: ... api.corp.example.com`).
+fn load_service_config() -> AgentConfig {
+    let cfg_path = agent_program_data_dir().join("config.toml");
+    let base = match AgentConfig::from_file(&cfg_path) {
+        Ok(c) => {
+            // `tracing` isn't initialised yet, so emit this to stderr — it
+            // survives iff the service was launched from a console (CLI
+            // diag mode). Under SCM stderr is discarded; the follow-up
+            // `info!` inside run_service captures the same api_endpoint
+            // once the file appender is up.
+            eprintln!("config: loaded {}", cfg_path.display());
+            c
+        }
+        Err(e) => {
+            eprintln!(
+                "config: could not load {} ({e}); falling back to env/default. \
+                 This is almost certainly a packaging bug — expected the MSI \
+                 to have dropped a config.toml at that path.",
+                cfg_path.display()
+            );
+            AgentConfig::from_env_or_default()
+        }
+    };
+    apply_env_overrides(base)
+}
+
+/// Layer env-var overrides on an already-loaded config. Mirrors the env
+/// knobs in `AgentConfig::from_env_or_default` so operators can still
+/// break-glass with `CMTRACE_API_ENDPOINT=...` without editing the TOML.
+fn apply_env_overrides(mut cfg: AgentConfig) -> AgentConfig {
+    if let Ok(v) = std::env::var("CMTRACE_API_ENDPOINT") {
+        cfg.api_endpoint = v;
+    }
+    if let Ok(v) = std::env::var("CMTRACE_REQUEST_TIMEOUT_SECS") {
+        if let Ok(n) = v.parse::<u64>() {
+            cfg.request_timeout_secs = n;
+        }
+    }
+    if let Ok(v) = std::env::var("CMTRACE_LOG_LEVEL") {
+        cfg.log_level = v;
+    }
+    cfg
+}
+
+/// Install the tracing subscriber. Writes JSON lines to a daily-rolling
+/// file in `%ProgramData%\CMTraceOpen\Agent\logs\agent.log[.YYYY-MM-DD]`.
+///
+/// Why a file sink: the Windows SCM discards stdout/stderr from service
+/// processes. The previous implementation wrote to stderr assuming SCM
+/// captured it, which left the agent silent in production — no scheduler
+/// ticks, no upload attempts, no errors. The only diagnostic signal was
+/// each bundle's per-queue sidecar JSON (state=failed, last_error=...),
+/// which required SSH-like access to read.
+///
+/// Returns a `WorkerGuard` the caller must keep alive for the whole
+/// service lifetime so the non-blocking writer flushes on shutdown.
+fn init_service_tracing(log_level: &str) -> Option<WorkerGuard> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(format!("cmtraceopen_agent={log_level},warn")));
 
-    // SCM captures stderr, so write JSON lines there. Use `try_init` so a
-    // pathological MSI repair / SCM restart-on-failure that re-enters
-    // `service_main` in the same process produces a `warn!` rather than a
-    // panic on the duplicate global-subscriber install.
-    if let Err(e) = tracing_subscriber::registry()
-        .with(fmt::layer().json().with_current_span(false))
-        .with(filter)
-        .try_init()
-    {
-        // Subscriber already installed — log via the existing one and
-        // continue. (`try_init` returns the SetGlobalDefaultError; the
-        // existing subscriber is still active and will pick up the warn.)
+    let log_dir = agent_program_data_dir().join("logs");
+    // Best-effort: directory creation failures degrade to stderr-only (still
+    // useful from a CLI run) rather than panicking the service.
+    let dir_ok = std::fs::create_dir_all(&log_dir).is_ok();
+
+    let (file_writer, guard) = if dir_ok {
+        let appender = tracing_appender::rolling::daily(&log_dir, "agent.log");
+        let (nb, g) = tracing_appender::non_blocking(appender);
+        (Some(nb), Some(g))
+    } else {
+        (None, None)
+    };
+
+    let registry = tracing_subscriber::registry().with(filter);
+
+    let init_result = if let Some(writer) = file_writer {
+        registry
+            .with(fmt::layer().json().with_current_span(false).with_writer(writer))
+            .try_init()
+    } else {
+        registry
+            .with(fmt::layer().json().with_current_span(false))
+            .try_init()
+    };
+
+    if let Err(e) = init_result {
+        // Re-entered `service_main` in the same process (MSI repair, SCM
+        // restart-on-failure). The existing subscriber is still live; emit
+        // a warn through it and carry on.
         warn!(error = %e, "tracing subscriber already initialised; reusing existing");
     }
+
+    guard
 }
 
 // ---------------------------------------------------------------------------

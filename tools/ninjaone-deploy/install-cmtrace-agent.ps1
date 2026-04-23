@@ -66,7 +66,7 @@ param(
     # Pinned to the 0.1.2 release asset hash computed on the build runner.
     # Re-pin whenever $TargetVersion changes — see the README for the
     # post-release workflow.
-    [string]$ExpectedSha256 = '',
+    [string]$ExpectedSha256 = '12294334c5850ece75cc1ef2a8be871d88d54fb9f0ba4a2525ef33c5187243f8',
 
     [switch]$Reinstall
 )
