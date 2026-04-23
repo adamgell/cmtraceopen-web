@@ -172,9 +172,19 @@ $wixArgs = @(
     '-ext', 'WixToolset.Util.wixext'
 ) + $WxsFiles
 
-& wix @wixArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "wix build failed with exit code $LASTEXITCODE."
+# wix resolves File/@Source paths relative to the current working directory,
+# not relative to the .wxs file. The .wxs sources use paths like 'config.toml'
+# and '..\..\..\..\LICENSE' that only resolve correctly when CWD is the wix
+# dir. Push-Location so `wix build` finds them, then restore for the caller.
+Push-Location $ScriptDir
+try {
+    & wix @wixArgs
+    $wixExit = $LASTEXITCODE
+} finally {
+    Pop-Location
+}
+if ($wixExit -ne 0) {
+    Write-Error "wix build failed with exit code $wixExit."
 }
 
 Write-Host "MSI built successfully: $OutFile"
