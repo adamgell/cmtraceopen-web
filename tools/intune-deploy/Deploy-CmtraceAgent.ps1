@@ -335,11 +335,177 @@ function Invoke-IntuneWinUpload {
         return [pscustomobject]@{ ContentVersionId = '(dry-run)'; FileId = '(dry-run)' }
     }
 
-    # NOTE: Full implementation pending. The Graph SDK does not yet wrap the
-    # contentVersions / files / commit endpoints, so this is a thin Invoke-MgGraphRequest
-    # + Invoke-RestMethod flow. Tracked alongside the WiX MSI work; this scaffold gives
-    # the orchestration shape so reviewers can see the contract.
-    throw "Live upload path not yet implemented. Re-run with -DryRun until the WiX MSI + upload helper land."
+    # --- Step 0: crack open the .intunewin -------------------------------
+    # The .intunewin is a zip with:
+    #   IntuneWinPackage/Contents/IntunePackage.intunewin  (encrypted bytes)
+    #   IntuneWinPackage/Metadata/Detection.xml            (encryption info)
+    # We extract to a temp dir, parse Detection.xml for the encryption
+    # sidecar, and upload IntunePackage.intunewin as the content blob.
+    $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("cmtrace-intune-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($IntuneWinPath, $workDir)
+
+        $detectionXmlPath = Join-Path $workDir 'IntuneWinPackage\Metadata\Detection.xml'
+        $contentPath      = Join-Path $workDir 'IntuneWinPackage\Contents\IntunePackage.intunewin'
+        if (-not (Test-Path -LiteralPath $detectionXmlPath)) {
+            throw "Detection.xml not found inside .intunewin at expected path."
+        }
+        if (-not (Test-Path -LiteralPath $contentPath)) {
+            throw "IntunePackage.intunewin not found inside .intunewin at expected path."
+        }
+
+        [xml]$detection = Get-Content -LiteralPath $detectionXmlPath -Raw
+        $appInfo = $detection.ApplicationInfo
+        $enc = $appInfo.EncryptionInfo
+        $encryptedSize   = [int64](Get-Item -LiteralPath $contentPath).Length
+        $unencryptedSize = [int64]$appInfo.UnencryptedContentSize
+
+        Write-Host "  detection sidecar parsed:" -ForegroundColor Gray
+        Write-Host "    name              : $($appInfo.Name)" -ForegroundColor Gray
+        Write-Host "    unencrypted size  : $unencryptedSize" -ForegroundColor Gray
+        Write-Host "    encrypted size    : $encryptedSize" -ForegroundColor Gray
+
+        $graphBase = "https://graph.microsoft.com/beta"
+        $lobBase   = "$graphBase/deviceAppManagement/mobileApps/$AppId/microsoft.graph.win32LobApp"
+
+        # --- Step 1: create contentVersion -------------------------------
+        Write-Host "  step 1/6: create contentVersion" -ForegroundColor Gray
+        $cv = Invoke-MgGraphRequest -Method POST -Uri "$lobBase/contentVersions" `
+                -Body (@{} | ConvertTo-Json) -ContentType 'application/json'
+        $contentVersionId = [string]$cv.id
+        Write-Host "    contentVersionId: $contentVersionId" -ForegroundColor Gray
+
+        # --- Step 2: create file entry -----------------------------------
+        Write-Host "  step 2/6: create file entry" -ForegroundColor Gray
+        # Graph expects `name` to be the internal payload filename
+        # (Detection.xml's <FileName>, e.g. "IntunePackage.intunewin"), NOT
+        # the MSI's ProductName. `manifest: null` serialized explicitly is
+        # accepted here; omitting it causes a generic 400.
+        $fileBody = @{
+            '@odata.type' = '#microsoft.graph.mobileAppContentFile'
+            name          = [string]$appInfo.FileName
+            size          = $unencryptedSize
+            sizeEncrypted = $encryptedSize
+            manifest      = $null
+            isDependency  = $false
+        } | ConvertTo-Json -Depth 4
+        $fileEntry = Invoke-MgGraphRequest -Method POST `
+                       -Uri "$lobBase/contentVersions/$contentVersionId/files" `
+                       -Body $fileBody -ContentType 'application/json'
+        $fileId = [string]$fileEntry.id
+        Write-Host "    fileId: $fileId" -ForegroundColor Gray
+
+        # --- Step 3: poll until Azure SAS is ready -----------------------
+        Write-Host "  step 3/6: waiting for Azure storage SAS" -ForegroundColor Gray
+        $fileStatus = $null
+        $sasUri = $null
+        $deadline = (Get-Date).AddMinutes(5)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 3
+            $fileStatus = Invoke-MgGraphRequest -Method GET `
+                            -Uri "$lobBase/contentVersions/$contentVersionId/files/$fileId"
+            $state = [string]$fileStatus.uploadState
+            if ($state -eq 'azureStorageUriRequestSuccess') {
+                $sasUri = [string]$fileStatus.azureStorageUri
+                break
+            }
+            if ($state -match 'Fail') {
+                throw "SAS request failed: uploadState=$state"
+            }
+        }
+        if (-not $sasUri) { throw 'Timed out waiting for Azure storage SAS.' }
+
+        # --- Step 4: upload blocks to Azure blob -------------------------
+        Write-Host "  step 4/6: uploading $([Math]::Round($encryptedSize/1MB,1)) MiB in $ChunkSize-byte blocks" -ForegroundColor Gray
+        $blockIds = New-Object System.Collections.Generic.List[string]
+        $fs = [System.IO.File]::OpenRead($contentPath)
+        try {
+            $buf = New-Object byte[] $ChunkSize
+            $index = 0
+            while ($true) {
+                $read = $fs.Read($buf, 0, $ChunkSize)
+                if ($read -le 0) { break }
+                # Azure block IDs must be base64 of equal-length strings.
+                $blockIdRaw = 'block-' + ($index.ToString('D8'))
+                $blockId    = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($blockIdRaw))
+                $blockIds.Add($blockId)
+                $chunk = New-Object byte[] $read
+                [Array]::Copy($buf, 0, $chunk, 0, $read)
+                $blockUri = "$sasUri&comp=block&blockid=$([uri]::EscapeDataString($blockId))"
+                $null = Invoke-WebRequest -Method PUT -Uri $blockUri `
+                          -Body $chunk `
+                          -Headers @{ 'x-ms-blob-type' = 'BlockBlob' } `
+                          -ContentType 'application/octet-stream' `
+                          -UseBasicParsing
+                $index++
+                if ($index % 5 -eq 0) {
+                    Write-Host "    uploaded block $index" -ForegroundColor DarkGray
+                }
+            }
+        }
+        finally { $fs.Dispose() }
+        Write-Host "    all $($blockIds.Count) blocks uploaded" -ForegroundColor Gray
+
+        # Finalize with a block list XML.
+        $blockListXml = '<?xml version="1.0" encoding="utf-8"?><BlockList>'
+        foreach ($bid in $blockIds) { $blockListXml += "<Latest>$bid</Latest>" }
+        $blockListXml += '</BlockList>'
+        $null = Invoke-WebRequest -Method PUT -Uri "$sasUri&comp=blocklist" `
+                  -Body $blockListXml `
+                  -ContentType 'application/xml' `
+                  -UseBasicParsing
+        Write-Host "    block list committed" -ForegroundColor Gray
+
+        # --- Step 5: commit via Graph with encryption info ---------------
+        Write-Host "  step 5/6: committing content with encryption info" -ForegroundColor Gray
+        $commitBody = @{
+            fileEncryptionInfo = @{
+                encryptionKey        = [string]$enc.EncryptionKey
+                macKey               = [string]$enc.MacKey
+                initializationVector = [string]$enc.InitializationVector
+                mac                  = [string]$enc.Mac
+                profileIdentifier    = [string]$enc.ProfileIdentifier
+                fileDigest           = [string]$enc.FileDigest
+                fileDigestAlgorithm  = [string]$enc.FileDigestAlgorithm
+            }
+        } | ConvertTo-Json -Depth 4
+        Invoke-MgGraphRequest -Method POST `
+            -Uri "$lobBase/contentVersions/$contentVersionId/files/$fileId/commit" `
+            -Body $commitBody -ContentType 'application/json' | Out-Null
+
+        # Poll for commit success.
+        $deadline = (Get-Date).AddMinutes(5)
+        while ((Get-Date) -lt $deadline) {
+            Start-Sleep -Seconds 3
+            $fileStatus = Invoke-MgGraphRequest -Method GET `
+                            -Uri "$lobBase/contentVersions/$contentVersionId/files/$fileId"
+            $state = [string]$fileStatus.uploadState
+            if ($state -eq 'commitFileSuccess') { break }
+            if ($state -match 'Fail') {
+                throw "Commit failed: uploadState=$state"
+            }
+        }
+
+        # --- Step 6: point the app at this contentVersion ----------------
+        Write-Host "  step 6/6: setting committedContentVersion=$contentVersionId" -ForegroundColor Gray
+        $patch = @{
+            '@odata.type'             = '#microsoft.graph.win32LobApp'
+            committedContentVersion   = $contentVersionId
+        } | ConvertTo-Json -Depth 4
+        Invoke-MgGraphRequest -Method PATCH `
+            -Uri "$graphBase/deviceAppManagement/mobileApps/$AppId" `
+            -Body $patch -ContentType 'application/json' | Out-Null
+
+        return [pscustomobject]@{
+            ContentVersionId = $contentVersionId
+            FileId           = $fileId
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function New-AppAssignment {
