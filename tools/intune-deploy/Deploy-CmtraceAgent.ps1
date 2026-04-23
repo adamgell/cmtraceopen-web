@@ -554,14 +554,25 @@ function Resolve-SupersededApps {
 
 function Set-AppSupersedence {
     <#
-        Wire a 'supersedence' relationship from $AppId (the new app) to each of
-        $SupersededIds (the old apps). Uses the beta /relationships endpoint:
-          POST .../mobileApps/{newId}/relationships
-          body: { '@odata.type':'#microsoft.graph.mobileAppSupersedence',
-                  targetId: '<oldId>', supersedenceType: 'update' }
+        Wire a 'supersedence' relationship from $AppId (the new app) to each
+        of $SupersededIds (the old apps). This is an *action*, not a
+        collection POST:
+
+          POST .../mobileApps/{newId}/updateRelationships
+          body: { "relationships": [
+                    { "@odata.type":"#microsoft.graph.mobileAppSupersedence",
+                      "targetId":"<oldId>",
+                      "supersedenceType":"update" },
+                    ... up to 10
+                  ] }
 
         supersedenceType=update => MSI-level upgrade on the endpoint (keeps
-        user data). Use 'replace' if you want a full uninstall/reinstall cycle.
+        %ProgramData% config). Use 'replace' if you want a full
+        uninstall/reinstall cycle.
+
+        204 No Content on success. `POST .../relationships` (the previous
+        shape used here) returns 400 — relationships is a read-only
+        navigation; writes have to go through updateRelationships.
     #>
     param(
         [Parameter(Mandatory)] [string]$AppId,
@@ -574,23 +585,29 @@ function Set-AppSupersedence {
     }
 
     Write-Section "Setting supersedence ($($SupersededIds.Count) app(s))"
-    foreach ($oldId in $SupersededIds) {
-        if ($DryRun) {
-            Write-Host "  [DryRun] would POST supersedence: $AppId -> $oldId" -ForegroundColor Yellow
-            continue
+    $relationships = foreach ($oldId in $SupersededIds) {
+        @{
+            '@odata.type'    = '#microsoft.graph.mobileAppSupersedence'
+            targetId         = $oldId
+            supersedenceType = 'update'
         }
-        $body = @{
-            '@odata.type'      = '#microsoft.graph.mobileAppSupersedence'
-            targetId           = $oldId
-            supersedenceType   = 'update'
-        }
-        $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/relationships"
-        try {
-            Invoke-MgGraphRequest -Method POST -Uri $uri -Body ($body | ConvertTo-Json -Depth 4) | Out-Null
+    }
+    $body = @{ relationships = @($relationships) }
+
+    if ($DryRun) {
+        Write-Host "  [DryRun] would POST updateRelationships with:" -ForegroundColor Yellow
+        $body | ConvertTo-Json -Depth 6 | Write-Host
+        return
+    }
+
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships"
+    try {
+        Invoke-MgGraphRequest -Method POST -Uri $uri -Body ($body | ConvertTo-Json -Depth 6) | Out-Null
+        foreach ($oldId in $SupersededIds) {
             Write-Host "  supersedes: $oldId" -ForegroundColor Green
-        } catch {
-            Write-Warning "  supersedence POST failed for $oldId : $($_.Exception.Message)"
         }
+    } catch {
+        Write-Warning "  updateRelationships failed: $($_.Exception.Message)"
     }
 }
 

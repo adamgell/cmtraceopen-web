@@ -59,14 +59,14 @@
 
 [CmdletBinding()]
 param(
-    [string]$TargetVersion = '0.1.2',
+    [string]$TargetVersion = '0.1.3',
 
     [string]$MsiUrl,
 
-    # Pinned to the 0.1.2 release asset hash computed on the build runner.
+    # Pinned to the 0.1.3 release asset hash computed on the build runner.
     # Re-pin whenever $TargetVersion changes — see the README for the
     # post-release workflow.
-    [string]$ExpectedSha256 = '12294334c5850ece75cc1ef2a8be871d88d54fb9f0ba4a2525ef33c5187243f8',
+    [string]$ExpectedSha256 = '858ee038f7dc132c7087fe1be27999b6986377e5cb2e2b709dd79ba68def8531',
 
     [switch]$Reinstall
 )
