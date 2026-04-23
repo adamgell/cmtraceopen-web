@@ -3,6 +3,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { tokens } from "@fluentui/react-components";
 import type { LogEntry, Severity } from "../lib/log-types";
 import { applyFilters, type Filters } from "./FilterBar";
+import { FindBar, useFindBarHotkey } from "./FindBar";
 import { useTheme } from "../lib/theme-context";
 import {
   LOG_MONOSPACE_FONT_FAMILY,
@@ -45,10 +46,59 @@ export function EntryList({ entries, filters }: EntryListProps) {
     [entries, filters],
   );
 
-  const searchNeedle = useMemo(
-    () => filters?.search.trim().toLowerCase() ?? "",
-    [filters?.search],
-  );
+  // FindBar state (Ctrl+F overlay). Independent of the filter needle so
+  // the operator can narrow the list first and then step through matches
+  // without losing their filter context. When findNeedle is non-empty, it
+  // supersedes filters.search for the highlight renderer.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findNeedle, setFindNeedle] = useState("");
+  const [findMatchCase, setFindMatchCase] = useState(false);
+  const [findRegex, setFindRegex] = useState(false);
+  const [findError, setFindError] = useState<string | null>(null);
+  useFindBarHotkey(() => setFindOpen(true));
+
+  // Resolve the active needle: FindBar when open, else filters.search.
+  const searchNeedle = useMemo(() => {
+    if (findOpen && findNeedle) {
+      return findMatchCase ? findNeedle : findNeedle.toLowerCase();
+    }
+    return filters?.search.trim().toLowerCase() ?? "";
+  }, [findOpen, findNeedle, findMatchCase, filters?.search]);
+
+  // Compute match indices (into displayEntries) for the FindBar's
+  // "3 of 42" counter and next/prev navigation.
+  const { matchIndices, regexError } = useMemo(() => {
+    if (!findOpen || !findNeedle) return { matchIndices: [], regexError: null };
+    let matcher: (s: string) => boolean;
+    if (findRegex) {
+      try {
+        const re = new RegExp(findNeedle, findMatchCase ? "" : "i");
+        matcher = (s) => re.test(s);
+      } catch (e) {
+        return {
+          matchIndices: [],
+          regexError: e instanceof Error ? e.message : "Invalid regex",
+        };
+      }
+    } else {
+      const needle = findMatchCase ? findNeedle : findNeedle.toLowerCase();
+      matcher = (s) =>
+        (findMatchCase ? s : s.toLowerCase()).includes(needle);
+    }
+    const out: number[] = [];
+    for (let i = 0; i < displayEntries.length; i++) {
+      if (matcher(displayEntries[i]!.message)) out.push(i);
+    }
+    return { matchIndices: out, regexError: null };
+  }, [findOpen, findNeedle, findMatchCase, findRegex, displayEntries]);
+
+  useEffect(() => setFindError(regexError), [regexError]);
+
+  const [currentMatchSlot, setCurrentMatchSlot] = useState(0);
+  useEffect(() => {
+    // Reset match pointer when the needle / options / data change.
+    setCurrentMatchSlot(0);
+  }, [findNeedle, findMatchCase, findRegex, displayEntries.length]);
 
   const virtualizer = useVirtualizer({
     count: displayEntries.length,
@@ -104,6 +154,26 @@ export function EntryList({ entries, filters }: EntryListProps) {
   const selectedEntry =
     selectedIdx != null ? displayEntries[selectedIdx] ?? null : null;
 
+  // FindBar navigation: step through matchIndices, scroll the grid, and
+  // select the matching row so the detail pane reflects the match too.
+  const gotoMatch = useCallback(
+    (slot: number) => {
+      if (matchIndices.length === 0) return;
+      const wrapped = ((slot % matchIndices.length) + matchIndices.length) % matchIndices.length;
+      const idx = matchIndices[wrapped]!;
+      setCurrentMatchSlot(wrapped);
+      setSelectedIdx(idx);
+      virtualizer.scrollToIndex(idx, { align: "center" });
+    },
+    [matchIndices, virtualizer],
+  );
+  const onFindNext = useCallback(() => {
+    gotoMatch(currentMatchSlot + 1);
+  }, [gotoMatch, currentMatchSlot]);
+  const onFindPrev = useCallback(() => {
+    gotoMatch(currentMatchSlot - 1);
+  }, [gotoMatch, currentMatchSlot]);
+
   return (
     <div
       style={{
@@ -120,6 +190,21 @@ export function EntryList({ entries, filters }: EntryListProps) {
         color: tokens.colorNeutralForeground1,
       }}
     >
+      <FindBar
+        open={findOpen}
+        onClose={() => setFindOpen(false)}
+        value={findNeedle}
+        onChange={setFindNeedle}
+        matchCase={findMatchCase}
+        onMatchCaseChange={setFindMatchCase}
+        regex={findRegex}
+        onRegexChange={setFindRegex}
+        currentMatch={matchIndices.length > 0 ? currentMatchSlot : undefined}
+        totalMatches={matchIndices.length}
+        errorText={findError ?? undefined}
+        onNext={onFindNext}
+        onPrev={onFindPrev}
+      />
       <HeaderRow />
       <div
         ref={parentRef}
