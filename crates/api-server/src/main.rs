@@ -11,14 +11,7 @@ use api_server::router;
 use api_server::state::{
     install_metrics_recorder, AppState, CorsConfig, MtlsRuntimeConfig, RateLimitState,
 };
-use api_server::storage::{build_blob_store, ConfigStore, SqliteMetadataStore};
-// build_metadata_store factory is intentionally NOT wired into main.rs at the
-// moment: the Postgres backend (PR #77) ships its module + migrations but
-// main.rs still constructs a SqliteMetadataStore directly so the audit_store /
-// configs trait-object coercions stay simple. Wiring the factory up is a
-// follow-up; tracked in the PR body.
-#[allow(unused_imports)]
-use api_server::storage::build_metadata_store;
+use api_server::storage::{build_blob_store, build_metadata_store};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tower_http::trace::TraceLayer;
@@ -130,31 +123,45 @@ async fn main() -> ExitCode {
         }
     };
 
-    // Direct SqliteMetadataStore construction — the Postgres factory
-    // (build_metadata_store) is available but not yet wired through main
-    // because audit + ConfigStore threading needs the concrete type.
-    // Follow-up: put audit_store + configs on the MetadataStore trait so
-    // the factory handoff works transparently.
-    let meta_store = match SqliteMetadataStore::connect(&config.sqlite_path).await {
-        Ok(m) => Arc::new(m),
+    // Build the metadata backend via the factory — the factory dispatches
+    // on `config.database_url` (`postgres://` vs `sqlite://` / bare path)
+    // and hands back every handle the AppState needs in one call. The
+    // concrete store type never appears here: main.rs only sees
+    // `Arc<dyn MetadataStore>` / `Arc<dyn ConfigStore>` / `Arc<dyn AuditStore>`.
+    let bundle = match build_metadata_store(&config).await {
+        Ok(b) => b,
         Err(err) => {
             eprintln!(
                 "fatal: failed to open metadata store ({}): {err}",
-                config.sqlite_path
+                config.database_url
             );
             return ExitCode::from(1);
         }
     };
+    let meta = bundle.meta;
+    let configs = bundle.configs;
+    let audit = bundle.audit;
 
-    // The audit store shares the same SQLite pool as `meta_store`. The
-    // inherent `SqliteMetadataStore::audit_store()` returns `AuditSqliteStore`
-    // (concrete) and shadows the `MetadataStore` trait method here, so wrap
-    // explicitly in `Arc<dyn AuditStore>` for the AppState constructor.
-    let audit: Arc<dyn api_server::storage::AuditStore> =
-        Arc::new(meta_store.audit_store());
-
-    let meta: Arc<dyn api_server::storage::MetadataStore> = meta_store.clone();
-    let configs: Arc<dyn ConfigStore> = meta_store;
+    // The Postgres backend lacks an audit_log migration (see
+    // `crates/api-server/src/storage/meta_postgres.rs`) and a matching
+    // device_config_overrides migration, and there are no PgAuditStore /
+    // PgConfigStore impls yet. The factory routes both handles to the
+    // no-op fallbacks in that case so the server can still come up in PG
+    // deployments — warn loudly at startup so operators know audit +
+    // config-push writes are being silently dropped until the PG impls
+    // land. Tracked as issue #110.
+    if config.database_url.starts_with("postgres://")
+        || config.database_url.starts_with("postgresql://")
+    {
+        warn!(
+            "Postgres backend selected; audit-log writes routed to \
+             NoopAuditStore and config-push writes routed to NoopConfigStore \
+             (see crates/api-server/src/storage/meta_postgres.rs for the \
+             migration gap). Migrate migrations-pg/ + implement PgAuditStore \
+             and PgConfigStore before depending on audit or config-push in \
+             Postgres deployments."
+        );
+    }
 
     // Build the auth state. In production the JWKS cache is pre-warmed on
     // startup so the first real request doesn't pay for the discovery-URI
@@ -197,19 +204,10 @@ async fn main() -> ExitCode {
     // the task mid-sleep or mid-delete leaves the DB consistent). When
     // `CMTRACE_BUNDLE_TTL_DAYS=0` the loop still runs but no-ops on every
     // tick; see `retention::run_retention_loop` for the gate.
-    //
-    // The meta clone uses an explicit binding rather than passing
-    // `Arc::clone(&meta)` inline because `Arc<SqliteMetadataStore>` →
-    // `Arc<dyn MetadataStore>` needs the unsizing coercion to fire,
-    // which only happens at a let binding with an explicit type
-    // annotation (or when passed into a function whose parameter type
-    // already nails the trait object).
     {
-        // `Arc::clone(&meta)` would bind T = dyn MetadataStore from the LHS
-        // and then choke on `&meta: &Arc<SqliteMetadataStore>`. Method-call
-        // syntax binds T to the concrete type, then the let's type
-        // annotation triggers the unsizing coercion to the trait object.
-        let meta_for_retention: Arc<dyn api_server::storage::MetadataStore> = meta.clone();
+        // `meta` is already `Arc<dyn MetadataStore>` out of the factory, so
+        // `Arc::clone` is sufficient (no unsizing coercion needed).
+        let meta_for_retention = Arc::clone(&meta);
         let blobs_for_retention = Arc::clone(&blobs);
         let cfg_for_retention = config.clone();
         tokio::spawn(async move {

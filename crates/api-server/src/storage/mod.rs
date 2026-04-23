@@ -17,14 +17,23 @@ pub mod blob_fs;
 pub mod blob_object_store;
 #[cfg(feature = "azure")]
 pub mod blob_azure;
+// `sqlite` / `postgres` modules gate on their respective cargo features —
+// the sqlx driver for the feature-off case isn't compiled in (see the
+// `sqlite` / `postgres` sections in `Cargo.toml`), so the module source
+// won't even parse without the matching flag. Mirrors the existing
+// `postgres` gate.
+#[cfg(feature = "sqlite")]
 pub mod meta_sqlite;
+#[cfg(feature = "sqlite")]
 pub mod audit_sqlite;
 #[cfg(feature = "postgres")]
 pub mod meta_postgres;
 
 pub use blob_fs::LocalFsBlobStore;
 pub use blob_object_store::ObjectStoreBlobStore;
+#[cfg(feature = "sqlite")]
 pub use meta_sqlite::SqliteMetadataStore;
+#[cfg(feature = "sqlite")]
 pub use audit_sqlite::AuditSqliteStore;
 #[cfg(feature = "postgres")]
 pub use meta_postgres::PgMetadataStore;
@@ -112,6 +121,34 @@ async fn build_azure_blob_store(
     Err(BuildBlobStoreError::AzureFeatureMissing)
 }
 
+/// Bundle of handles returned by [`build_metadata_store`] — main.rs needs
+/// all three today, and the concrete backend is the only place that knows
+/// how to wire them up from a single pool.
+///
+/// Why a bundle rather than `Arc<dyn MetadataStore>` alone? Three reasons:
+///
+///   * [`ConfigStore`] is a **separate** trait, not a supertrait of
+///     [`MetadataStore`]. main.rs holds `Arc<dyn ConfigStore>` on the
+///     AppState, so the factory has to hand one back. The concrete backends
+///     implement both traits on the same struct, so the bundle fans a
+///     single `Arc<Concrete>` into two trait-object Arcs without opening
+///     two pools.
+///   * The audit store currently lives on an inherent method on the
+///     concrete type (see [`SqliteMetadataStore::audit_store`]) so the
+///     default [`MetadataStore::audit_store`] impl can't be relied on for
+///     all backends (Postgres panics). Returning a prebuilt
+///     `Arc<dyn AuditStore>` lets the factory pick the right audit strategy
+///     per backend — real store for SQLite, [`NoopAuditStore`] for Postgres
+///     (the PG audit-log table isn't migrated yet; see issue #110 and
+///     `meta_postgres.rs`).
+///   * Keeps the caller (main.rs) ignorant of the concrete type, which is
+///     the whole point of the factory.
+pub struct MetadataStoreBundle {
+    pub meta: Arc<dyn MetadataStore>,
+    pub configs: Arc<dyn ConfigStore>,
+    pub audit: Arc<dyn AuditStore>,
+}
+
 /// Build the right [`MetadataStore`] implementation based on the
 /// `CMTRACE_DATABASE_URL` scheme in `config.database_url`:
 ///
@@ -120,12 +157,16 @@ async fn build_azure_blob_store(
 /// - `sqlite://…` or a bare path → [`SqliteMetadataStore`] (requires the
 ///   `sqlite` cargo feature).
 ///
+/// Returns a [`MetadataStoreBundle`] so main.rs gets the metadata, config,
+/// and audit handles it needs from a single call without naming a concrete
+/// store type.
+///
 /// This is the *only* place the codebase chooses a metadata backend. Adding a
 /// new backend later means: new feature flag in `Cargo.toml`, new arm here,
 /// new factory module — handlers and tests don't move.
 pub async fn build_metadata_store(
     config: &crate::config::Config,
-) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+) -> Result<MetadataStoreBundle, BuildMetadataStoreError> {
     let url = &config.database_url;
 
     if url.starts_with("postgres://") || url.starts_with("postgresql://") {
@@ -138,22 +179,40 @@ pub async fn build_metadata_store(
 #[cfg(feature = "postgres")]
 async fn build_pg_metadata_store(
     url: &str,
-) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+) -> Result<MetadataStoreBundle, BuildMetadataStoreError> {
+    // One concrete `Arc<PgMetadataStore>` fans out into the two trait-object
+    // Arcs main.rs expects. The audit handle is [`NoopAuditStore`]
+    // because the PG audit_log migration doesn't exist yet (see
+    // `meta_postgres.rs` — PgMetadataStore::audit_store panics on purpose).
+    // main.rs emits a startup warn! describing this fallback so operators
+    // know audit writes are being dropped on the PG backend.
+    //
+    // The config-override handle is [`NoopConfigStore`] for the same
+    // reason: `migrations-pg/` doesn't carry a device_config_overrides
+    // migration yet, and there's no PgConfigStore impl. This matches the
+    // audit strategy — surface the gap loudly at startup rather than
+    // silently panic mid-request. Follow-up work (issue #110 tracks both
+    // tables) is called out in the factory doc and main.rs warn!.
     let store = PgMetadataStore::connect(url).await?;
-    Ok(Arc::new(store))
+    let store: Arc<PgMetadataStore> = Arc::new(store);
+    Ok(MetadataStoreBundle {
+        meta: store.clone() as Arc<dyn MetadataStore>,
+        configs: Arc::new(NoopConfigStore) as Arc<dyn ConfigStore>,
+        audit: Arc::new(NoopAuditStore) as Arc<dyn AuditStore>,
+    })
 }
 
 #[cfg(not(feature = "postgres"))]
 async fn build_pg_metadata_store(
     _url: &str,
-) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+) -> Result<MetadataStoreBundle, BuildMetadataStoreError> {
     Err(BuildMetadataStoreError::PostgresFeatureMissing)
 }
 
 #[cfg(feature = "sqlite")]
 async fn build_sqlite_metadata_store(
     url: &str,
-) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+) -> Result<MetadataStoreBundle, BuildMetadataStoreError> {
     // Strip the `sqlite://` scheme prefix if present; SqliteMetadataStore
     // expects either a bare path or `:memory:`.
     let path = url
@@ -161,13 +220,24 @@ async fn build_sqlite_metadata_store(
         .or_else(|| url.strip_prefix("sqlite:"))
         .unwrap_or(url);
     let store = SqliteMetadataStore::connect(path).await?;
-    Ok(Arc::new(store))
+    let store: Arc<SqliteMetadataStore> = Arc::new(store);
+    // The audit store shares the SQLite pool — the inherent
+    // `SqliteMetadataStore::audit_store()` returns the concrete
+    // `AuditSqliteStore` (cheap Arc bump on the pool). Wrap in
+    // `Arc<dyn AuditStore>` so the bundle caller never names the concrete
+    // type, mirroring the old inline construction in main.rs.
+    let audit: Arc<dyn AuditStore> = Arc::new(store.audit_store());
+    Ok(MetadataStoreBundle {
+        meta: store.clone() as Arc<dyn MetadataStore>,
+        configs: store as Arc<dyn ConfigStore>,
+        audit,
+    })
 }
 
 #[cfg(not(feature = "sqlite"))]
 async fn build_sqlite_metadata_store(
     _url: &str,
-) -> Result<Arc<dyn MetadataStore>, BuildMetadataStoreError> {
+) -> Result<MetadataStoreBundle, BuildMetadataStoreError> {
     Err(BuildMetadataStoreError::SqliteFeatureMissing)
 }
 
@@ -320,6 +390,99 @@ mod build_blob_store_tests {
             Ok(_) => panic!("azure backend should fail when feature disabled"),
             Err(BuildBlobStoreError::AzureFeatureMissing) => {}
             Err(other) => panic!("expected AzureFeatureMissing, got {other:?}"),
+        }
+    }
+
+    /// Exercise the metadata-store factory on the sqlite path: given a
+    /// `sqlite::memory:` URL, `build_metadata_store` should return a
+    /// bundle with all three trait-object Arcs populated and each one
+    /// functional (i.e. the returned store implements its trait contract,
+    /// not a stub).
+    ///
+    /// No equivalent test exists for the Postgres path — exercising it
+    /// requires a live PG instance that this crate's unit-test harness
+    /// doesn't spin up. A `#[ignore]`d integration test is the right home
+    /// for that and is called out as a follow-up in the commit body.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn factory_returns_sqlite_bundle_for_sqlite_url() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = base_config(tmp.path().to_path_buf());
+        cfg.database_url = "sqlite::memory:".to_string();
+
+        let bundle = build_metadata_store(&cfg)
+            .await
+            .expect("sqlite backend should build for in-memory URL");
+
+        // `Arc<dyn MetadataStore>` — touch the surface to prove it's a
+        // real store, not the default-impl NoopAuditStore stub.
+        let stats = bundle.meta.pool_stats();
+        assert!(
+            stats.max_size > 0,
+            "SqliteMetadataStore::pool_stats should report a non-zero max_size",
+        );
+
+        // `Arc<dyn ConfigStore>` — read on an empty DB returns None.
+        let cfg_row = bundle
+            .configs
+            .get_default_config()
+            .await
+            .expect("get_default_config should not error on empty DB");
+        assert!(
+            cfg_row.is_none(),
+            "default config should be absent on a fresh in-memory DB",
+        );
+
+        // `Arc<dyn AuditStore>` — list returns empty on a fresh DB.
+        let rows = bundle
+            .audit
+            .list_audit_rows(&AuditFilters::default(), 10)
+            .await
+            .expect("list_audit_rows should not error on empty DB");
+        assert!(rows.is_empty(), "audit log should be empty on fresh DB");
+    }
+
+    /// Also exercise the bare-`:memory:` URL form (no `sqlite:` prefix)
+    /// to lock the factory's `unwrap_or(url)` fallback behavior in place.
+    /// The Docker/compose path uses a `sqlite://...` prefix, but the
+    /// inherent `SqliteMetadataStore::connect` accepts bare paths too and
+    /// the factory preserves that.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn factory_accepts_bare_memory_url() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = base_config(tmp.path().to_path_buf());
+        cfg.database_url = ":memory:".to_string();
+
+        let bundle = build_metadata_store(&cfg)
+            .await
+            .expect("sqlite backend should build for bare :memory: URL");
+        // Smoke-test the bundle: every Arc populated.
+        let _ = bundle.meta.pool_stats();
+        let _ = bundle
+            .audit
+            .list_audit_rows(&AuditFilters::default(), 1)
+            .await
+            .unwrap();
+    }
+
+    /// When the binary is built without the `postgres` feature, a
+    /// `postgres://` URL must surface
+    /// [`BuildMetadataStoreError::PostgresFeatureMissing`] rather than
+    /// silently falling back to sqlite.
+    #[cfg(not(feature = "postgres"))]
+    #[tokio::test]
+    async fn factory_rejects_postgres_when_feature_disabled() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = base_config(tmp.path().to_path_buf());
+        cfg.database_url = "postgres://user:pass@localhost/db".to_string();
+
+        // `MetadataStoreBundle` doesn't implement Debug, so expect_err
+        // doesn't compile here — match the result manually instead.
+        match build_metadata_store(&cfg).await {
+            Ok(_) => panic!("postgres backend should fail when feature disabled"),
+            Err(BuildMetadataStoreError::PostgresFeatureMissing) => {}
+            Err(other) => panic!("expected PostgresFeatureMissing, got {other:?}"),
         }
     }
 }
@@ -951,5 +1114,55 @@ impl AuditStore for NoopAuditStore {
         _limit: u32,
     ) -> Result<Vec<AuditRow>, StorageError> {
         Ok(vec![])
+    }
+}
+
+/// No-op [`ConfigStore`] used as a fallback when a backend doesn't yet have
+/// a real implementation.
+///
+/// Reads return `None` (i.e. "no override configured"); writes and deletes
+/// silently succeed. This parallels [`NoopAuditStore`] and exists for the
+/// same reason: the Postgres backend has neither the
+/// `device_config_overrides` nor `default_config_override` tables migrated
+/// (`migrations-pg/` is missing an equivalent of
+/// `migrations/0004_device_config.sql`), and there is no `PgConfigStore`
+/// impl. The factory routes PG to this fallback so `build_metadata_store`
+/// can return a uniform bundle; `main.rs` warns loudly at startup when the
+/// selected backend is Postgres so the operator knows config-push writes
+/// are being silently dropped until a real impl lands. See issue #110.
+pub struct NoopConfigStore;
+
+#[async_trait]
+impl ConfigStore for NoopConfigStore {
+    async fn get_device_config(
+        &self,
+        _device_id: &str,
+    ) -> Result<Option<AgentConfigOverride>, StorageError> {
+        Ok(None)
+    }
+
+    async fn set_device_config(
+        &self,
+        _device_id: &str,
+        _config: &AgentConfigOverride,
+        _now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn delete_device_config(&self, _device_id: &str) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    async fn get_default_config(&self) -> Result<Option<AgentConfigOverride>, StorageError> {
+        Ok(None)
+    }
+
+    async fn set_default_config(
+        &self,
+        _config: &AgentConfigOverride,
+        _now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Ok(())
     }
 }
