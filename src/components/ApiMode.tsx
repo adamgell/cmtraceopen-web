@@ -6,7 +6,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import { Button, tokens } from "@fluentui/react-components";
+import { Button, Tooltip, tokens } from "@fluentui/react-components";
 import {
   apiBase,
   listDevices,
@@ -22,6 +22,11 @@ import type {
   SessionFile,
   SessionSummary,
 } from "../lib/log-types";
+import {
+  useWorkspace,
+  type PinnedItemId,
+  type PinnedItemInput,
+} from "../lib/workspace-context";
 import { EntryList } from "./EntryList";
 import { FilesPanel } from "./FilesPanel";
 import {
@@ -60,7 +65,8 @@ export interface ApiModeHandle {
   clear: () => void;
 }
 
-export type ApiModeProps = Record<string, never>;
+// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+export type ApiModeProps = {};
 
 /**
  * API-mode view: four stacked panels that walk the hierarchy
@@ -279,6 +285,55 @@ export const ApiMode = forwardRef<ApiModeHandle, ApiModeProps>(function ApiMode(
     setFilters(defaultFilters());
   }, []);
 
+  // Resolve current selection objects for workspace pinning. We need the
+  // full device / session / file records so labels can carry human-friendly
+  // strings (hostname, relative path, short session id).
+  const workspace = useWorkspace();
+  const deviceObj = useMemo(() => {
+    if (!selectedDevice || devices.status !== "ok") return null;
+    return devices.data.find((d) => d.deviceId === selectedDevice) ?? null;
+  }, [selectedDevice, devices]);
+  const sessionObj = useMemo(() => {
+    if (!selectedSession || sessions.status !== "ok") return null;
+    return sessions.data.find((s) => s.sessionId === selectedSession) ?? null;
+  }, [selectedSession, sessions]);
+  const fileObj = useMemo(() => {
+    if (!selectedFile || files.status !== "ok") return null;
+    return files.data.find((f) => f.fileId === selectedFile) ?? null;
+  }, [selectedFile, files]);
+
+  const sessionsHeaderRight =
+    deviceObj && sessionObj && !fileObj ? (
+      <PinButton
+        candidate={{
+          kind: "api-session",
+          label: `${deviceObj.hostname ?? deviceObj.deviceId} / ${sessionObj.sessionId.slice(0, 8)}`,
+          deviceId: deviceObj.deviceId,
+          sessionId: sessionObj.sessionId,
+        }}
+        pinLabel="Pin session"
+        findExisting={workspace.findExisting}
+        pin={workspace.pin}
+      />
+    ) : undefined;
+
+  const filesHeaderRight =
+    deviceObj && sessionObj && fileObj ? (
+      <PinButton
+        candidate={{
+          kind: "api-file",
+          label: `${deviceObj.hostname ?? deviceObj.deviceId} / ${sessionObj.sessionId.slice(0, 8)} / ${fileObj.relativePath}`,
+          deviceId: deviceObj.deviceId,
+          sessionId: sessionObj.sessionId,
+          fileId: fileObj.fileId,
+          relativePath: fileObj.relativePath,
+        }}
+        pinLabel="Pin file"
+        findExisting={workspace.findExisting}
+        pin={workspace.pin}
+      />
+    ) : undefined;
+
   return (
     <div
       style={{
@@ -300,7 +355,10 @@ export const ApiMode = forwardRef<ApiModeHandle, ApiModeProps>(function ApiMode(
           onSelect={handleSelectDevice}
         />
       </Panel>
-      <Panel title={selectedDevice ? `Sessions — ${selectedDevice}` : "Sessions"}>
+      <Panel
+        title={selectedDevice ? `Sessions — ${selectedDevice}` : "Sessions"}
+        headerRight={sessionsHeaderRight}
+      >
         {selectedDevice ? (
           <SessionList
             state={sessions}
@@ -311,7 +369,10 @@ export const ApiMode = forwardRef<ApiModeHandle, ApiModeProps>(function ApiMode(
           <EmptyHint text="Select a device to list its sessions." />
         )}
       </Panel>
-      <Panel title={selectedSession ? `Files — ${selectedSession}` : "Files"}>
+      <Panel
+        title={selectedSession ? `Files — ${selectedSession}` : "Files"}
+        headerRight={filesHeaderRight}
+      >
         {selectedSession ? (
           <FilesPanel
             state={files}
@@ -346,6 +407,7 @@ function Panel({
   children,
   baseHint,
   flex,
+  headerRight,
 }: {
   title: string;
   children: React.ReactNode;
@@ -354,6 +416,9 @@ function Panel({
   /** When true, the body region gets `flex: 1; minHeight: 0` so virtualized
    *  children (EntryList) size correctly. */
   flex?: boolean;
+  /** Optional right-aligned header slot — used for the per-panel "Pin"
+   *  action without overhauling the layout. */
+  headerRight?: React.ReactNode;
 }) {
   return (
     <section
@@ -390,6 +455,11 @@ function Panel({
             }}
           >
             base: {apiBase || "(same-origin)"}
+          </span>
+        )}
+        {headerRight && (
+          <span style={{ marginLeft: "auto", display: "flex", alignItems: "center" }}>
+            {headerRight}
           </span>
         )}
       </header>
@@ -614,6 +684,39 @@ function RowButton({
     >
       {children}
     </Button>
+  );
+}
+
+function PinButton({
+  candidate,
+  pinLabel,
+  findExisting,
+  pin,
+}: {
+  candidate: PinnedItemInput;
+  pinLabel: string;
+  findExisting: (item: PinnedItemInput) => PinnedItemId | null;
+  pin: (item: PinnedItemInput) => PinnedItemId;
+}) {
+  const existing = findExisting(candidate);
+  const pinned = existing !== null;
+  return (
+    <Tooltip
+      content={pinned ? "Already pinned" : "Pin to workspace"}
+      relationship="label"
+      withArrow
+    >
+      <Button
+        size="small"
+        appearance="subtle"
+        disabled={pinned}
+        onClick={() => {
+          if (!pinned) pin(candidate);
+        }}
+      >
+        {pinned ? "Pinned" : pinLabel}
+      </Button>
+    </Tooltip>
   );
 }
 

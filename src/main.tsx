@@ -4,6 +4,7 @@ import { MsalProvider } from "@azure/msal-react";
 import App from "./App";
 import { entraConfig } from "./lib/auth-config";
 import { ThemeProvider } from "./lib/theme-context";
+import { WorkspaceProvider } from "./lib/workspace-context";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {
@@ -33,9 +34,11 @@ async function bootstrap() {
     root.render(
       <StrictMode>
         <ThemeProvider>
-          <MsalProvider instance={entraConfig.msalInstance}>
-            <App />
-          </MsalProvider>
+          <WorkspaceProvider>
+            <MsalProvider instance={entraConfig.msalInstance}>
+              <App />
+            </MsalProvider>
+          </WorkspaceProvider>
         </ThemeProvider>
       </StrictMode>,
     );
@@ -45,7 +48,9 @@ async function bootstrap() {
     root.render(
       <StrictMode>
         <ThemeProvider>
-          <App />
+          <WorkspaceProvider>
+            <App />
+          </WorkspaceProvider>
         </ThemeProvider>
       </StrictMode>,
     );

@@ -7,9 +7,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { tokens } from "@fluentui/react-components";
+import { Button, Tooltip, tokens } from "@fluentui/react-components";
 import { initWasm, parse } from "../lib/wasm-bridge";
 import type { ParseResult } from "../lib/log-types";
+import { useWorkspace } from "../lib/workspace-context";
 import { DropZone } from "./DropZone";
 import { EntryList } from "./EntryList";
 import {
@@ -67,6 +68,7 @@ export const LocalMode = forwardRef<LocalModeHandle, LocalModeProps>(
     // Most recently loaded file, kept so `reload` can re-parse it without
     // bothering the user to pick the file again.
     const [lastFile, setLastFile] = useState<File | null>(null);
+    const workspace = useWorkspace();
     // Monotonic request counter used to discard stale parse results when a user
     // drops a new file before the previous parse resolves.
     const parseReqId = useRef(0);
@@ -213,6 +215,41 @@ export const LocalMode = forwardRef<LocalModeHandle, LocalModeProps>(
         )}
         {state.tag === "loaded" && (
           <>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                justifyContent: "flex-end",
+              }}
+            >
+              {(() => {
+                const candidate = {
+                  kind: "local-file" as const,
+                  label: state.fileName,
+                  fileName: state.fileName,
+                };
+                const existing = workspace.findExisting(candidate);
+                return (
+                  <Tooltip
+                    content={existing ? "Already pinned" : "Pin to workspace"}
+                    relationship="label"
+                    withArrow
+                  >
+                    <Button
+                      size="small"
+                      appearance="subtle"
+                      disabled={!!existing}
+                      onClick={() => {
+                        if (!existing) workspace.pin(candidate);
+                      }}
+                    >
+                      {existing ? "Pinned" : "Pin file"}
+                    </Button>
+                  </Tooltip>
+                );
+              })()}
+            </div>
             <FilterBar
               filters={filters}
               onChange={setFilters}
