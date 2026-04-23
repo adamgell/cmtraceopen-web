@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { tokens } from "@fluentui/react-components";
 import { apiBase, disableDevice, listDevicesPage } from "../lib/api-client";
 import { ROLE_ADMIN } from "../lib/auth-config";
 import type { DeviceSummary, DeviceStatus } from "../lib/log-types";
@@ -145,10 +146,10 @@ export function DevicesPanel() {
         flexDirection: "column",
         flex: 1,
         minHeight: 0,
-        border: "1px solid #ddd",
-        borderRadius: 4,
+        border: `1px solid ${tokens.colorNeutralStroke1}`,
+        borderRadius: tokens.borderRadiusMedium,
         overflow: "hidden",
-        background: "white",
+        background: tokens.colorNeutralBackground1,
       }}
     >
       <PanelHeader
@@ -188,7 +189,7 @@ export function DevicesPanel() {
               type="button"
               onClick={() => void loadNextPage()}
               disabled={fetchState.status === "loading"}
-              style={secondaryBtn}
+              style={secondaryBtn()}
             >
               {fetchState.status === "loading" ? "Loading…" : "Load more"}
             </button>
@@ -233,16 +234,18 @@ function PanelHeader({
         alignItems: "center",
         gap: 10,
         padding: "8px 12px",
-        background: "#f5f5f5",
-        borderBottom: "1px solid #ddd",
+        background: tokens.colorNeutralBackground2,
+        borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
         flexWrap: "wrap",
       }}
     >
-      <span style={{ fontWeight: 600, fontSize: 13, color: "#333" }}>
+      <span
+        style={{ fontWeight: 600, fontSize: 13, color: tokens.colorNeutralForeground1 }}
+      >
         Devices
       </span>
       {total > 0 && (
-        <span style={{ fontSize: 11, color: "#888" }}>
+        <span style={{ fontSize: 11, color: tokens.colorNeutralForeground3 }}>
           {filtered === total
             ? `${total} device${total === 1 ? "" : "s"}`
             : `${filtered} / ${total}`}
@@ -257,11 +260,11 @@ function PanelHeader({
         style={{
           padding: "4px 8px",
           fontSize: 12,
-          border: "1px solid #ccc",
-          borderRadius: 4,
+          border: `1px solid ${tokens.colorNeutralStroke1}`,
+          borderRadius: tokens.borderRadiusMedium,
           width: 240,
-          color: "#222",
-          background: "white",
+          color: tokens.colorNeutralForeground1,
+          background: tokens.colorNeutralBackground1,
         }}
       />
       <button
@@ -269,11 +272,11 @@ function PanelHeader({
         onClick={onRefresh}
         disabled={loading}
         title="Refresh now"
-        style={secondaryBtn}
+        style={secondaryBtn()}
       >
         {loading ? "Refreshing…" : "↻ Refresh"}
       </button>
-      <span style={{ fontSize: 11, color: "#aaa" }}>
+      <span style={{ fontSize: 11, color: tokens.colorNeutralForeground3 }}>
         base: {apiBase || "(same-origin)"}
       </span>
     </header>
@@ -325,8 +328,8 @@ function DeviceTable({
         style={{
           display: "grid",
           gridTemplateColumns: gridTemplate,
-          background: "#fafafa",
-          borderBottom: "1px solid #e5e5e5",
+          background: tokens.colorNeutralBackground2,
+          borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
           position: "sticky",
           top: 0,
           zIndex: 1,
@@ -366,7 +369,7 @@ function DeviceTable({
                 transform: `translateY(${virtualRow.start}px)`,
                 display: "grid",
                 gridTemplateColumns: gridTemplate,
-                borderBottom: "1px solid #f0f0f0",
+                borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
                 alignItems: "center",
               }}
             >
@@ -382,7 +385,9 @@ function DeviceTable({
                 </span>
               </BodyCell>
               <BodyCell>
-                {d.hostname ?? <span style={{ color: "#aaa" }}>—</span>}
+                {d.hostname ?? (
+                  <span style={{ color: tokens.colorNeutralForeground3 }}>—</span>
+                )}
               </BodyCell>
               <BodyCell>{formatUtc(d.lastSeenUtc)}</BodyCell>
               <BodyCell>
@@ -392,7 +397,7 @@ function DeviceTable({
                 <RoleGate
                   role={ROLE_ADMIN}
                   fallback={
-                    <button type="button" disabled style={disabledActionBtn}>
+                    <button type="button" disabled style={disabledActionBtn()}>
                       Disable
                     </button>
                   }
@@ -403,8 +408,8 @@ function DeviceTable({
                     disabled={effectiveStatus !== "active"}
                     style={
                       effectiveStatus !== "active"
-                        ? disabledActionBtn
-                        : dangerBtn
+                        ? disabledActionBtn()
+                        : dangerBtn()
                     }
                     title={
                       effectiveStatus !== "active"
@@ -433,7 +438,7 @@ function HeaderCell({ children }: { children: React.ReactNode }) {
         textAlign: "left",
         fontWeight: 600,
         fontSize: 11,
-        color: "#555",
+        color: tokens.colorNeutralForeground2,
         whiteSpace: "nowrap",
       }}
     >
@@ -449,7 +454,7 @@ function BodyCell({ children }: { children: React.ReactNode }) {
       style={{
         padding: "7px 12px",
         fontSize: 13,
-        color: "#222",
+        color: tokens.colorNeutralForeground1,
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",
@@ -463,19 +468,19 @@ function BodyCell({ children }: { children: React.ReactNode }) {
 function StatusPill({ status }: { status: DeviceStatus }) {
   const styles: Record<DeviceStatus, React.CSSProperties> = {
     active: {
-      background: "#dcfce7",
-      color: "#15803d",
-      border: "1px solid #86efac",
+      background: tokens.colorPaletteGreenBackground2,
+      color: tokens.colorPaletteGreenForeground1,
+      border: `1px solid ${tokens.colorPaletteGreenBorderActive}`,
     },
     disabled: {
-      background: "#f3f4f6",
-      color: "#6b7280",
-      border: "1px solid #d1d5db",
+      background: tokens.colorNeutralBackground3,
+      color: tokens.colorNeutralForeground2,
+      border: `1px solid ${tokens.colorNeutralStroke2}`,
     },
     revoked: {
-      background: "#fef2f2",
-      color: "#b91c1c",
-      border: "1px solid #fca5a5",
+      background: tokens.colorPaletteRedBackground1,
+      color: tokens.colorPaletteRedForeground1,
+      border: `1px solid ${tokens.colorPaletteRedBorder1}`,
     },
   };
   const label: Record<DeviceStatus, string> = {
@@ -541,12 +546,13 @@ function ConfirmModal({
     >
       <div
         style={{
-          background: "white",
-          borderRadius: 6,
+          background: tokens.colorNeutralBackground1,
+          color: tokens.colorNeutralForeground1,
+          borderRadius: tokens.borderRadiusLarge,
           padding: 24,
           maxWidth: 440,
           width: "90%",
-          boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+          boxShadow: tokens.shadow28,
         }}
       >
         <h3
@@ -555,13 +561,20 @@ function ConfirmModal({
         >
           Disable device?
         </h3>
-        <p style={{ margin: "0 0 8px", fontSize: 13, color: "#444" }}>
+        <p
+          style={{
+            margin: "0 0 8px",
+            fontSize: 13,
+            color: tokens.colorNeutralForeground1,
+          }}
+        >
           Device:{" "}
           <code
             style={{
-              background: "#f3f4f6",
+              background: tokens.colorNeutralBackground3,
+              color: tokens.colorNeutralForeground1,
               padding: "1px 4px",
-              borderRadius: 3,
+              borderRadius: tokens.borderRadiusSmall,
               fontSize: 12,
               wordBreak: "break-all",
             }}
@@ -570,13 +583,20 @@ function ConfirmModal({
             {device.deviceId}
           </code>
         </p>
-        <p style={{ margin: "0 0 8px", fontSize: 13, color: "#444" }}>
+        <p
+          style={{
+            margin: "0 0 8px",
+            fontSize: 13,
+            color: tokens.colorNeutralForeground1,
+          }}
+        >
           This will post{" "}
           <code
             style={{
-              background: "#f3f4f6",
+              background: tokens.colorNeutralBackground3,
+              color: tokens.colorNeutralForeground1,
               padding: "1px 4px",
-              borderRadius: 3,
+              borderRadius: tokens.borderRadiusSmall,
               fontSize: 12,
             }}
           >
@@ -584,7 +604,13 @@ function ConfirmModal({
           </code>{" "}
           using your operator bearer token.
         </p>
-        <p style={{ margin: "0 0 16px", fontSize: 13, color: "#666" }}>
+        <p
+          style={{
+            margin: "0 0 16px",
+            fontSize: 13,
+            color: tokens.colorNeutralForeground2,
+          }}
+        >
           The device will be unable to check in until re-enabled via Cloud
           PKI cert revocation. This action cannot be undone in the UI.
         </p>
@@ -593,10 +619,10 @@ function ConfirmModal({
             style={{
               marginBottom: 12,
               padding: "8px 10px",
-              background: "#fef2f2",
-              border: "1px solid #fecaca",
-              color: "#991b1b",
-              borderRadius: 4,
+              background: tokens.colorPaletteRedBackground1,
+              border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+              color: tokens.colorPaletteRedForeground1,
+              borderRadius: tokens.borderRadiusMedium,
               fontSize: 12,
               whiteSpace: "pre-wrap",
             }}
@@ -609,7 +635,7 @@ function ConfirmModal({
             type="button"
             onClick={onCancel}
             disabled={busy}
-            style={secondaryBtn}
+            style={secondaryBtn()}
           >
             Cancel
           </button>
@@ -617,7 +643,7 @@ function ConfirmModal({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            style={dangerBtn}
+            style={dangerBtn()}
           >
             {busy ? "Disabling…" : "Yes, disable"}
           </button>
@@ -633,7 +659,7 @@ function EmptyState() {
       style={{
         padding: 32,
         textAlign: "center",
-        color: "#777",
+        color: tokens.colorNeutralForeground3,
         fontSize: 13,
       }}
     >
@@ -650,10 +676,10 @@ function ApiError({ error }: { error: string }) {
       style={{
         margin: 10,
         padding: "10px 12px",
-        background: "#fef2f2",
-        border: "1px solid #fecaca",
-        color: "#991b1b",
-        borderRadius: 4,
+        background: tokens.colorPaletteRedBackground1,
+        border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+        color: tokens.colorPaletteRedForeground1,
+        borderRadius: tokens.borderRadiusMedium,
         fontSize: 13,
         whiteSpace: "pre-wrap",
       }}
@@ -667,7 +693,15 @@ function ApiError({ error }: { error: string }) {
 
 function CenteredText({ text, muted }: { text: string; muted?: boolean }) {
   return (
-    <div style={{ padding: 14, color: muted ? "#777" : "#222", fontSize: 13 }}>
+    <div
+      style={{
+        padding: 14,
+        color: muted
+          ? tokens.colorNeutralForeground3
+          : tokens.colorNeutralForeground1,
+        fontSize: 13,
+      }}
+    >
       {text}
     </div>
   );
@@ -676,32 +710,38 @@ function CenteredText({ text, muted }: { text: string; muted?: boolean }) {
 // ---------------------------------------------------------------------------
 // Styles + helpers
 
-const secondaryBtn: React.CSSProperties = {
-  padding: "4px 10px",
-  fontSize: 12,
-  border: "1px solid #ccc",
-  background: "white",
-  borderRadius: 4,
-  cursor: "pointer",
-  color: "#222",
-};
+function secondaryBtn(): React.CSSProperties {
+  return {
+    padding: "4px 10px",
+    fontSize: 12,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    background: tokens.colorNeutralBackground1,
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    color: tokens.colorNeutralForeground1,
+  };
+}
 
-const dangerBtn: React.CSSProperties = {
-  padding: "4px 10px",
-  fontSize: 12,
-  border: "1px solid #fca5a5",
-  background: "#fef2f2",
-  borderRadius: 4,
-  cursor: "pointer",
-  color: "#b91c1c",
-  fontWeight: 500,
-};
+function dangerBtn(): React.CSSProperties {
+  return {
+    padding: "4px 10px",
+    fontSize: 12,
+    border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+    background: tokens.colorPaletteRedBackground1,
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    color: tokens.colorPaletteRedForeground1,
+    fontWeight: 500,
+  };
+}
 
-const disabledActionBtn: React.CSSProperties = {
-  ...secondaryBtn,
-  opacity: 0.45,
-  cursor: "not-allowed",
-};
+function disabledActionBtn(): React.CSSProperties {
+  return {
+    ...secondaryBtn(),
+    opacity: 0.45,
+    cursor: "not-allowed",
+  };
+}
 
 /**
  * Shorten long SAN URI device IDs (e.g. "device:acme/prod-server-01") to a

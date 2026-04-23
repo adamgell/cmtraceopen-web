@@ -150,6 +150,31 @@ export type SessionSummary = {
   parseState: string;
 };
 
+/**
+ * One file inside an ingested session. Mirrors `common_wire::query::FileSummary`
+ * (camelCase on the wire). One session typically bundles many files — the
+ * Files panel in API mode renders these as the step between Sessions and
+ * Entries so the operator can narrow to a specific log.
+ *
+ * Note: the server-side `FileSummary` does NOT emit `first_line_utc` /
+ * `last_line_utc` (see crates/common-wire/src/lib.rs). Those are listed as
+ * optional here for forward-compat if they're added later; the UI tolerates
+ * their absence.
+ */
+export type SessionFile = {
+  fileId: string;
+  sessionId: string;
+  relativePath: string;
+  sizeBytes: number;
+  formatDetected?: string;
+  parserKind?: string;
+  entryCount: number;
+  parseErrorCount: number;
+  /** Optional future extensions — not currently emitted by api-server. */
+  firstLineUtc?: string;
+  lastLineUtc?: string;
+};
+
 export type LogEntryDto = {
   entryId: number;
   fileId: string;

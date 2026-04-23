@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { tokens } from "@fluentui/react-components";
 import { initWasm, parse } from "../lib/wasm-bridge";
 import type { ParseResult } from "../lib/log-types";
 import { DropZone } from "./DropZone";
@@ -123,7 +124,7 @@ export function LocalMode({ onLoaded }: LocalModeProps) {
               style={{
                 marginTop: 16,
                 textAlign: "center",
-                color: "#666",
+                color: tokens.colorNeutralForeground2,
                 fontSize: 14,
               }}
             >
@@ -156,10 +157,10 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
         alignItems: "flex-start",
         gap: 12,
         padding: "10px 14px",
-        background: "#fef2f2",
-        border: "1px solid #fecaca",
-        color: "#991b1b",
-        borderRadius: 4,
+        background: tokens.colorPaletteRedBackground1,
+        border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+        color: tokens.colorPaletteRedForeground1,
+        borderRadius: tokens.borderRadiusMedium,
         whiteSpace: "pre-wrap",
       }}
     >
@@ -170,10 +171,10 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
         style={{
           padding: "4px 10px",
           fontSize: 12,
-          border: "1px solid #b91c1c",
-          background: "white",
-          color: "#b91c1c",
-          borderRadius: 4,
+          border: `1px solid ${tokens.colorPaletteRedBorderActive}`,
+          background: tokens.colorNeutralBackground1,
+          color: tokens.colorPaletteRedForeground1,
+          borderRadius: tokens.borderRadiusMedium,
           cursor: "pointer",
         }}
       >
@@ -191,7 +192,7 @@ function CenteredMessage({ text }: { text: string }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        color: "#666",
+        color: tokens.colorNeutralForeground2,
       }}
     >
       {text}

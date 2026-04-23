@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Button, tokens } from "@fluentui/react-components";
 import {
   apiBase,
   listDevices,
   listEntries,
+  listFiles,
   listSessions,
   type ListEntriesOptions,
 } from "../lib/api-client";
@@ -10,9 +12,11 @@ import type {
   DeviceSummary,
   LogEntry,
   LogEntryDto,
+  SessionFile,
   SessionSummary,
 } from "../lib/log-types";
 import { EntryList } from "./EntryList";
+import { FilesPanel } from "./FilesPanel";
 import {
   ALL_SEVERITIES,
   FilterBar,
@@ -29,9 +33,9 @@ type FetchState<T> =
   | { status: "error"; error: string };
 
 /**
- * API-mode view: three stacked panels that walk the hierarchy
+ * API-mode view: four stacked panels that walk the hierarchy
  *
- *     devices → sessions → entries
+ *     devices → sessions → files → entries
  *
  * Each panel owns its own FetchState<T>. Selecting a row in panel N resets
  * panels > N so stale selections never render against a new parent.
@@ -42,6 +46,10 @@ type FetchState<T> =
  * specialization, so fields like `filePath` get synthesized from `fileId`
  * and `format` is hardcoded to "Plain". That's fine for v1: the viewer
  * just renders line/timestamp/severity/component/thread/message columns.
+ *
+ * Theming: all colors route through `tokens.*` from @fluentui/react-components
+ * so the panel picks up dark / high-contrast / classic palettes without any
+ * per-theme branches.
  */
 export function ApiMode() {
   const [devices, setDevices] = useState<FetchState<DeviceSummary[]>>({ status: "idle" });
@@ -49,6 +57,9 @@ export function ApiMode() {
 
   const [sessions, setSessions] = useState<FetchState<SessionSummary[]>>({ status: "idle" });
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
+
+  const [files, setFiles] = useState<FetchState<SessionFile[]>>({ status: "idle" });
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
   const [entries, setEntries] = useState<FetchState<LogEntry[]>>({ status: "idle" });
 
@@ -101,11 +112,34 @@ export function ApiMode() {
     };
   }, [selectedDevice]);
 
-  // Panel 3: entries for the selected session, with server-side filter
+  // Panel 3: files for the selected session — auto-fetch as soon as the
+  // session changes so the operator sees the list without an extra click.
+  useEffect(() => {
+    if (!selectedSession) {
+      setFiles({ status: "idle" });
+      return;
+    }
+    let cancelled = false;
+    setFiles({ status: "loading" });
+    listFiles(selectedSession)
+      .then((p) => {
+        if (cancelled) return;
+        setFiles({ status: "ok", data: p.items });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setFiles({ status: "error", error: formatError(err) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSession]);
+
+  // Panel 4: entries for the selected file, with server-side filter
   // pushdown for everything the API supports. Component filter + multi-
   // severity are handled client-side.
   useEffect(() => {
-    if (!selectedSession) {
+    if (!selectedSession || !selectedFile) {
       setEntries({ status: "idle" });
       return;
     }
@@ -114,6 +148,7 @@ export function ApiMode() {
     setEntries({ status: "loading" });
     listEntries(selectedSession, {
       ...buildServerOptions(filters, debouncedSearch),
+      file: selectedFile,
       signal: controller.signal,
     })
       .then((p) => {
@@ -136,6 +171,7 @@ export function ApiMode() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     selectedSession,
+    selectedFile,
     debouncedSearch,
     filters.afterMs,
     filters.beforeMs,
@@ -147,11 +183,18 @@ export function ApiMode() {
   const handleSelectDevice = useCallback((id: string) => {
     setSelectedDevice(id);
     setSelectedSession(null); // clear cascaded selection
+    setSelectedFile(null);
     setFilters(defaultFilters()); // stale filters almost never translate
   }, []);
 
   const handleSelectSession = useCallback((id: string) => {
     setSelectedSession(id);
+    setSelectedFile(null);
+    setFilters(defaultFilters());
+  }, []);
+
+  const handleSelectFile = useCallback((id: string) => {
+    setSelectedFile(id);
     setFilters(defaultFilters());
   }, []);
 
@@ -161,10 +204,11 @@ export function ApiMode() {
         flex: 1,
         minHeight: 0,
         display: "grid",
-        // Three stacked panels: devices (compact), sessions (compact),
-        // entries (fills remaining height so EntryList's virtualizer has
-        // room to work).
-        gridTemplateRows: "minmax(120px, 1fr) minmax(120px, 1fr) 3fr",
+        // Four stacked panels: devices (compact), sessions (compact),
+        // files (compact), entries (fills remaining height so EntryList's
+        // virtualizer has room to work).
+        gridTemplateRows:
+          "minmax(120px, 1fr) minmax(120px, 1fr) minmax(120px, 1fr) 3fr",
         gap: 12,
       }}
     >
@@ -186,8 +230,19 @@ export function ApiMode() {
           <EmptyHint text="Select a device to list its sessions." />
         )}
       </Panel>
-      <Panel title={selectedSession ? `Entries — ${selectedSession}` : "Entries"} flex>
+      <Panel title={selectedSession ? `Files — ${selectedSession}` : "Files"}>
         {selectedSession ? (
+          <FilesPanel
+            state={files}
+            selected={selectedFile}
+            onSelect={handleSelectFile}
+          />
+        ) : (
+          <EmptyHint text="Select a session to list its files." />
+        )}
+      </Panel>
+      <Panel title={selectedFile ? `Entries — ${selectedFile}` : "Entries"} flex>
+        {selectedFile ? (
           <EntriesPanel
             state={entries}
             filters={filters}
@@ -195,7 +250,7 @@ export function ApiMode() {
             debouncedComponent={debouncedComponent}
           />
         ) : (
-          <EmptyHint text="Select a session to load up to 500 entries." />
+          <EmptyHint text="Select a file to load up to 500 entries." />
         )}
       </Panel>
     </div>
@@ -225,10 +280,10 @@ function Panel({
         display: "flex",
         flexDirection: "column",
         minHeight: 0,
-        border: "1px solid #ddd",
-        borderRadius: 4,
+        border: `1px solid ${tokens.colorNeutralStroke1}`,
+        borderRadius: tokens.borderRadiusMedium,
         overflow: "hidden",
-        background: "white",
+        background: tokens.colorNeutralBackground1,
       }}
     >
       <header
@@ -237,16 +292,22 @@ function Panel({
           alignItems: "center",
           gap: 8,
           padding: "6px 10px",
-          background: "#f5f5f5",
-          borderBottom: "1px solid #ddd",
+          background: tokens.colorNeutralBackground2,
+          borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
           fontSize: 12,
           fontWeight: 600,
-          color: "#333",
+          color: tokens.colorNeutralForeground1,
         }}
       >
         <span>{title}</span>
         {baseHint && (
-          <span style={{ fontWeight: 400, color: "#888", fontSize: 11 }}>
+          <span
+            style={{
+              fontWeight: 400,
+              color: tokens.colorNeutralForeground3,
+              fontSize: 11,
+            }}
+          >
             base: {apiBase || "(same-origin)"}
           </span>
         )}
@@ -428,7 +489,7 @@ function EntriesPanel({
 const EMPTY_ENTRIES: LogEntry[] = [];
 
 // ---------------------------------------------------------------------------
-// Leaf UI bits (no dependencies, inline CSS only)
+// Leaf UI bits
 
 function RowButton({
   selected,
@@ -439,10 +500,15 @@ function RowButton({
   onClick: () => void;
   children: React.ReactNode;
 }) {
+  // Fluent's Button with `appearance="subtle"` keeps full-row click targets
+  // looking like list rows (no heavy chrome) while routing color/hover
+  // states through the token palette.
   return (
-    <button
-      type="button"
+    <Button
+      appearance="subtle"
+      size="small"
       onClick={onClick}
+      aria-pressed={selected}
       style={{
         width: "100%",
         display: "flex",
@@ -450,17 +516,23 @@ function RowButton({
         alignItems: "flex-start",
         gap: 2,
         padding: "6px 10px",
-        border: "none",
-        borderBottom: "1px solid #f0f0f0",
-        background: selected ? "#eef4ff" : "transparent",
-        color: "#222",
+        borderRadius: 0,
+        borderTop: "none",
+        borderLeft: "none",
+        borderRight: "none",
+        borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
+        background: selected
+          ? tokens.colorNeutralBackground1Selected
+          : "transparent",
+        color: tokens.colorNeutralForeground1,
         fontSize: 13,
         textAlign: "left",
-        cursor: "pointer",
+        justifyContent: "flex-start",
+        minWidth: 0,
       }}
     >
       {children}
-    </button>
+    </Button>
   );
 }
 
@@ -475,10 +547,10 @@ function ApiError({ error }: { error: string }) {
       style={{
         margin: 10,
         padding: "10px 12px",
-        background: "#fef2f2",
-        border: "1px solid #fecaca",
-        color: "#991b1b",
-        borderRadius: 4,
+        background: tokens.colorNeutralBackground2,
+        border: `1px solid ${tokens.colorNeutralStroke1}`,
+        color: tokens.colorPaletteRedForeground1,
+        borderRadius: tokens.borderRadiusMedium,
         fontSize: 13,
         whiteSpace: "pre-wrap",
       }}
@@ -492,7 +564,15 @@ function ApiError({ error }: { error: string }) {
 
 function EmptyHint({ text }: { text: string }) {
   return (
-    <div style={{ padding: 12, color: "#777", fontSize: 13 }}>{text}</div>
+    <div
+      style={{
+        padding: 12,
+        color: tokens.colorNeutralForeground3,
+        fontSize: 13,
+      }}
+    >
+      {text}
+    </div>
   );
 }
 
@@ -501,7 +581,9 @@ function CenteredText({ text, muted }: { text: string; muted?: boolean }) {
     <div
       style={{
         padding: 14,
-        color: muted ? "#777" : "#222",
+        color: muted
+          ? tokens.colorNeutralForeground3
+          : tokens.colorNeutralForeground1,
         fontSize: 13,
       }}
     >
@@ -523,7 +605,7 @@ const listStyle: React.CSSProperties = {
 };
 
 const metaStyle: React.CSSProperties = {
-  color: "#777",
+  color: tokens.colorNeutralForeground2,
   fontSize: 11,
 };
 
@@ -586,8 +668,8 @@ function severityServerKey(set: Set<LogEntry["severity"]>): string {
 function buildServerOptions(
   filters: Filters,
   debouncedSearch: string,
-): Omit<ListEntriesOptions, "signal"> {
-  const opts: Omit<ListEntriesOptions, "signal"> = { limit: 500 };
+): Omit<ListEntriesOptions, "signal" | "file"> {
+  const opts: Omit<ListEntriesOptions, "signal" | "file"> = { limit: 500 };
   if (filters.severities.size === 1) {
     // Safe: size === 1 guarantees exactly one element.
     opts.severity = [...filters.severities][0]!;

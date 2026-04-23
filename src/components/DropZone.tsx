@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { tokens } from "@fluentui/react-components";
 
 export interface DropZoneProps {
   onFile: (file: File) => void;
@@ -54,11 +55,16 @@ export function DropZone({ onFile, disabled = false }: DropZoneProps) {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
       style={{
-        border: `2px dashed ${isDragOver ? "#2563eb" : "#bbb"}`,
+        border: `2px dashed ${
+          isDragOver ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke2
+        }`,
         borderRadius: 8,
         padding: 48,
         textAlign: "center",
-        background: isDragOver ? "#eff6ff" : "#fafafa",
+        background: isDragOver
+          ? tokens.colorBrandBackground2
+          : tokens.colorNeutralBackground2,
+        color: tokens.colorNeutralForeground1,
         transition: "background 120ms, border-color 120ms",
         cursor: disabled ? "not-allowed" : "default",
         opacity: disabled ? 0.6 : 1,
@@ -67,7 +73,13 @@ export function DropZone({ onFile, disabled = false }: DropZoneProps) {
       <div style={{ fontSize: 18, marginBottom: 8 }}>
         Drop a log file here
       </div>
-      <div style={{ color: "#666", fontSize: 14, marginBottom: 20 }}>
+      <div
+        style={{
+          color: tokens.colorNeutralForeground2,
+          fontSize: 14,
+          marginBottom: 20,
+        }}
+      >
         .log, .txt, .cmtlog, or anything else CMTrace-shaped
       </div>
       <button
@@ -77,10 +89,10 @@ export function DropZone({ onFile, disabled = false }: DropZoneProps) {
         style={{
           padding: "8px 20px",
           fontSize: 14,
-          border: "1px solid #2563eb",
-          background: "#2563eb",
-          color: "white",
-          borderRadius: 4,
+          border: `1px solid ${tokens.colorBrandBackground}`,
+          background: tokens.colorBrandBackground,
+          color: tokens.colorNeutralForegroundOnBrand,
+          borderRadius: tokens.borderRadiusMedium,
           cursor: disabled ? "not-allowed" : "pointer",
         }}
       >

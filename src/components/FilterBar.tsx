@@ -1,5 +1,7 @@
 import { useMemo } from "react";
+import { tokens } from "@fluentui/react-components";
 import type { Severity } from "../lib/log-types";
+import { useTheme } from "../lib/theme-context";
 
 /**
  * Shape of the viewer filter state.
@@ -55,26 +57,41 @@ export function isEmptyFilters(f: Filters): boolean {
 // ---------------------------------------------------------------------------
 // Presentation
 
-const SEVERITY_CHIP_STYLE: Record<
-  Severity,
-  { on: React.CSSProperties; off: React.CSSProperties; label: string }
-> = {
-  Info: {
-    on: { background: "#6b7280", color: "white", borderColor: "#6b7280" },
-    off: { background: "white", color: "#6b7280", borderColor: "#d1d5db" },
-    label: "Info",
-  },
-  Warning: {
-    on: { background: "#d97706", color: "white", borderColor: "#d97706" },
-    off: { background: "white", color: "#b45309", borderColor: "#fcd34d" },
-    label: "Warning",
-  },
-  Error: {
-    on: { background: "#dc2626", color: "white", borderColor: "#dc2626" },
-    off: { background: "white", color: "#b91c1c", borderColor: "#fca5a5" },
-    label: "Error",
-  },
+/**
+ * Severity chip label. Colors are driven by the active theme's severity
+ * palette via `severityChipStyle`, so dark/classic/high-contrast all pick
+ * up palette-correct chips instead of hardcoded light-mode swatches.
+ */
+const SEVERITY_CHIP_LABEL: Record<Severity, string> = {
+  Info: "Info",
+  Warning: "Warning",
+  Error: "Error",
 };
+
+function severityChipStyle(
+  severity: Severity,
+  on: boolean,
+  palette: ReturnType<typeof useTheme>["theme"]["severityPalette"],
+): React.CSSProperties {
+  const entry =
+    severity === "Error"
+      ? palette.error
+      : severity === "Warning"
+        ? palette.warning
+        : palette.info;
+  if (on) {
+    return {
+      background: entry.background,
+      color: entry.text,
+      borderColor: entry.text,
+    };
+  }
+  return {
+    background: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground2,
+    borderColor: tokens.colorNeutralStroke1,
+  };
+}
 
 export interface FilterBarProps {
   filters: Filters;
@@ -109,7 +126,17 @@ export function FilterBar({
   knownComponents,
   showTimeRange = true,
 }: FilterBarProps) {
+  const { theme } = useTheme();
+  const palette = theme.severityPalette;
   const datalistId = "cmtrace-component-list";
+  const inputStyle: React.CSSProperties = {
+    padding: "4px 8px",
+    fontSize: 12,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    borderRadius: tokens.borderRadiusMedium,
+    background: tokens.colorNeutralBackground1,
+    color: tokens.colorNeutralForeground1,
+  };
 
   const toggleSeverity = (s: Severity) => {
     const next = new Set(filters.severities);
@@ -151,9 +178,10 @@ export function FilterBar({
         alignItems: "center",
         gap: 8,
         padding: "8px 10px",
-        border: "1px solid #e5e5e5",
-        borderRadius: 4,
-        background: "#fafafa",
+        border: `1px solid ${tokens.colorNeutralStroke1}`,
+        borderRadius: tokens.borderRadiusMedium,
+        background: tokens.colorNeutralBackground2,
+        color: tokens.colorNeutralForeground1,
         fontSize: 12,
       }}
     >
@@ -161,7 +189,6 @@ export function FilterBar({
       <div style={{ display: "flex", gap: 4 }} role="group" aria-label="Severity">
         {ALL_SEVERITIES.map((s) => {
           const on = filters.severities.has(s);
-          const spec = SEVERITY_CHIP_STYLE[s];
           const style: React.CSSProperties = {
             padding: "3px 10px",
             fontSize: 12,
@@ -169,7 +196,7 @@ export function FilterBar({
             borderRadius: 999,
             cursor: "pointer",
             fontWeight: 500,
-            ...(on ? spec.on : spec.off),
+            ...severityChipStyle(s, on, palette),
           };
           return (
             <button
@@ -179,7 +206,7 @@ export function FilterBar({
               onClick={() => toggleSeverity(s)}
               style={style}
             >
-              {spec.label}
+              {SEVERITY_CHIP_LABEL[s]}
             </button>
           );
         })}
@@ -193,12 +220,9 @@ export function FilterBar({
         placeholder="Search messages…"
         aria-label="Search messages"
         style={{
+          ...inputStyle,
           flex: "1 1 180px",
           minWidth: 140,
-          padding: "4px 8px",
-          fontSize: 12,
-          border: "1px solid #ccc",
-          borderRadius: 4,
         }}
       />
 
@@ -211,12 +235,9 @@ export function FilterBar({
         aria-label="Component filter"
         list={componentOptions ? datalistId : undefined}
         style={{
+          ...inputStyle,
           flex: "0 1 140px",
           minWidth: 100,
-          padding: "4px 8px",
-          fontSize: 12,
-          border: "1px solid #ccc",
-          borderRadius: 4,
         }}
       />
       {componentOptions}
@@ -230,26 +251,16 @@ export function FilterBar({
             onChange={(e) => setAfter(e.target.value)}
             aria-label="After"
             title="After (inclusive)"
-            style={{
-              padding: "3px 6px",
-              fontSize: 12,
-              border: "1px solid #ccc",
-              borderRadius: 4,
-            }}
+            style={{ ...inputStyle, padding: "3px 6px" }}
           />
-          <span style={{ color: "#888" }}>→</span>
+          <span style={{ color: tokens.colorNeutralForeground3 }}>→</span>
           <input
             type="datetime-local"
             value={msToLocal(filters.beforeMs)}
             onChange={(e) => setBefore(e.target.value)}
             aria-label="Before"
             title="Before (exclusive)"
-            style={{
-              padding: "3px 6px",
-              fontSize: 12,
-              border: "1px solid #ccc",
-              borderRadius: 4,
-            }}
+            style={{ ...inputStyle, padding: "3px 6px" }}
           />
         </div>
       )}
@@ -262,18 +273,26 @@ export function FilterBar({
         style={{
           padding: "3px 10px",
           fontSize: 12,
-          border: "1px solid #ccc",
-          background: "white",
-          borderRadius: 4,
+          border: `1px solid ${tokens.colorNeutralStroke1}`,
+          background: tokens.colorNeutralBackground1,
+          borderRadius: tokens.borderRadiusMedium,
           cursor: isEmptyFilters(filters) ? "default" : "pointer",
-          color: isEmptyFilters(filters) ? "#bbb" : "#333",
+          color: isEmptyFilters(filters)
+            ? tokens.colorNeutralForegroundDisabled
+            : tokens.colorNeutralForeground1,
         }}
       >
         Clear
       </button>
 
       {/* Result count */}
-      <div style={{ color: "#555", marginLeft: "auto", whiteSpace: "nowrap" }}>
+      <div
+        style={{
+          color: tokens.colorNeutralForeground2,
+          marginLeft: "auto",
+          whiteSpace: "nowrap",
+        }}
+      >
         {shown === total
           ? `${total.toLocaleString()} entries`
           : `Showing ${shown.toLocaleString()} of ${total.toLocaleString()} entries`}

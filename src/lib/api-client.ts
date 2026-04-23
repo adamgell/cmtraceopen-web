@@ -23,6 +23,7 @@ import type {
   DeviceSummary,
   LogEntryDto,
   Paginated,
+  SessionFile,
   SessionSummary,
 } from "./log-types";
 
@@ -158,7 +159,21 @@ export interface ListEntriesOptions {
   beforeMs?: number;
   /** Plain substring applied to the `message` column (server-side LIKE). */
   q?: string;
+  /**
+   * Restrict entries to a single file inside the session. Corresponds to
+   * the `?file=<file_id>` query parameter on the api-server side (see
+   * crates/api-server/src/routes/entries.rs).
+   */
+  file?: string;
   /** AbortSignal so the caller can cancel in-flight requests when filters change. */
+  signal?: AbortSignal;
+}
+
+export interface ListFilesOptions {
+  /** Max files to return. Server default 200, max 500. */
+  limit?: number;
+  /** Opaque keyset cursor from a previous page's `nextCursor`. */
+  cursor?: string | null;
   signal?: AbortSignal;
 }
 
@@ -186,11 +201,34 @@ export function listEntries(
   if (opts.afterMs != null) params.set("after_ts", String(opts.afterMs));
   if (opts.beforeMs != null) params.set("before_ts", String(opts.beforeMs));
   if (opts.q && opts.q.trim() !== "") params.set("q", opts.q);
+  if (opts.file && opts.file !== "") params.set("file", opts.file);
   return getJson<Paginated<LogEntryDto>>(
     `/v1/sessions/${encodeURIComponent(sessionId)}/entries?${params.toString()}`,
     opts.signal,
   );
 }
+
+/**
+ * List files ingested as part of a session. Each session typically bundles
+ * many log files; this endpoint powers the Files step between Sessions and
+ * Entries in the API-mode viewer.
+ */
+export function listFiles(
+  sessionId: string,
+  opts: ListFilesOptions = {},
+): Promise<Paginated<SessionFile>> {
+  const params = new URLSearchParams();
+  if (opts.limit != null) params.set("limit", String(opts.limit));
+  if (opts.cursor) params.set("cursor", opts.cursor);
+  const qs = params.toString();
+  const path = `/v1/sessions/${encodeURIComponent(sessionId)}/files${qs ? `?${qs}` : ""}`;
+  return getJson<Paginated<SessionFile>>(path, opts.signal);
+}
+
+/** Alias matching the naming convention requested by the files panel. */
+export const apiListFiles = listFiles;
+/** Alias for parity with apiListFiles — some callers prefer the `api*` prefix. */
+export const apiListEntries = listEntries;
 
 /**
  * Paginated device list — supports keyset cursor from the previous page.

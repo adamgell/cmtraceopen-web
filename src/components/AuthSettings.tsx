@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMsal } from "@azure/msal-react";
+import { tokens } from "@fluentui/react-components";
 import { entraConfig } from "../lib/auth-config";
 
 const RUNBOOK_URL =
@@ -35,11 +36,11 @@ function AnonymousBanner({ missing }: { missing: string[] }) {
     <div
       style={{
         padding: "4px 10px",
-        background: "#fef3c7",
-        border: "1px solid #fcd34d",
-        borderRadius: 4,
+        background: tokens.colorPaletteYellowBackground2,
+        border: `1px solid ${tokens.colorPaletteYellowBorderActive}`,
+        borderRadius: tokens.borderRadiusMedium,
         fontSize: 12,
-        color: "#78350f",
+        color: tokens.colorPaletteDarkOrangeForeground1,
         display: "flex",
         alignItems: "center",
         gap: 8,
@@ -51,7 +52,10 @@ function AnonymousBanner({ missing }: { missing: string[] }) {
         href={RUNBOOK_URL}
         target="_blank"
         rel="noreferrer noopener"
-        style={{ color: "#78350f", textDecoration: "underline" }}
+        style={{
+          color: tokens.colorPaletteDarkOrangeForeground1,
+          textDecoration: "underline",
+        }}
       >
         runbook
       </a>
@@ -130,7 +134,7 @@ function ConfiguredAuth() {
         type="button"
         onClick={handleSignIn}
         disabled={busy}
-        style={btnStyle}
+        style={btnStyle()}
       >
         {busy ? "Signing in…" : "Sign in with Entra"}
       </button>
@@ -144,7 +148,7 @@ function ConfiguredAuth() {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        style={btnStyle}
+        style={btnStyle()}
         aria-haspopup="menu"
         aria-expanded={open}
       >
@@ -158,22 +162,24 @@ function ConfiguredAuth() {
             right: 0,
             top: "calc(100% + 4px)",
             minWidth: 280,
-            background: "white",
-            border: "1px solid #ddd",
-            borderRadius: 4,
-            boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+            background: tokens.colorNeutralBackground1,
+            border: `1px solid ${tokens.colorNeutralStroke1}`,
+            borderRadius: tokens.borderRadiusMedium,
+            boxShadow: tokens.shadow16,
             padding: 10,
             fontSize: 12,
-            color: "#333",
+            color: tokens.colorNeutralForeground1,
             zIndex: 10,
           }}
         >
           <div style={{ marginBottom: 6 }}>
-            <div style={{ color: "#888" }}>Signed in as</div>
+            <div style={{ color: tokens.colorNeutralForeground3 }}>
+              Signed in as
+            </div>
             <div style={{ fontWeight: 500 }}>{username}</div>
           </div>
           <div style={{ marginBottom: 8 }}>
-            <div style={{ color: "#888" }}>Tenant</div>
+            <div style={{ color: tokens.colorNeutralForeground3 }}>Tenant</div>
             <div style={{ fontFamily: "ui-monospace, Menlo, Consolas, monospace" }}>
               {entraConfig.status === "configured" ? entraConfig.tenantId : ""}
             </div>
@@ -183,10 +189,10 @@ function ConfiguredAuth() {
               style={{
                 marginBottom: 8,
                 padding: 6,
-                background: "#fef2f2",
-                color: "#991b1b",
-                border: "1px solid #fecaca",
-                borderRadius: 3,
+                background: tokens.colorPaletteRedBackground1,
+                color: tokens.colorPaletteRedForeground1,
+                border: `1px solid ${tokens.colorPaletteRedBorder1}`,
+                borderRadius: tokens.borderRadiusSmall,
                 whiteSpace: "pre-wrap",
               }}
             >
@@ -197,7 +203,7 @@ function ConfiguredAuth() {
             type="button"
             onClick={handleSignOut}
             disabled={busy}
-            style={{ ...btnStyle, width: "100%" }}
+            style={{ ...btnStyle(), width: "100%" }}
           >
             {busy ? "Signing out…" : "Sign out"}
           </button>
@@ -207,12 +213,14 @@ function ConfiguredAuth() {
   );
 }
 
-const btnStyle: React.CSSProperties = {
-  padding: "4px 10px",
-  fontSize: 12,
-  border: "1px solid #ccc",
-  background: "white",
-  borderRadius: 4,
-  cursor: "pointer",
-  color: "#222",
-};
+function btnStyle(): React.CSSProperties {
+  return {
+    padding: "4px 10px",
+    fontSize: 12,
+    border: `1px solid ${tokens.colorNeutralStroke1}`,
+    background: tokens.colorNeutralBackground1,
+    borderRadius: tokens.borderRadiusMedium,
+    cursor: "pointer",
+    color: tokens.colorNeutralForeground1,
+  };
+}
