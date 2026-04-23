@@ -27,6 +27,7 @@ import type { DiffDisplayMode } from "./log-view/DiffHeader";
 import type { LogEntry } from "../lib/log-types";
 import { apiListEntries } from "../lib/api-client";
 import { classifyEntries } from "../lib/diff-entries";
+import { pickLogFile, pickLogFolder } from "../lib/file-pickers";
 import { useTheme } from "../lib/theme-context";
 import {
   useWorkspace,
@@ -129,6 +130,35 @@ export function ViewerShell() {
   const updateSidebarCollapsed = useCallback((next: boolean) => {
     setSidebarCollapsed(next);
     persistSidebarCollapsed(next);
+  }, []);
+
+  // Sidebar picker actions. These feed a File into LocalMode's imperative
+  // handle. If the user is currently on a non-local tab we hop back to
+  // Local first so the ref is mounted and the loaded log is visible
+  // immediately. Cancellation resolves to null and is silent on purpose —
+  // the picker itself already showed a native dialog, no extra UI churn.
+  const openPickedFile = useCallback(async () => {
+    const file = await pickLogFile();
+    if (!file) return;
+    setMode("local");
+    // LocalMode lazy-mounts when `mode === "local"`. A single rAF tick is
+    // enough for React to flush the state update and attach the ref.
+    requestAnimationFrame(() => {
+      localRef.current?.loadFile(file);
+    });
+  }, []);
+
+  const openPickedFolder = useCallback(async () => {
+    const files = await pickLogFolder();
+    if (!files || files.length === 0) return;
+    // Today LocalMode is a single-file viewer, so we just load the first
+    // file from the folder. The narrower TODO in FileSidebar's
+    // EmptyState tracks the multi-file follow-up.
+    setMode("local");
+    requestAnimationFrame(() => {
+      const first = files[0];
+      if (first) localRef.current?.loadFile(first);
+    });
   }, []);
 
   // Per-mode action wiring. The Toolbar is mounted unconditionally so the
@@ -248,7 +278,10 @@ export function ViewerShell() {
             emptyState={{
               title: "No pinned items",
               body:
-                "Pin a session or file from Local / API mode to see it here.",
+                "Pin a session or file from Local / API mode, or pick " +
+                "one directly to view it now.",
+              onPickFile: openPickedFile,
+              onPickFolder: openPickedFolder,
             }}
           />
         )}

@@ -44,6 +44,10 @@ export interface LocalModeProps {
 export interface LocalModeHandle {
   /** Open the OS file picker. Resolves when the user picks or cancels. */
   openFile: () => void;
+  /** Parse an already-obtained File (from a sidebar picker, a drag-drop
+   *  from another pane, etc.) exactly as if the user had picked it
+   *  themselves. Safe to call in any state. */
+  loadFile: (file: File) => void;
   /** Re-parse the last loaded file. No-op when nothing is loaded. */
   reload: () => void;
   /** Drop the loaded state and go back to the initial idle screen. */
@@ -151,10 +155,17 @@ export const LocalMode = forwardRef<LocalModeHandle, LocalModeProps>(
       onLoaded?.(null);
     }, [onLoaded]);
 
+    const loadFile = useCallback(
+      (file: File) => {
+        void handleFile(file);
+      },
+      [handleFile],
+    );
+
     useImperativeHandle(
       ref,
-      () => ({ openFile, reload, clear }),
-      [openFile, reload, clear],
+      () => ({ openFile, loadFile, reload, clear }),
+      [openFile, loadFile, reload, clear],
     );
 
     const handleHiddenInputChange = useCallback(

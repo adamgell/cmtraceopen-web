@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { Badge, Tooltip, tokens } from "@fluentui/react-components";
+import { Badge, Button, Tooltip, tokens } from "@fluentui/react-components";
 
 /**
  * FileSidebar: left-nav list of open files / sources.
@@ -58,6 +58,16 @@ export interface FileSidebarProps {
   emptyState?: {
     title: string;
     body?: string;
+    /** When provided, renders a "Pick file" button below the body copy
+     *  that invokes the caller's picker. Intended as parity for the
+     *  desktop Tauri "open file" dialog — see `lib/file-pickers.ts` for
+     *  the browser-side implementation. */
+    onPickFile?: () => void;
+    /** Optional "Pick folder" button. Kept separate from `onPickFile`
+     *  because folder support depends on the browser (Chromium fully,
+     *  Firefox/Safari via `webkitdirectory`). Callers that don't want
+     *  to surface a half-working button just omit the handler. */
+    onPickFolder?: () => void;
   };
 }
 
@@ -119,6 +129,8 @@ export function FileSidebar({
               emptyState?.body ??
               "Drop a log file anywhere in the window to open it."
             }
+            onPickFile={emptyState?.onPickFile}
+            onPickFolder={emptyState?.onPickFolder}
           />
         ) : (
           items.map((item) => (
@@ -245,15 +257,40 @@ function FileRow({
 // ---------------------------------------------------------------------------
 // Empty state
 
-function EmptyState({ title, body }: { title: string; body?: string }) {
+function EmptyState({
+  title,
+  body,
+  onPickFile,
+  onPickFolder,
+}: {
+  title: string;
+  body?: string;
+  onPickFile?: () => void;
+  onPickFolder?: () => void;
+}) {
+  const hasPickers = Boolean(onPickFile || onPickFolder);
   return (
     <div style={emptyStateStyle}>
       <div style={emptyTitleStyle}>{title}</div>
       {body && <div style={emptyBodyStyle}>{body}</div>}
-      {/* TODO(web-port): desktop offers a "Pick folder" / "Pick file" button
-       * here that invokes the Tauri open() dialog. On the web, the caller
-       * should render their own picker (e.g. <DropZone>) above or below the
-       * sidebar — this component stays purely presentational. */}
+      {hasPickers && (
+        <div style={emptyActionsStyle}>
+          {onPickFile && (
+            <Button size="small" appearance="primary" onClick={onPickFile}>
+              Pick file…
+            </Button>
+          )}
+          {onPickFolder && (
+            <Button size="small" appearance="secondary" onClick={onPickFolder}>
+              Pick folder…
+            </Button>
+          )}
+        </div>
+      )}
+      {/* TODO(web-port): folder-mode ingestion is partial — `pickLogFolder`
+       * in `lib/file-pickers.ts` returns every file, but callers today
+       * only route the first one to LocalMode. Wire up a multi-file flow
+       * (e.g. enqueue into the workspace) once the viewer supports it. */}
     </div>
   );
 }
@@ -381,6 +418,14 @@ const emptyBodyStyle: CSSProperties = {
   fontSize: 12,
   color: tokens.colorNeutralForeground3,
   lineHeight: 1.45,
+};
+
+const emptyActionsStyle: CSSProperties = {
+  marginTop: 14,
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "stretch",
+  gap: 6,
 };
 
 // The sidebar stays layout-only — parents compose action controls via the
