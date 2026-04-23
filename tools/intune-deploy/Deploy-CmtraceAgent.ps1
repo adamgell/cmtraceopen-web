@@ -186,12 +186,15 @@ function Connect-Graph {
 function Get-DeviceGroup {
     Write-Section "Resolving device group '$DeviceGroupName'"
     $filter = "displayName eq '" + ($DeviceGroupName -replace "'", "''") + "'"
-    $groups = Get-MgGroup -Filter $filter -ConsistencyLevel eventual -CountVariable count -ErrorAction Stop
-    if (-not $groups -or $groups.Count -eq 0) {
+    # Force array via @(...) so .Count is always defined under StrictMode.
+    # A single Get-MgGroup result is a PSCustomObject (no Count), which
+    # throws under Set-StrictMode -Version Latest.
+    $groups = @(Get-MgGroup -Filter $filter -All -ErrorAction Stop)
+    if ($groups.Count -eq 0) {
         throw "Device group not found: $DeviceGroupName"
     }
     if ($groups.Count -gt 1) {
-        throw "Ambiguous device group name '$DeviceGroupName' — $($groups.Count) matches."
+        throw "Ambiguous device group name '$DeviceGroupName' - $($groups.Count) matches."
     }
     Write-Host "  found group id: $($groups[0].Id)" -ForegroundColor Gray
     return $groups[0]
@@ -216,14 +219,14 @@ function Test-CertProfileAssignment {
     }
 
     $certKeywords = @('SCEP', 'Pkcs', 'Certificate', 'PFX', 'CloudPki')
-    $candidates = $configs | Where-Object {
+    $candidates = @($configs | Where-Object {
         $type = $_.AdditionalProperties['@odata.type']
         if (-not $type) { return $false }
         foreach ($kw in $certKeywords) { if ($type -match $kw) { return $true } }
         return $false
-    }
+    })
 
-    if (-not $candidates -or $candidates.Count -eq 0) {
+    if ($candidates.Count -eq 0) {
         Write-Warning "No cert-profile-shaped device configurations found in the tenant."
         Write-Warning "Run docs/provisioning/03-intune-cloud-pki.md before deploying the agent."
         return
