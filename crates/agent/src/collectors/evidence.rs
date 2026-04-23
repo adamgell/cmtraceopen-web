@@ -29,8 +29,8 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use super::{
-    dsregcmd::DsRegCmdCollector, event_logs::EventLogsCollector, logs::LogsCollector, BundleMetadata,
-    Collector, CollectorManifest,
+    agent_logs::AgentLogsCollector, dsregcmd::DsRegCmdCollector, event_logs::EventLogsCollector,
+    logs::LogsCollector, BundleMetadata, Collector, CollectorManifest,
 };
 use crate::redact::Redactor;
 
@@ -50,6 +50,12 @@ pub struct EvidenceOrchestrator {
     logs: LogsCollector,
     event_logs: EventLogsCollector,
     dsregcmd: DsRegCmdCollector,
+    /// Agent self-log shipper: copies the agent's own tracing output
+    /// (written by `service.rs` into `%ProgramData%\CMTraceOpen\Agent\logs`)
+    /// into the bundle under `agent/agent-<DATE>.log`. Invisible-on-endpoint
+    /// logs are the only way operators can diagnose the agent itself today;
+    /// without this they'd need RDP / NinjaOne interactive shell per device.
+    agent_logs: AgentLogsCollector,
     /// Parent directory under which a timestamped per-run staging dir
     /// will be created. Typically `%ProgramData%\CMTraceOpen\Agent\work`
     /// in production; tempdir in tests.
@@ -64,6 +70,7 @@ impl EvidenceOrchestrator {
         logs: LogsCollector,
         event_logs: EventLogsCollector,
         dsregcmd: DsRegCmdCollector,
+        agent_logs: AgentLogsCollector,
         work_root: PathBuf,
         redactor: Redactor,
     ) -> Self {
@@ -71,6 +78,7 @@ impl EvidenceOrchestrator {
             logs,
             event_logs,
             dsregcmd,
+            agent_logs,
             work_root,
             redactor,
         }
@@ -85,13 +93,14 @@ impl EvidenceOrchestrator {
 
         // Each collector gets its own subdir for its output — but we pass
         // the bundle root so manifest paths are bundle-relative.
-        let (m_logs, m_events, m_dsreg) = tokio::join!(
+        let (m_logs, m_events, m_dsreg, m_agent_logs) = tokio::join!(
             self.logs.collect(&staging),
             self.event_logs.collect(&staging),
             self.dsregcmd.collect(&staging),
+            self.agent_logs.collect(&staging),
         );
 
-        let manifests: Vec<CollectorManifest> = [m_logs, m_events, m_dsreg]
+        let manifests: Vec<CollectorManifest> = [m_logs, m_events, m_dsreg, m_agent_logs]
             .into_iter()
             .map(|r| {
                 r.unwrap_or_else(|e| {
@@ -369,6 +378,11 @@ mod tests {
             "{}/*",
             src.path().to_string_lossy().replace('\\', "/")
         );
+        // Point the agent-logs collector at a throwaway dir with no files
+        // so the orchestrator test stays focused on the logs/zip path. The
+        // agent-logs collector itself has dedicated unit tests.
+        let empty_agent_logs = TempDir::new().unwrap();
+
         let orch = EvidenceOrchestrator::new(
             LogsCollector::new(vec![pattern]),
             // On Linux these both return NotSupported; on Windows they'll
@@ -377,6 +391,7 @@ mod tests {
             // assertions below to what we actually produced).
             EventLogsCollector::with_defaults(),
             DsRegCmdCollector::new(),
+            AgentLogsCollector::new(empty_agent_logs.path().to_path_buf()),
             work.path().to_path_buf(),
             Redactor::noop(),
         );

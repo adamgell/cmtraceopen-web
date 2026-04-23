@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub mod agent_logs;
 pub mod dsregcmd;
 pub mod event_logs;
 pub mod evidence;

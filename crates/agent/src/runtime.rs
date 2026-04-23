@@ -25,6 +25,7 @@ use tracing::{info, warn};
 
 use tokio::sync::Mutex;
 
+use crate::collectors::agent_logs::AgentLogsCollector;
 use crate::collectors::dsregcmd::DsRegCmdCollector;
 use crate::collectors::event_logs::EventLogsCollector;
 use crate::collectors::evidence::EvidenceOrchestrator;
@@ -111,6 +112,13 @@ pub async fn build_components(
         LogsCollector::new(effective.log_paths.clone()),
         EventLogsCollector::with_defaults(),
         DsRegCmdCollector::new(),
+        // Agent self-logs: ship the agent's own daily-rolling tracing output
+        // inside the evidence bundle so operators can diagnose the agent
+        // itself via the web viewer. No config knob in v1 — always on; a
+        // follow-up commit can add an opt-out or wire a dedicated
+        // tracing-JSON parser server-side (today these fall through to the
+        // generic `plain_text` / `timestamped` parser).
+        AgentLogsCollector::with_defaults(),
         work_root.clone(),
         redactor,
     );

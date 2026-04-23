@@ -14,6 +14,7 @@ use std::time::Duration;
 use api_server::router;
 use api_server::state::AppState;
 use api_server::storage::{LocalFsBlobStore, SqliteMetadataStore};
+use cmtraceopen_agent::collectors::agent_logs::AgentLogsCollector;
 use cmtraceopen_agent::collectors::dsregcmd::DsRegCmdCollector;
 use cmtraceopen_agent::collectors::event_logs::EventLogsCollector;
 use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
@@ -86,6 +87,7 @@ async fn agent_ships_bundle_to_api_server_end_to_end() {
         LogsCollector::new(vec![pattern]),
         EventLogsCollector::with_defaults(), // NotSupported on Linux
         DsRegCmdCollector::new(),            // NotSupported on Linux
+        AgentLogsCollector::new(work.path().join("_no_agent_logs")),
         work.path().to_path_buf(),
         Redactor::noop(),
     );

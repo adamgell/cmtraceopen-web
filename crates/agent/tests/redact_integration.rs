@@ -9,6 +9,7 @@
 
 #![cfg(feature = "redaction")]
 
+use cmtraceopen_agent::collectors::agent_logs::AgentLogsCollector;
 use cmtraceopen_agent::collectors::dsregcmd::DsRegCmdCollector;
 use cmtraceopen_agent::collectors::event_logs::EventLogsCollector;
 use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
@@ -161,6 +162,7 @@ async fn bundle_has_no_pii_after_redaction() {
         LogsCollector::new(vec![pattern]),
         EventLogsCollector::with_defaults(),
         DsRegCmdCollector::new(),
+        AgentLogsCollector::new(work.path().join("_no_agent_logs")),
         work.path().to_path_buf(),
         redactor,
     );
@@ -235,6 +237,7 @@ async fn bundle_manifest_json_is_not_redacted() {
         LogsCollector::new(vec![pattern]),
         EventLogsCollector::with_defaults(),
         DsRegCmdCollector::new(),
+        AgentLogsCollector::new(work.path().join("_no_agent_logs")),
         work.path().to_path_buf(),
         redactor,
     );
@@ -293,6 +296,7 @@ async fn bundle_with_disabled_redaction_preserves_pii() {
         LogsCollector::new(vec![pattern]),
         EventLogsCollector::with_defaults(),
         DsRegCmdCollector::new(),
+        AgentLogsCollector::new(work.path().join("_no_agent_logs")),
         work.path().to_path_buf(),
         redactor,
     );

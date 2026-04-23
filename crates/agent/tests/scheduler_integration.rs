@@ -10,6 +10,7 @@
 
 use std::time::Duration;
 
+use cmtraceopen_agent::collectors::agent_logs::AgentLogsCollector;
 use cmtraceopen_agent::collectors::dsregcmd::DsRegCmdCollector;
 use cmtraceopen_agent::collectors::event_logs::EventLogsCollector;
 use cmtraceopen_agent::collectors::evidence::EvidenceOrchestrator;
@@ -37,6 +38,10 @@ fn make_orchestrator(source_dir: &TempDir, work_dir: &TempDir) -> EvidenceOrches
         LogsCollector::new(vec![pattern]),
         EventLogsCollector::with_defaults(), // NotSupported on Linux — fine
         DsRegCmdCollector::new(),            // NotSupported on Linux — fine
+        // Agent-logs collector pointed at a throwaway path with no agent
+        // logs — keeps the scheduler test focused on the scheduler, not
+        // on the self-log shipping path which has its own unit tests.
+        AgentLogsCollector::new(work_dir.path().join("_no_agent_logs")),
         work_dir.path().to_path_buf(),
         Redactor::noop(),                    // PR #86 added redaction; tests use no-op
     )
