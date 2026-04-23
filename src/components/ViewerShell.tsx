@@ -7,12 +7,7 @@ import {
   MenuList,
   MenuPopover,
   MenuTrigger,
-  TabList,
-  Tab,
   tokens,
-  type SelectTabData,
-  type SelectTabEvent,
-  type TabValue,
 } from "@fluentui/react-components";
 import type { ParseResult } from "../lib/log-types";
 import { LocalMode } from "./LocalMode";
@@ -20,9 +15,19 @@ import { ApiMode } from "./ApiMode";
 import { DevicesPanel } from "./DevicesPanel";
 import { AuthSettings } from "./AuthSettings";
 import { StatusBar } from "./StatusBar";
+import { TabStrip } from "./layout/TabStrip";
+import { Toolbar } from "./layout/Toolbar";
+import { DiffView } from "./log-view/DiffView";
 import { useTheme } from "../lib/theme-context";
 
-type Mode = "local" | "api" | "devices";
+type Mode = "local" | "api" | "devices" | "diff";
+
+const MODE_TABS = [
+  { id: "local", label: "Local" },
+  { id: "api", label: "API" },
+  { id: "devices", label: "Devices" },
+  { id: "diff", label: "Diff" },
+] as const;
 
 interface LoadedSummary {
   fileName: string;
@@ -66,6 +71,15 @@ export function ViewerShell() {
         loaded={mode === "local" ? loaded : null}
         onClose={() => setLoaded(null)}
       />
+      {/* Toolbar: mode-specific actions. For now only local-mode Close
+         is wired; Open/Reload/Find etc. lift into a follow-up once the
+         mode components expose those as imperative handles. */}
+      {mode === "local" && loaded && (
+        <Toolbar
+          onClear={() => setLoaded(null)}
+          canClear={true}
+        />
+      )}
       <main
         style={{
           flex: 1,
@@ -80,6 +94,8 @@ export function ViewerShell() {
           <LocalMode onLoaded={handleLoaded} />
         ) : mode === "devices" ? (
           <DevicesPanel />
+        ) : mode === "diff" ? (
+          <DiffPlaceholder />
         ) : (
           <ApiMode />
         )}
@@ -116,10 +132,6 @@ function TopBar({
   loaded: LoadedSummary | null;
   onClose: () => void;
 }) {
-  const onTabSelect = (_e: SelectTabEvent, data: SelectTabData) => {
-    onModeChange(data.value as Mode);
-  };
-
   return (
     <header
       style={{
@@ -140,15 +152,13 @@ function TopBar({
       >
         CMTrace Open
       </div>
-      <TabList
-        selectedValue={mode as TabValue}
-        onTabSelect={onTabSelect}
-        size="small"
-      >
-        <Tab value="local">Local</Tab>
-        <Tab value="api">API</Tab>
-        <Tab value="devices">Devices</Tab>
-      </TabList>
+      <div style={{ flex: "0 1 420px", minWidth: 320 }}>
+        <TabStrip
+          tabs={MODE_TABS.map((t) => ({ id: t.id, label: t.label }))}
+          activeId={mode}
+          onActivate={(id) => onModeChange(id as Mode)}
+        />
+      </div>
       {loaded && (
         <div
           style={{
@@ -193,6 +203,57 @@ function TopBar({
         </Button>
       )}
     </header>
+  );
+}
+
+/**
+ * Diff mode placeholder.
+ *
+ * DiffView is landed as a standalone component (src/components/log-view/
+ * DiffView.tsx) but the web viewer has no multi-file workspace yet, so
+ * there's no source A / source B to feed it. When the workspace concept
+ * lands (loaded sessions can be pinned as "diff targets"), this placeholder
+ * gets replaced with a real two-session picker that hands the DiffView
+ * two { entries, label } pairs.
+ */
+function DiffPlaceholder() {
+  // Reference DiffView so the bundler keeps it imported even before the
+  // placeholder is replaced with a real integration. Once that lands the
+  // placeholder goes away entirely.
+  void DiffView;
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: tokens.colorNeutralForeground2,
+        border: `1px dashed ${tokens.colorNeutralStroke1}`,
+        borderRadius: tokens.borderRadiusMedium,
+        background: tokens.colorNeutralBackground2,
+        padding: 32,
+        textAlign: "center",
+      }}
+    >
+      <div>
+        <div
+          style={{
+            fontWeight: 600,
+            marginBottom: 4,
+            color: tokens.colorNeutralForeground1,
+          }}
+        >
+          Diff mode — coming soon
+        </div>
+        <div style={{ fontSize: tokens.fontSizeBase200 }}>
+          Pick two sessions or files to compare side-by-side once the
+          workspace pinboard ships. The underlying DiffView component is
+          already in place; this tab will swap from a placeholder to the
+          real picker when the two-source selection model lands.
+        </div>
+      </div>
+    </div>
   );
 }
 
