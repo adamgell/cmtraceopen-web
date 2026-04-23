@@ -666,6 +666,64 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// DevUnauthReads — DEV-ONLY STUB, remove before production
+// ---------------------------------------------------------------------------
+
+/// Environment variable gate for [`DevUnauthReads`]. When set to `"1"` the
+/// wrapped role gate short-circuits to a dev-bypass principal on every
+/// request. Any other value (including unset) preserves full auth.
+///
+/// TODO(prod): this is a stub for local iteration against a real api-server
+/// without operator sign-in. Before shipping to any production deploy:
+///   1. Delete [`DevUnauthReads`] and this constant.
+///   2. Revert the `list_devices` handler (and any other sites that adopted
+///      this wrapper) back to a bare `RequireRole<OperatorTag>`.
+///   3. Remove `CMTRACE_DEV_UNAUTH_READS` from docker-compose.yml and any
+///      ansible / terraform overlays.
+///   4. Add session-cookie or same-origin-silent-MSAL auth for the viewer
+///      so read endpoints don't require the caller to paste an access
+///      token by hand.
+pub const DEV_UNAUTH_READS_ENV: &str = "CMTRACE_DEV_UNAUTH_READS";
+
+/// **DEV-ONLY.** Wraps [`RequireRole`] with a kill-switch that, when
+/// `CMTRACE_DEV_UNAUTH_READS=1` is set in the process environment, bypasses
+/// the Entra bearer check and resolves to a dev-bypass principal. The
+/// server logs a warning on startup (see `main.rs`) so the bypass is never
+/// silent.
+///
+/// Intended for GET read endpoints that the web viewer hits during local
+/// development without a signed-in operator (e.g. the browser opens
+/// `/v1/devices` in a new tab to spot-check ingest). **Do NOT apply to
+/// mutating routes.**
+///
+/// TODO(prod): see [`DEV_UNAUTH_READS_ENV`] for the removal checklist.
+pub struct DevUnauthReads<R: RoleTag>(pub OperatorPrincipal, pub std::marker::PhantomData<R>);
+
+impl<S, R> FromRequestParts<S> for DevUnauthReads<R>
+where
+    S: Send + Sync,
+    R: RoleTag,
+    Arc<crate::state::AppState>: axum::extract::FromRef<S>,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        if std::env::var(DEV_UNAUTH_READS_ENV).ok().as_deref() == Some("1") {
+            debug!(
+                "auth bypassed via {} (DEV-ONLY stub — TODO(prod) remove)",
+                DEV_UNAUTH_READS_ENV
+            );
+            return Ok(DevUnauthReads(
+                OperatorPrincipal::dev_bypass(),
+                std::marker::PhantomData,
+            ));
+        }
+        let RequireRole(principal, _) = RequireRole::<R>::from_request_parts(parts, state).await?;
+        Ok(DevUnauthReads(principal, std::marker::PhantomData))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

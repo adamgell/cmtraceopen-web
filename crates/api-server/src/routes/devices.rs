@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use common_wire::{DeviceSummary, Paginated};
 
-use crate::auth::{OperatorTag, RequireRole};
+use crate::auth::{DevUnauthReads, OperatorTag};
 use crate::error::AppError;
 use crate::routes::{clamp_limit, decode_cursor, encode_cursor};
 use crate::state::AppState;
@@ -31,7 +31,11 @@ const MAX_LIMIT: u32 = 500;
 
 async fn list_devices(
     State(state): State<Arc<AppState>>,
-    _principal: RequireRole<OperatorTag>,
+    // TODO(prod): revert to `RequireRole<OperatorTag>` before production.
+    // `DevUnauthReads` is a dev stub gated on CMTRACE_DEV_UNAUTH_READS=1 so
+    // the web viewer can poke /v1/devices in the browser without operator
+    // sign-in. See crate::auth::DEV_UNAUTH_READS_ENV for the removal plan.
+    _principal: DevUnauthReads<OperatorTag>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Paginated<DeviceSummary>>, AppError> {
     let limit = clamp_limit(q.limit, DEFAULT_LIMIT, MAX_LIMIT);

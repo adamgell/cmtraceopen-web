@@ -47,6 +47,13 @@ services:
       CMTRACE_ENTRA_AUDIENCE: b2990298-7cdd-4426-b311-2df0221b6eca
       CMTRACE_ENTRA_JWKS_URI: https://login.microsoftonline.com/00c171a4-0053-4cae-ab80-0bd18db2e0fc/discovery/v2.0/keys
       CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace
+      # DEV-ONLY stub: short-circuits the operator-bearer check on GET
+      # /v1/devices so the web viewer can hit the endpoint from a plain
+      # browser tab without a signed-in operator. TODO(prod): remove this
+      # line — see crates/api-server/src/auth/mod.rs::DEV_UNAUTH_READS_ENV
+      # for the removal checklist. The api-server logs a warn-level line at
+      # startup when this is active.
+      CMTRACE_DEV_UNAUTH_READS: "1"
     volumes:
       - api-data:/data
     depends_on:

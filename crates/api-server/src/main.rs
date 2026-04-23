@@ -166,6 +166,13 @@ async fn main() -> ExitCode {
              DEV-ONLY: never deploy with this flag."
         );
     }
+    if std::env::var(api_server::auth::DEV_UNAUTH_READS_ENV).ok().as_deref() == Some("1") {
+        warn!(
+            "{}=1 — GET /v1/devices is serving UNAUTHENTICATED. \
+             DEV-ONLY stub — TODO(prod) remove before shipping.",
+            api_server::auth::DEV_UNAUTH_READS_ENV
+        );
+    }
     let jwks = match config.entra.as_ref() {
         Some(entra) => {
             let cache = Arc::new(JwksCache::new(entra.jwks_uri.clone()));
