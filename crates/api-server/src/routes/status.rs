@@ -19,8 +19,9 @@ use axum::{
     Router,
 };
 
+use crate::auth::AuthMode;
 use crate::state::{AppState, UNMATCHED_ROUTE_KEY};
-use crate::storage::{PoolStats, SessionRow};
+use crate::storage::{DeviceRow, PoolStats, SessionRow};
 
 /// Axum middleware that bumps both the per-route request counter (used by the
 /// dev status page) and the Prometheus per-route counter / latency histogram
@@ -106,7 +107,22 @@ async fn status_page(State(state): State<Arc<AppState>>) -> Response {
         .await
         .unwrap_or_default();
 
-    let body = render_html(&state, uptime, total, &routes, pool, &recent);
+    // Device roster for the summary + top-devices panel. Cap at 1000 — this
+    // is a dev dashboard, not a paginated API surface. Degrade to empty on
+    // storage errors for the same reason as `recent`.
+    const DEVICE_CAP: u32 = 1000;
+    let mut devices = state
+        .meta
+        .list_devices(DEVICE_CAP, None)
+        .await
+        .unwrap_or_default();
+    devices.sort_by(|a, b| {
+        b.session_count
+            .cmp(&a.session_count)
+            .then_with(|| b.last_seen_utc.cmp(&a.last_seen_utc))
+    });
+
+    let body = render_html(&state, uptime, total, &routes, pool, &recent, &devices);
 
     let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
@@ -223,6 +239,94 @@ fn render_recent(recent: &[SessionRow]) -> String {
     out
 }
 
+/// Render the "top devices" table (by session count). Shows up to 5 rows so
+/// the dashboard stays glanceable. Falls back to the same muted empty-state
+/// copy pattern as the other panels.
+fn render_top_devices(devices: &[DeviceRow]) -> String {
+    if devices.is_empty() {
+        return "<p class=\"muted\">No devices registered yet.</p>".to_string();
+    }
+    let mut out = String::from(
+        "<table class=\"recent\">\
+         <thead><tr>\
+         <th>device_id</th>\
+         <th>hostname</th>\
+         <th>sessions</th>\
+         <th>last_seen</th>\
+         </tr></thead><tbody>",
+    );
+    for d in devices.iter().take(5) {
+        out.push_str(&format!(
+            "<tr><td>{dev}</td><td>{host}</td><td>{count}</td><td>{ts}</td></tr>",
+            dev = esc(&d.device_id),
+            host = esc(d.hostname.as_deref().unwrap_or("—")),
+            count = d.session_count,
+            ts = esc(&d.last_seen_utc.to_rfc3339()),
+        ));
+    }
+    out.push_str("</tbody></table>");
+    out
+}
+
+/// Summarize the auth + transport-security posture. Honest "disabled" vs
+/// "enabled" strings so it's obvious at a glance if the server is running
+/// wide-open (e.g. local dev with CMTRACE_AUTH_MODE=disabled).
+fn render_auth_panel(state: &AppState) -> String {
+    let mut rows: Vec<(&str, String)> = Vec::new();
+
+    let (mode_label, mode_detail) = match state.auth.mode {
+        AuthMode::Enabled => ("enabled", state.auth.entra.is_some()),
+        AuthMode::Disabled => ("disabled", false),
+    };
+    rows.push(("Auth mode", mode_label.to_string()));
+
+    if mode_detail {
+        if let Some(entra) = &state.auth.entra {
+            rows.push(("Tenant", entra.tenant_id.clone()));
+            rows.push(("Audience", entra.audience.clone()));
+        }
+    }
+
+    rows.push((
+        "mTLS",
+        if state.mtls.require_on_ingest {
+            "required on ingest".to_string()
+        } else {
+            "disabled".to_string()
+        },
+    ));
+
+    let rl = &state.rate_limit;
+    let rl_bits = [
+        rl.device_ingest.is_some().then_some("device-ingest"),
+        rl.ip_ingest.is_some().then_some("ip-ingest"),
+        rl.ip_query.is_some().then_some("ip-query"),
+    ];
+    let rl_active: Vec<&str> = rl_bits.into_iter().flatten().collect();
+    rows.push((
+        "Rate limit",
+        if rl_active.is_empty() {
+            "disabled".to_string()
+        } else {
+            rl_active.join(", ")
+        },
+    ));
+
+    let cors = if state.cors.allowed_origins.is_empty() {
+        "(none)".to_string()
+    } else {
+        state.cors.allowed_origins.join(", ")
+    };
+    rows.push(("CORS origins", cors));
+
+    let mut out = String::from("<dl>");
+    for (k, v) in rows {
+        out.push_str(&format!("<dt>{}</dt><dd>{}</dd>", esc(k), esc(&v)));
+    }
+    out.push_str("</dl>");
+    out
+}
+
 fn render_html(
     state: &AppState,
     uptime: Duration,
@@ -230,6 +334,7 @@ fn render_html(
     routes: &[(String, u64)],
     pool: PoolStats,
     recent: &[SessionRow],
+    devices: &[DeviceRow],
 ) -> String {
     let service = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
@@ -238,6 +343,10 @@ fn render_html(
     let uptime_h = humanize(uptime);
     let routes_html = render_routes(routes);
     let recent_html = render_recent(recent);
+    let top_devices_html = render_top_devices(devices);
+    let auth_html = render_auth_panel(state);
+    let total_devices = devices.len();
+    let total_sessions: i64 = devices.iter().map(|d| d.session_count).sum();
 
     format!(
         r#"<!doctype html>
@@ -246,6 +355,7 @@ fn render_html(
 <meta charset="utf-8">
 <title>{service} status</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="10">
 <style>
   :root {{
     color-scheme: light dark;
@@ -273,7 +383,10 @@ fn render_html(
     background: var(--bg);
     color: var(--fg);
   }}
-  main {{ max-width: 760px; margin: 0 auto; }}
+  main {{ max-width: 960px; margin: 0 auto; }}
+  .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }}
+  .grid-2 > section.card {{ margin-bottom: 0; }}
+  @media (max-width: 720px) {{ .grid-2 {{ grid-template-columns: 1fr; }} }}
   h1 {{ font-size: 1.4rem; margin: 0 0 0.25rem; }}
   h1 .version {{ font-weight: 400; color: var(--muted); font-size: 0.9rem; margin-left: 0.5rem; }}
   p.subtitle {{ margin: 0 0 1.5rem; color: var(--muted); }}
@@ -331,25 +444,41 @@ fn render_html(
 <body>
 <main>
   <h1>{service}<span class="version">v{version}</span></h1>
-  <p class="subtitle">Dev-debugging status page. Not production-safe; firewall off in real deployments.</p>
+  <p class="subtitle">Dev-debugging status page. Auto-refreshes every 10s. Not production-safe; firewall off in real deployments.</p>
+
+  <div class="grid-2">
+    <section class="card">
+      <h2>Process</h2>
+      <dl>
+        <dt>Uptime</dt><dd>{uptime_h}</dd>
+        <dt>Requests served</dt><dd>{count}</dd>
+        <dt>Listen addr</dt><dd>{listen}</dd>
+        <dt>Hostname</dt><dd>{host}</dd>
+        <dt>Built with</dt><dd>{rustc}</dd>
+      </dl>
+    </section>
+
+    <section class="card">
+      <h2>Auth &amp; security</h2>
+      {auth_html}
+    </section>
+  </div>
 
   <section class="card">
-    <h2>Process</h2>
+    <h2>Storage &amp; data</h2>
     <dl>
-      <dt>Uptime</dt><dd>{uptime_h}</dd>
-      <dt>Requests served</dt><dd>{count}</dd>
-      <dt>Listen addr</dt><dd>{listen}</dd>
-      <dt>Hostname</dt><dd>{host}</dd>
-      <dt>Built with</dt><dd>{rustc}</dd>
+      <dt>DB pool</dt>
+      <dd>size: {pool_size} / idle: {pool_idle} / max: {pool_max}</dd>
+      <dt>Devices</dt>
+      <dd>{total_devices}</dd>
+      <dt>Sessions (sum)</dt>
+      <dd>{total_sessions}</dd>
     </dl>
   </section>
 
   <section class="card">
-    <h2>Storage</h2>
-    <dl>
-      <dt>SQLite pool</dt>
-      <dd>size: {pool_size} / idle: {pool_idle} / max_size: {pool_max}</dd>
-    </dl>
+    <h2>Top devices</h2>
+    {top_devices_html}
   </section>
 
   <section class="card">
@@ -362,24 +491,26 @@ fn render_html(
     {routes_html}
   </section>
 
-  <section class="card">
-    <h2>Endpoints</h2>
-    <ul class="links">
-      <li><a href="/healthz">/healthz</a></li>
-      <li><a href="/readyz">/readyz</a></li>
-      <li><a href="/v1/devices">/v1/devices</a></li>
-    </ul>
-  </section>
+  <div class="grid-2">
+    <section class="card">
+      <h2>Endpoints</h2>
+      <ul class="links">
+        <li><a href="/healthz">/healthz</a></li>
+        <li><a href="/readyz">/readyz</a></li>
+        <li><a href="/v1/devices">/v1/devices</a></li>
+      </ul>
+    </section>
 
-  <section class="card">
-    <h2>Companion tools</h2>
-    <ul class="links">
-      <li><a href="http://{host_only}:5173/">CMTrace Open viewer</a></li>
-      <li><a href="http://{host_only}:8082">Adminer (Postgres UI)</a></li>
-    </ul>
-  </section>
+    <section class="card">
+      <h2>Companion tools</h2>
+      <ul class="links">
+        <li><a href="http://{host_only}:8083/">CMTrace Open viewer</a></li>
+        <li><a href="http://{host_only}:8082/">Adminer (Postgres UI)</a></li>
+      </ul>
+    </section>
+  </div>
 
-  <footer>cmtraceopen-api &middot; v{version}</footer>
+  <footer>cmtraceopen-api &middot; v{version} &middot; rustc {rustc}</footer>
 </main>
 </body>
 </html>
@@ -397,6 +528,10 @@ fn render_html(
         pool_max = pool.max_size,
         recent_html = recent_html,
         routes_html = routes_html,
+        top_devices_html = top_devices_html,
+        auth_html = auth_html,
+        total_devices = total_devices,
+        total_sessions = total_sessions,
     )
 }
 
@@ -580,7 +715,7 @@ mod tests {
         let state = fake_state("0.0.0.0:8080").await;
         let pool = PoolStats { size: 3, idle: 2, max_size: 8 };
         let routes = vec![("/healthz".to_string(), 42)];
-        let html = render_html(&state, Duration::from_secs(65), 42, &routes, pool, &[]);
+        let html = render_html(&state, Duration::from_secs(65), 42, &routes, pool, &[], &[]);
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("api-server"));
         assert!(html.contains("1m 5s"));
@@ -588,16 +723,68 @@ mod tests {
         assert!(html.contains("0.0.0.0:8080"));
         assert!(html.contains("/healthz"));
         assert!(html.contains(":8082"));
+        // Viewer link points at the containerized viewer on :8083, not the
+        // legacy :5173 dev-server port.
+        assert!(html.contains(":8083/"));
+        assert!(!html.contains(":5173"));
+        // Auto-refresh meta tag so the dashboard stays "live" without JS.
+        assert!(html.contains("http-equiv=\"refresh\""));
         // Storage section populated with the supplied PoolStats.
-        assert!(html.contains("Storage"));
-        assert!(html.contains("SQLite pool"));
-        assert!(html.contains("size: 3 / idle: 2 / max_size: 8"));
+        assert!(html.contains("Storage &amp; data"));
+        assert!(html.contains("DB pool"));
+        assert!(html.contains("size: 3 / idle: 2 / max: 8"));
+        // Auth panel: disabled by default in the fake_state helper.
+        assert!(html.contains("Auth &amp; security"));
+        assert!(html.contains("disabled"));
+        // Top devices section renders the empty-state copy.
+        assert!(html.contains("Top devices"));
+        assert!(html.contains("No devices registered yet"));
         // Recent bundles section renders the empty-state copy.
         assert!(html.contains("Recent bundles"));
         assert!(html.contains("No bundles ingested yet"));
         // Top routes section shows the supplied route + count.
         assert!(html.contains("Top routes"));
         assert!(html.contains("<dt>/healthz</dt><dd>42</dd>"));
+    }
+
+    #[test]
+    fn render_top_devices_empty_state() {
+        assert!(render_top_devices(&[]).contains("No devices registered yet"));
+    }
+
+    #[test]
+    fn render_top_devices_renders_table_and_caps_at_five() {
+        let now = Utc::now();
+        let mk = |id: &str, count: i64| DeviceRow {
+            device_id: id.into(),
+            first_seen_utc: now,
+            last_seen_utc: now,
+            hostname: Some(format!("host-{id}")),
+            session_count: count,
+        };
+        let rows: Vec<DeviceRow> = (0..7)
+            .map(|i| mk(&format!("dev{i}"), 10 - i as i64))
+            .collect();
+        let html = render_top_devices(&rows);
+        assert!(html.contains("dev0"));
+        assert!(html.contains("dev4"));
+        // Capped at 5 rows — dev5 and dev6 must not appear.
+        assert!(!html.contains("dev5"));
+        assert!(!html.contains("dev6"));
+        assert!(html.contains("host-dev0"));
+    }
+
+    #[tokio::test]
+    async fn render_auth_panel_disabled_by_default() {
+        let state = fake_state("0.0.0.0:8080").await;
+        let html = render_auth_panel(&state);
+        assert!(html.contains("Auth mode"));
+        assert!(html.contains("disabled"));
+        assert!(html.contains("Rate limit"));
+        assert!(html.contains("CORS origins"));
+        // fake_state has no Entra config wired up; tenant/audience should
+        // not render when auth is disabled.
+        assert!(!html.contains("Tenant"));
     }
 
     #[tokio::test]
