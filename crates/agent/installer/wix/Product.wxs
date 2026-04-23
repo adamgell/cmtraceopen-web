@@ -80,15 +80,20 @@
     <Property Id="CMTRACE_PROGRAMDATA" Secure="yes" />
 
     <!--
-      Minimum OS: Windows 10 or later (VersionNT >= 1000 in the MSI property
-      table, where 1000 maps to version 10.0 / build 10240+).
-      The agent uses Windows APIs that don't exist on earlier versions.
-      Attempting to install on an unsupported OS produces a friendly error
-      rather than a runtime crash.
+      Minimum OS: Windows 8.1 / Server 2012 R2 or later.
+      Windows Installer's VersionNT property caps at 603 for backward-compat
+      (see Microsoft's AppCompat shim), so a naive `VersionNT >= 1000` check
+      always fails on real Win10/11 — the MSI would reject every target with
+      "requires Windows 10 or later" even while running on Win11. 603 is the
+      correct floor: it admits Win8.1, Win10, Win11, Server 2012 R2+, which
+      is the full set of OSes any CMTraceOpen Agent deploys against. Agents
+      on older Windows would crash at runtime anyway; the LaunchCondition
+      exists to surface that as a friendly MSI error instead of a service
+      start failure.
     -->
     <Launch
-        Condition="VersionNT &gt;= 1000"
-        Message="CMTrace Open Agent requires Windows 10 or later." />
+        Condition="VersionNT &gt;= 603"
+        Message="CMTrace Open Agent requires Windows 8.1 / Server 2012 R2 or later." />
 
     <!--
       CertCheck custom action — see design §6.
