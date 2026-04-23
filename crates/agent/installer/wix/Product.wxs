@@ -138,7 +138,7 @@
     <SetProperty
         Id="CMTRACE_PROGRAMDATA"
         Value="[CommonAppDataFolder]$(var.ProgramDataDir)"
-        Before="Wix4RemoveFoldersEx"
+        Before="Wix4RemoveFoldersEx_X64"
         Sequence="execute"
         Condition='KEEP_USER_DATA = "0" AND REMOVE = "ALL"' />
 
