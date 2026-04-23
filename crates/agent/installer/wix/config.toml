@@ -6,7 +6,11 @@
 # Base URL of the api-server. No trailing slash.
 # Override per-device with the CMTRACE_API_ENDPOINT env var if you want to
 # point one specific device at a non-prod endpoint without touching this file.
-api_endpoint = "https://cmtraceopen.corp.example.com"
+#
+# Development deploy: points at the Mac at 192.168.2.50:8080 where the
+# api-server runs via docker-compose. When the api-server moves to a real
+# hostname + TLS this flips to https://cmtraceopen.<domain>.
+api_endpoint = "http://192.168.2.50:8080"
 
 # HTTP request timeout in seconds. Applies to chunked uploads + control plane
 # calls. Bump this if you have slow-link sites; 60 is fine for typical office
