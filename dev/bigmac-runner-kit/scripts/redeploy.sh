@@ -34,6 +34,8 @@ DOCKER_SOCK="unix:///Users/Adam.Gell/.colima/default/docker.sock"
 HEALTH_URL="http://localhost:8080/healthz"
 READY_URL="http://localhost:8080/readyz"
 STATUS_URL="http://localhost:8080/"
+VIEWER_URL="http://localhost:8083/"
+VIEWER_HEALTH_URL="http://localhost:8083/viewer-healthz"
 
 # ---------------------------------------------------------------------------
 # Defaults / flags
@@ -173,13 +175,25 @@ git submodule update --init --recursive
 NEW_HEAD=\$(git rev-parse --short HEAD)
 echo "HEAD: \$OLD_HEAD -> \$NEW_HEAD"
 
+# The viewer image inlines VITE_ENTRA_* values at build time, so we need
+# to feed .env.local as a compose --env-file if it exists. Without it the
+# viewer still comes up, but in anonymous mode.
+ENV_FILE_ARG=""
+if [ -f .env.local ]; then
+  ENV_FILE_ARG="--env-file .env.local"
+  echo "--- found .env.local; passing to docker compose"
+else
+  echo "--- WARNING: .env.local missing on remote — viewer will build in anonymous mode"
+fi
+
 echo "--- docker compose down (keeping volumes)"
-docker compose down
+docker compose \$ENV_FILE_ARG down
 
 echo "--- docker compose up -d $BUILD_FLAG"
-if ! docker compose up -d $BUILD_FLAG; then
-  echo "!!! docker compose up failed — dumping api-server logs (last 30)" >&2
+if ! docker compose \$ENV_FILE_ARG up -d $BUILD_FLAG; then
+  echo "!!! docker compose up failed — dumping api-server + viewer logs (last 30)" >&2
   docker compose logs --tail=30 api-server >&2 || true
+  docker compose logs --tail=30 viewer >&2 || true
   exit 1
 fi
 
@@ -217,6 +231,12 @@ curl -sS "$READY_URL" | jq . || echo "(readyz failed or not JSON)"
 
 echo "--- status page uptime line"
 curl -sS "$STATUS_URL" 2>/dev/null | grep Uptime || true
+
+echo "--- GET $VIEWER_HEALTH_URL"
+curl -sS -o /dev/null -w "viewer-healthz: %{http_code}\n" "$VIEWER_HEALTH_URL" || echo "(viewer-healthz failed)"
+
+echo "--- GET $VIEWER_URL (status only)"
+curl -sS -o /dev/null -w "viewer /: %{http_code}\n" "$VIEWER_URL" || echo "(viewer root failed)"
 SMOKE
 )
   ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$REMOTE_HOST" "bash -s" <<<"$SMOKE_SCRIPT" || {
@@ -235,4 +255,5 @@ else
   echo "    (no summary line captured — check output above)"
 fi
 echo "    Status page: $STATUS_URL"
+echo "    Viewer:      $VIEWER_URL"
 echo "    Done."

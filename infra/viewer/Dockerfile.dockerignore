@@ -1,0 +1,46 @@
+# Per-Dockerfile ignore (BuildKit honors <dockerfile>.dockerignore before
+# falling back to root .dockerignore). The root ignore excludes /src and
+# /package.json to keep the api-server build context tight — the viewer
+# build NEEDS those, so we override here.
+
+# Build artifacts
+/target
+/pkg
+/dist
+**/node_modules
+
+# The api-server source + Dockerfile — not needed for the viewer image.
+/crates
+/migrations
+
+# Ansible deploy kit
+/dev
+
+# Tools / scripts that aren't needed in the viewer build
+/tools
+/scripts
+/tests
+/docs
+
+# VCS + editor + OS
+/.git
+/.github
+/.vscode
+/.idea
+**/.DS_Store
+Thumbs.db
+*.log
+
+# Local dev convenience + secrets
+/.claude
+/.claude-dev-shell.ps1
+/.env
+/.env.local
+/.env.local.bak
+/.env*.bak
+
+# Root-level docs
+/CHANGELOG.md
+/CONTRIBUTING.md
+/LICENSE
+/README.md

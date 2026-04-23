@@ -57,6 +57,37 @@ services:
     # and /readyz directly when the server is deployed for real.
     restart: unless-stopped
 
+  # Viewer — the React SPA, built into a static bundle and served by nginx.
+  # Reverse-proxies /v1 + /healthz to api-server so the bundle runs same-origin
+  # (no CORS preflight). Entra VITE_* values are inlined at build time; rebuild
+  # with `docker compose --env-file .env.local build viewer` if they change.
+  #
+  # Port: 8083 (8080 is api-server, 8082 is adminer; 8081 is reserved locally
+  # for an MLX model server on the primary workstation). Keeping 5173 free
+  # for `pnpm dev` when iterating on frontend code.
+  viewer:
+    image: cmtraceopen-viewer:local
+    build:
+      context: .
+      dockerfile: infra/viewer/Dockerfile
+      args:
+        # Empty default = same-origin; nginx handles /v1 + /healthz proxy.
+        VITE_CMTRACE_API_BASE: ${VITE_CMTRACE_API_BASE:-}
+        VITE_ENTRA_TENANT_ID: ${VITE_ENTRA_TENANT_ID:-}
+        VITE_ENTRA_CLIENT_ID: ${VITE_ENTRA_CLIENT_ID:-}
+        VITE_ENTRA_API_SCOPE: ${VITE_ENTRA_API_SCOPE:-}
+    ports:
+      - "8083:80"
+    depends_on:
+      - api-server
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/viewer-healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
   # Adminer — web UI for poking at the Postgres dev DB. Connect via
   # http://localhost:8082 and enter:
   #   System:   PostgreSQL
