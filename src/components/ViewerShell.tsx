@@ -19,6 +19,7 @@ import { LocalMode } from "./LocalMode";
 import { ApiMode } from "./ApiMode";
 import { DevicesPanel } from "./DevicesPanel";
 import { AuthSettings } from "./AuthSettings";
+import { StatusBar } from "./StatusBar";
 import { useTheme } from "../lib/theme-context";
 
 type Mode = "local" | "api" | "devices";
@@ -83,6 +84,23 @@ export function ViewerShell() {
           <ApiMode />
         )}
       </main>
+      <StatusBar
+        sourceLabel={mode === "local" ? loaded?.fileName : undefined}
+        totalEntries={
+          mode === "local" ? loaded?.result.entries.length : undefined
+        }
+        totalLines={mode === "local" ? loaded?.result.totalLines : undefined}
+        parseErrors={mode === "local" ? loaded?.result.parseErrors : undefined}
+        formatDetected={
+          mode === "local" && loaded
+            ? String(loaded.result.formatDetected)
+            : undefined
+        }
+        connectionState={
+          mode === "local" && loaded ? "connected" : "idle"
+        }
+        badges={<span>mode: {mode}</span>}
+      />
     </div>
   );
 }
