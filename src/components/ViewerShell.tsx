@@ -1,9 +1,25 @@
 import { useCallback, useState } from "react";
+import {
+  Button,
+  Menu,
+  MenuButton,
+  MenuItemRadio,
+  MenuList,
+  MenuPopover,
+  MenuTrigger,
+  TabList,
+  Tab,
+  tokens,
+  type SelectTabData,
+  type SelectTabEvent,
+  type TabValue,
+} from "@fluentui/react-components";
 import type { ParseResult } from "../lib/log-types";
 import { LocalMode } from "./LocalMode";
 import { ApiMode } from "./ApiMode";
 import { DevicesPanel } from "./DevicesPanel";
 import { AuthSettings } from "./AuthSettings";
+import { useTheme } from "../lib/theme-context";
 
 type Mode = "local" | "api" | "devices";
 
@@ -15,16 +31,10 @@ interface LoadedSummary {
 /**
  * Top-level viewer shell.
  *
- * Since the `api-fetch` feature landed, the shell is little more than a
- * chrome (title bar, mode toggle) that routes to one of two children:
- *
- *   - `LocalMode` — the original drag-and-drop + WASM parse flow.
- *   - `ApiMode`   — fetch device → session → entries from the api-server.
- *
- * The shell itself no longer tracks parse state; each mode owns its own
- * lifecycle. The only cross-cutting concern the shell still handles is
- * the "loaded file" summary in the top bar, and even that is just a prop
- * callback the local flow writes into — API mode doesn't use it.
+ * Hosts the title bar + mode tabs + theme picker + auth settings, and
+ * routes the main region to LocalMode / ApiMode / DevicesPanel. All
+ * colors come from the active theme's Fluent tokens, so switching
+ * themes reflows the whole UI (including the CMTrace-style log grid).
  */
 export function ViewerShell() {
   const [mode, setMode] = useState<Mode>("local");
@@ -34,8 +44,6 @@ export function ViewerShell() {
     setLoaded(info);
   }, []);
 
-  // Clear any lingering local-mode summary when switching away so the top
-  // bar doesn't advertise a file that's no longer on screen.
   const handleModeChange = useCallback((next: Mode) => {
     setMode(next);
     if (next !== "local") setLoaded(null);
@@ -47,8 +55,8 @@ export function ViewerShell() {
         display: "flex",
         flexDirection: "column",
         height: "100vh",
-        fontFamily: "system-ui, -apple-system, Segoe UI, sans-serif",
-        color: "#222",
+        background: tokens.colorNeutralBackground1,
+        color: tokens.colorNeutralForeground1,
       }}
     >
       <TopBar
@@ -67,7 +75,13 @@ export function ViewerShell() {
           gap: 12,
         }}
       >
-        {mode === "local" ? <LocalMode onLoaded={handleLoaded} /> : mode === "devices" ? <DevicesPanel /> : <ApiMode />}
+        {mode === "local" ? (
+          <LocalMode onLoaded={handleLoaded} />
+        ) : mode === "devices" ? (
+          <DevicesPanel />
+        ) : (
+          <ApiMode />
+        )}
       </main>
     </div>
   );
@@ -84,30 +98,65 @@ function TopBar({
   loaded: LoadedSummary | null;
   onClose: () => void;
 }) {
+  const onTabSelect = (_e: SelectTabEvent, data: SelectTabData) => {
+    onModeChange(data.value as Mode);
+  };
+
   return (
     <header
       style={{
         display: "flex",
         alignItems: "center",
         gap: 16,
-        padding: "10px 16px",
-        borderBottom: "1px solid #e5e5e5",
-        background: "#fafafa",
+        padding: "8px 16px",
+        borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
+        background: tokens.colorNeutralBackground2,
       }}
     >
-      <div style={{ fontWeight: 600 }}>CMTrace Open — Web</div>
-      <ModeToggle mode={mode} onChange={onModeChange} />
+      <div
+        style={{
+          fontWeight: 600,
+          fontSize: tokens.fontSizeBase400,
+          color: tokens.colorNeutralForeground1,
+        }}
+      >
+        CMTrace Open
+      </div>
+      <TabList
+        selectedValue={mode as TabValue}
+        onTabSelect={onTabSelect}
+        size="small"
+      >
+        <Tab value="local">Local</Tab>
+        <Tab value="api">API</Tab>
+        <Tab value="devices">Devices</Tab>
+      </TabList>
       {loaded && (
-        <div style={{ color: "#555", fontSize: 13 }}>
-          <span style={{ fontWeight: 500 }}>{loaded.fileName}</span>
-          <span style={{ color: "#888", marginLeft: 12 }}>
+        <div
+          style={{
+            color: tokens.colorNeutralForeground2,
+            fontSize: tokens.fontSizeBase200,
+          }}
+        >
+          <span
+            style={{
+              fontWeight: 500,
+              color: tokens.colorNeutralForeground1,
+            }}
+          >
+            {loaded.fileName}
+          </span>
+          <span style={{ color: tokens.colorNeutralForeground3, marginLeft: 12 }}>
             {loaded.result.entries.length.toLocaleString()} entries
             {" · "}
             {loaded.result.totalLines.toLocaleString()} lines
             {" · "}
             <span
               style={{
-                color: loaded.result.parseErrors > 0 ? "#b91c1c" : "#888",
+                color:
+                  loaded.result.parseErrors > 0
+                    ? tokens.colorPaletteRedForeground1
+                    : tokens.colorNeutralForeground3,
               }}
             >
               {loaded.result.parseErrors} parse errors
@@ -118,80 +167,70 @@ function TopBar({
         </div>
       )}
       <div style={{ flex: 1 }} />
+      <ThemePicker />
       <AuthSettings />
       {loaded && (
-        <button
-          type="button"
-          onClick={onClose}
-          style={{
-            padding: "6px 12px",
-            fontSize: 13,
-            border: "1px solid #ccc",
-            background: "white",
-            borderRadius: 4,
-            cursor: "pointer",
-          }}
-        >
+        <Button size="small" onClick={onClose}>
           Close file
-        </button>
+        </Button>
       )}
     </header>
   );
 }
 
-function ModeToggle({
-  mode,
-  onChange,
-}: {
-  mode: Mode;
-  onChange: (m: Mode) => void;
-}) {
-  const base: React.CSSProperties = {
-    padding: "4px 10px",
-    fontSize: 12,
-    border: "1px solid #ccc",
-    background: "white",
-    cursor: "pointer",
-  };
-  const active: React.CSSProperties = {
-    ...base,
-    background: "#111",
-    borderColor: "#111",
-    color: "white",
-  };
+function ThemePicker() {
+  const { themeId, setThemeId, allThemes, theme } = useTheme();
   return (
-    <div
-      role="tablist"
-      aria-label="Viewer mode"
-      style={{ display: "inline-flex", borderRadius: 4, overflow: "hidden" }}
-    >
-      <button
-        type="button"
-        role="tab"
-        aria-selected={mode === "local"}
-        onClick={() => onChange("local")}
-        style={mode === "local" ? active : { ...base, borderRight: "none" }}
-      >
-        Local
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={mode === "api"}
-        onClick={() => onChange("api")}
-        style={mode === "api" ? active : { ...base, borderRight: "none" }}
-      >
-        API
-      </button>
-      <button
-        type="button"
-        role="tab"
-        aria-selected={mode === "devices"}
-        onClick={() => onChange("devices")}
-        style={mode === "devices" ? active : base}
-      >
-        Devices
-      </button>
-    </div>
+    <Menu checkedValues={{ theme: [themeId] }}>
+      <MenuTrigger disableButtonEnhancement>
+        <MenuButton
+          size="small"
+          style={{ minWidth: 0 }}
+          title={`Theme: ${theme.label}`}
+        >
+          <span
+            aria-hidden
+            style={{
+              display: "inline-block",
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              background: theme.swatchColor,
+              marginRight: 6,
+              verticalAlign: "middle",
+              border: `1px solid ${tokens.colorNeutralStroke1}`,
+            }}
+          />
+          {theme.label}
+        </MenuButton>
+      </MenuTrigger>
+      <MenuPopover>
+        <MenuList>
+          {allThemes.map((t) => (
+            <MenuItemRadio
+              key={t.id}
+              name="theme"
+              value={t.id}
+              onClick={() => setThemeId(t.id)}
+            >
+              <span
+                aria-hidden
+                style={{
+                  display: "inline-block",
+                  width: 10,
+                  height: 10,
+                  borderRadius: "50%",
+                  background: t.swatchColor,
+                  marginRight: 8,
+                  verticalAlign: "middle",
+                  border: `1px solid ${tokens.colorNeutralStroke1}`,
+                }}
+              />
+              {t.label}
+            </MenuItemRadio>
+          ))}
+        </MenuList>
+      </MenuPopover>
+    </Menu>
   );
 }

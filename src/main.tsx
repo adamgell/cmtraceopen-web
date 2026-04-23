@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { MsalProvider } from "@azure/msal-react";
 import App from "./App";
 import { entraConfig } from "./lib/auth-config";
+import { ThemeProvider } from "./lib/theme-context";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {
@@ -25,12 +26,17 @@ async function bootstrap() {
     }
   }
   const root = createRoot(rootEl!);
+  // ThemeProvider wraps everything so Fluent UI's tokens + classic-cmtrace
+  // severity palette are available in both MSAL-configured and anonymous
+  // modes.
   if (entraConfig.status === "configured") {
     root.render(
       <StrictMode>
-        <MsalProvider instance={entraConfig.msalInstance}>
-          <App />
-        </MsalProvider>
+        <ThemeProvider>
+          <MsalProvider instance={entraConfig.msalInstance}>
+            <App />
+          </MsalProvider>
+        </ThemeProvider>
       </StrictMode>,
     );
   } else {
@@ -38,7 +44,9 @@ async function bootstrap() {
     // so the settings panel branches on entraConfig.status before calling it.
     root.render(
       <StrictMode>
-        <App />
+        <ThemeProvider>
+          <App />
+        </ThemeProvider>
       </StrictMode>,
     );
   }
