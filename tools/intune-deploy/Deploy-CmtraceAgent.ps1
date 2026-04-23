@@ -106,6 +106,17 @@ param(
 
     [string]$MsiFileName = 'CMTraceOpenAgent.msi',
 
+    # When set, auto-discovers previously-deployed Win32 LOB apps whose
+    # DisplayName matches -DisplayName (case-insensitive, exact) and marks
+    # the newly-created app as superseding them. Intune will then push the
+    # upgrade to devices on their next sync. Without this, two versions
+    # coexist as independent required apps and the rollout stalls.
+    [switch]$Supersede,
+
+    # Explicit supersedence list. Overrides -Supersede discovery. Pass the
+    # mobileApp ids (guids) of the apps this release replaces.
+    [string[]]$SupersedesAppIds = @(),
+
     [string]$TenantId,
 
     [string]$ClientId,
@@ -508,6 +519,81 @@ function Invoke-IntuneWinUpload {
     }
 }
 
+function Resolve-SupersededApps {
+    <#
+        Discover previously-deployed apps that this new release should replace.
+        Matches on exact DisplayName; excludes the app we just created.
+
+        Returns an array of PSCustomObjects {id, displayVersion} sorted newest
+        first so the caller can chain them (A supersedes B supersedes C).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$DisplayName,
+        [Parameter(Mandatory)] [string]$ExcludeAppId
+    )
+
+    $safe = $DisplayName -replace "'", "''"
+    $filter = "displayName eq '$safe'"
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=$([uri]::EscapeDataString($filter))"
+    $resp = Invoke-MgGraphRequest -Method GET -Uri $uri
+    $items = @()
+    if ($resp -and $resp.ContainsKey('value')) { $items = @($resp.value) }
+
+    $candidates = foreach ($a in $items) {
+        if ($a.id -eq $ExcludeAppId) { continue }
+        [pscustomobject]@{
+            id             = $a.id
+            displayVersion = ($a['displayVersion'] ?? '')
+        }
+    }
+    # Sort newest-version first; unknown versions sort last.
+    $candidates | Sort-Object -Property @{Expression = {
+        try { [version]$_.displayVersion } catch { [version]'0.0.0' }
+    }; Descending = $true }
+}
+
+function Set-AppSupersedence {
+    <#
+        Wire a 'supersedence' relationship from $AppId (the new app) to each of
+        $SupersededIds (the old apps). Uses the beta /relationships endpoint:
+          POST .../mobileApps/{newId}/relationships
+          body: { '@odata.type':'#microsoft.graph.mobileAppSupersedence',
+                  targetId: '<oldId>', supersedenceType: 'update' }
+
+        supersedenceType=update => MSI-level upgrade on the endpoint (keeps
+        user data). Use 'replace' if you want a full uninstall/reinstall cycle.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$AppId,
+        [Parameter(Mandatory)] [string[]]$SupersededIds
+    )
+
+    if (-not $SupersededIds -or $SupersededIds.Count -eq 0) {
+        Write-Host "  no apps to supersede." -ForegroundColor Gray
+        return
+    }
+
+    Write-Section "Setting supersedence ($($SupersededIds.Count) app(s))"
+    foreach ($oldId in $SupersededIds) {
+        if ($DryRun) {
+            Write-Host "  [DryRun] would POST supersedence: $AppId -> $oldId" -ForegroundColor Yellow
+            continue
+        }
+        $body = @{
+            '@odata.type'      = '#microsoft.graph.mobileAppSupersedence'
+            targetId           = $oldId
+            supersedenceType   = 'update'
+        }
+        $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/relationships"
+        try {
+            Invoke-MgGraphRequest -Method POST -Uri $uri -Body ($body | ConvertTo-Json -Depth 4) | Out-Null
+            Write-Host "  supersedes: $oldId" -ForegroundColor Green
+        } catch {
+            Write-Warning "  supersedence POST failed for $oldId : $($_.Exception.Message)"
+        }
+    }
+}
+
 function New-AppAssignment {
     param(
         [Parameter(Mandatory)] [string]$AppId,
@@ -569,6 +655,35 @@ else {
 
 $content = Invoke-IntuneWinUpload -AppId $appId -IntuneWinPath $IntuneWinPath
 
+# Supersedence must be wired BEFORE the assignment so the device-side
+# evaluator sees the update relationship on the first post-sync pass.
+# Explicit list wins over auto-discovery so an operator can override when
+# the same DisplayName has parallel branches (e.g. stable + preview).
+$supersededIds = @()
+if ($SupersedesAppIds.Count -gt 0) {
+    $supersededIds = $SupersedesAppIds
+    Write-Section "Supersedence list provided ($($supersededIds.Count) explicit target(s))"
+}
+elseif ($Supersede -and -not $DryRun) {
+    Write-Section "Auto-discovering apps named '$DisplayName' for supersedence"
+    $prev = Resolve-SupersededApps -DisplayName $DisplayName -ExcludeAppId $appId
+    if ($prev -and @($prev).Count -gt 0) {
+        $prev | ForEach-Object { Write-Host "  candidate: $($_.id) v=$($_.displayVersion)" -ForegroundColor Gray }
+        # Supersede the most recent only — Intune chains supersedence
+        # transitively (A->B->C), so devices on C get B on the next sync and
+        # A after that. Listing all three would create a noisy relationship
+        # graph that Intune sometimes rejects as "circular" when one of the
+        # older apps is itself already marked superseded.
+        $supersededIds = @(@($prev)[0].id)
+    } else {
+        Write-Host "  no prior versions found." -ForegroundColor Gray
+    }
+}
+
+if ($supersededIds.Count -gt 0) {
+    Set-AppSupersedence -AppId $appId -SupersededIds $supersededIds
+}
+
 $assignment = New-AppAssignment -AppId $appId -GroupId $group.Id
 
 Write-Section 'Summary'
@@ -580,6 +695,7 @@ $portalUrl = if ($DryRun) {
 [pscustomobject]@{
     AppId            = $appId
     DisplayName      = $DisplayName
+    Supersedes       = $supersededIds
     DeviceGroup      = $group.DisplayName
     DeviceGroupId    = $group.Id
     ContentVersionId = $content.ContentVersionId

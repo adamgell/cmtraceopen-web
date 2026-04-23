@@ -61,6 +61,8 @@ Parameters:
 | `TenantId`        | maybe    | —                      | Required for app-only auth.                                             |
 | `ClientId`        | maybe    | —                      | Required for app-only auth.                                             |
 | `ClientSecret`    | maybe    | —                      | Required for app-only auth.                                             |
+| `Supersede`       | no       | off                    | Auto-discover previous apps with the same DisplayName and wire them as superseded. |
+| `SupersedesAppIds`| no       | `@()`                  | Explicit supersedence list (mobileApp GUIDs). Overrides `-Supersede`.   |
 | `DryRun`          | no       | off                    | Validate everything; skip the create/upload/assign.                     |
 
 Required Graph scopes (for interactive auth):
@@ -72,6 +74,42 @@ Required Graph scopes (for interactive auth):
 
 For app-only auth, grant the same as **Application** permissions on the
 Entra app registration with admin consent.
+
+### Upgrades / supersedence
+
+Each MSI build generates a fresh ProductCode, and the Intune Win32 LOB
+detection rule is keyed on ProductCode, so every release becomes a new
+Intune app. Without any extra glue, the old app stays "installed" on
+devices — Intune has no way to know the new app replaces it, and the
+rollout silently stalls.
+
+`Deploy-CmtraceAgent.ps1` handles this with `-Supersede`:
+
+```powershell
+pwsh ./Deploy-CmtraceAgent.ps1 `
+    -DeviceGroupName 'Gell - All Devices' `
+    -IntuneWinPath '/tmp/.../CMTraceOpenAgent-0.1.3.intunewin' `
+    -MsiProductCode '{NEW-PRODUCT-CODE}' `
+    -Supersede
+```
+
+What it does:
+
+1. Creates the new app as usual.
+2. Queries Graph for other `mobileApps` with the same `DisplayName`.
+3. POSTs a `mobileAppSupersedence` relationship from the new app to the
+   most-recent prior version (transitive chaining from older releases is
+   preserved by Intune, so you don't need to list the whole history).
+4. Uses `supersedenceType=update` — MSI-level upgrade via the existing
+   `UpgradeCode`, keeps `%ProgramData%\CMTraceOpen\Agent\config.toml`
+   untouched. Use `replace` (hand-roll with `-SupersedesAppIds`) if you
+   want a full uninstall cycle instead.
+
+On the endpoint, each device's Intune Management Extension picks up the
+relationship on its next sync and runs the new MSI. Windows Installer
+honors the `MajorUpgrade` policy in `Product.wxs` (after-install-execute,
+no downgrade, same-version-allowed), so the service stays up through the
+swap and user data survives.
 
 ## Prereqs
 
