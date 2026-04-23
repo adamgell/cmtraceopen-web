@@ -38,7 +38,19 @@ use crate::storage::{BlobStore, MetadataStore, NewEntry, NewFile};
 pub const MAX_EVIDENCE_ZIP_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Possible terminal `parse_state` values written back to `sessions`.
+///
+/// Four-state semantic (introduced after the IisW3c classifier fix showed
+/// that real-world bundles virtually never hit zero fallbacks):
+///   - `ok`                — every file parsed cleanly, zero fallbacks.
+///   - `ok-with-fallbacks` — every file produced entries, but at least one
+///     file's parser couldn't match some lines (minor fallback noise). This
+///     is the expected steady state for real Windows logs.
+///   - `partial`           — bundle was empty OR at least one file produced
+///     zero entries (parser completely failed on a file).
+///   - `failed`            — the parse worker itself panicked / hit a fatal
+///     error before writing anything.
 const STATE_OK: &str = "ok";
+const STATE_OK_WITH_FALLBACKS: &str = "ok-with-fallbacks";
 const STATE_PARTIAL: &str = "partial";
 const STATE_FAILED: &str = "failed";
 
@@ -95,6 +107,7 @@ pub async fn parse_session(
 
     let final_state = match &outcome {
         Ok(ParseOutcome::Ok) => STATE_OK,
+        Ok(ParseOutcome::OkWithFallbacks) => STATE_OK_WITH_FALLBACKS,
         Ok(ParseOutcome::Partial) => STATE_PARTIAL,
         Err(reason) => {
             error!(%session_id, %reason, "parse failed");
@@ -124,11 +137,17 @@ pub async fn parse_session(
     }
 }
 
-/// Internal result of a successful parse. `Ok` means every file parsed
-/// without per-file errors; `Partial` means at least one file had parse
-/// errors (`parse_error_count > 0`) but at least one entry landed.
+/// Internal result of a successful parse. See the STATE_* docstring for the
+/// full four-state rubric. Short version:
+///   - `Ok`                — every file was clean (0 fallbacks, >0 entries).
+///   - `OkWithFallbacks`   — every file produced entries, but some parsers
+///     emitted fallback errors on un-matched lines. Steady state for real
+///     Windows logs (CCM fallback ratio ~0.05%, MSI 1-2%, etc.).
+///   - `Partial`           — bundle empty OR at least one file produced
+///     zero entries (parser shape-matched but emitted nothing).
 enum ParseOutcome {
     Ok,
+    OkWithFallbacks,
     Partial,
 }
 
@@ -175,10 +194,18 @@ async fn parse_evidence_zip(
         return Ok(ParseOutcome::Partial);
     }
 
-    let mut any_partial = false;
+    // Track the two error signals separately so we can distinguish "noisy
+    // but usable" (fallback errors on some lines of otherwise-parsing files)
+    // from "actually broken" (a file the parser couldn't extract anything
+    // from). See ParseOutcome variants for the mapping.
+    let mut any_file_had_fallbacks = false;
+    let mut any_file_produced_nothing = false;
     for file in parsed {
         if file.parse_error_count > 0 {
-            any_partial = true;
+            any_file_had_fallbacks = true;
+        }
+        if file.entries.is_empty() {
+            any_file_produced_nothing = true;
         }
 
         let file_id = Uuid::now_v7();
@@ -218,10 +245,26 @@ async fn parse_evidence_zip(
         );
     }
 
-    if any_partial {
-        Ok(ParseOutcome::Partial)
+    Ok(classify_outcome(
+        /* parsed_empty */ false, // already handled above via early return
+        any_file_produced_nothing,
+        any_file_had_fallbacks,
+    ))
+}
+
+/// Pure classifier for the terminal ParseOutcome, factored out so the rule
+/// table is unit-testable without spinning up a blob store.
+fn classify_outcome(
+    parsed_empty: bool,
+    any_file_produced_nothing: bool,
+    any_file_had_fallbacks: bool,
+) -> ParseOutcome {
+    if parsed_empty || any_file_produced_nothing {
+        ParseOutcome::Partial
+    } else if any_file_had_fallbacks {
+        ParseOutcome::OkWithFallbacks
     } else {
-        Ok(ParseOutcome::Ok)
+        ParseOutcome::Ok
     }
 }
 
@@ -511,4 +554,44 @@ mod tests {
         assert!(!is_log_path("photo.png"));
     }
 
+    #[test]
+    fn classify_outcome_empty_bundle_is_partial() {
+        assert!(matches!(
+            classify_outcome(true, false, false),
+            ParseOutcome::Partial
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_broken_file_is_partial() {
+        // A file that produced zero entries (parser matched nothing) still
+        // trips partial regardless of fallback state.
+        assert!(matches!(
+            classify_outcome(false, true, false),
+            ParseOutcome::Partial
+        ));
+        assert!(matches!(
+            classify_outcome(false, true, true),
+            ParseOutcome::Partial
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_fallbacks_only_is_ok_with_fallbacks() {
+        // This is the real-world steady state — CCM / Timestamped parsers
+        // emit a handful of fallback errors on un-matched lines but every
+        // file still has entries.
+        assert!(matches!(
+            classify_outcome(false, false, true),
+            ParseOutcome::OkWithFallbacks
+        ));
+    }
+
+    #[test]
+    fn classify_outcome_clean_bundle_is_ok() {
+        assert!(matches!(
+            classify_outcome(false, false, false),
+            ParseOutcome::Ok
+        ));
+    }
 }
