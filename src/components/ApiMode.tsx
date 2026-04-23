@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useState,
+} from "react";
 import { Button, tokens } from "@fluentui/react-components";
 import {
   apiBase,
@@ -33,6 +40,29 @@ type FetchState<T> =
   | { status: "error"; error: string };
 
 /**
+ * Imperative handle exposed to the parent (ViewerShell / Toolbar) so that
+ * global chrome controls can drive ApiMode without lifting its selection /
+ * fetch state out of the component.
+ *
+ * Note: ApiMode has no `openFile` action because navigation is entirely
+ * click-driven through its stacked panels (Devices → Sessions → Files →
+ * Entries) — there is no external "open" verb for the parent to invoke.
+ * FileMode exposes an `openFile`; ApiMode intentionally does not.
+ */
+export interface ApiModeHandle {
+  /** Refetch the currently-selected layer (re-queries the server).
+   *  If a file is selected: refetch entries. Else if a session is
+   *  selected: refetch files. Else if a device is selected: refetch
+   *  sessions. Else: refetch the device list. */
+  reload: () => void;
+  /** Clear the selection stack (selectedFile -> selectedSession ->
+   *  selectedDevice) back to the top. */
+  clear: () => void;
+}
+
+export type ApiModeProps = Record<string, never>;
+
+/**
  * API-mode view: four stacked panels that walk the hierarchy
  *
  *     devices → sessions → files → entries
@@ -51,7 +81,10 @@ type FetchState<T> =
  * so the panel picks up dark / high-contrast / classic palettes without any
  * per-theme branches.
  */
-export function ApiMode() {
+export const ApiMode = forwardRef<ApiModeHandle, ApiModeProps>(function ApiMode(
+  _props,
+  ref,
+) {
   const [devices, setDevices] = useState<FetchState<DeviceSummary[]>>({ status: "idle" });
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
 
@@ -62,6 +95,15 @@ export function ApiMode() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
   const [entries, setEntries] = useState<FetchState<LogEntry[]>>({ status: "idle" });
+
+  // Per-layer reload nonces: bumping one forces the matching effect below to
+  // re-run (because its dep list includes the nonce) without duplicating the
+  // fetch code. Each layer gets its own counter so `reload` only re-queries
+  // the selected layer — not the whole stack.
+  const [devicesReloadNonce, setDevicesReloadNonce] = useState(0);
+  const [sessionsReloadNonce, setSessionsReloadNonce] = useState(0);
+  const [filesReloadNonce, setFilesReloadNonce] = useState(0);
+  const [entriesReloadNonce, setEntriesReloadNonce] = useState(0);
 
   // Filter state is owned here so we can both (a) push a subset to the
   // server and (b) finish the rest client-side before handing to EntryList.
@@ -88,7 +130,7 @@ export function ApiMode() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [devicesReloadNonce]);
 
   // Panel 2: sessions for the selected device.
   useEffect(() => {
@@ -110,7 +152,7 @@ export function ApiMode() {
     return () => {
       cancelled = true;
     };
-  }, [selectedDevice]);
+  }, [selectedDevice, sessionsReloadNonce]);
 
   // Panel 3: files for the selected session — auto-fetch as soon as the
   // session changes so the operator sees the list without an extra click.
@@ -133,7 +175,7 @@ export function ApiMode() {
     return () => {
       cancelled = true;
     };
-  }, [selectedSession]);
+  }, [selectedSession, filesReloadNonce]);
 
   // Panel 4: entries for the selected file, with server-side filter
   // pushdown for everything the API supports. Component filter + multi-
@@ -178,7 +220,46 @@ export function ApiMode() {
     // Only the "exactly one selected" case changes the server query — pack
     // the severity set into a stable key so we don't over-refetch.
     severityServerKey(filters.severities),
+    entriesReloadNonce,
   ]);
+
+  // Expose reload/clear to the parent. `reload` walks the selection stack
+  // top-down and bumps the nonce for the deepest layer that is actually
+  // populated, which re-triggers the matching useEffect above (which already
+  // calls the right `listDevices` / `listSessions` / `listFiles` /
+  // `listEntries` helper). We also reset that layer's FetchState out of the
+  // "error" branch so an error-retry style reload starts from a clean
+  // loading state rather than flashing the stale error.
+  useImperativeHandle(
+    ref,
+    () => ({
+      reload: () => {
+        if (selectedFile) {
+          setEntries((s) => (s.status === "error" ? { status: "idle" } : s));
+          setEntriesReloadNonce((n) => n + 1);
+        } else if (selectedSession) {
+          setFiles((s) => (s.status === "error" ? { status: "idle" } : s));
+          setFilesReloadNonce((n) => n + 1);
+        } else if (selectedDevice) {
+          setSessions((s) => (s.status === "error" ? { status: "idle" } : s));
+          setSessionsReloadNonce((n) => n + 1);
+        } else {
+          setDevices((s) => (s.status === "error" ? { status: "idle" } : s));
+          setDevicesReloadNonce((n) => n + 1);
+        }
+      },
+      clear: () => {
+        // Drop selections top-down. The cascading reset effects already null
+        // out any dependent fetch state when a parent selection clears, so
+        // nulling the deepest selection first keeps each effect's cleanup
+        // path consistent with what a user click would produce.
+        setSelectedFile(null);
+        setSelectedSession(null);
+        setSelectedDevice(null);
+      },
+    }),
+    [selectedDevice, selectedSession, selectedFile],
+  );
 
   const handleSelectDevice = useCallback((id: string) => {
     setSelectedDevice(id);
@@ -255,7 +336,7 @@ export function ApiMode() {
       </Panel>
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // Panels
