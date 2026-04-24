@@ -9,6 +9,7 @@ import { DeviceRail } from "../rail/DeviceRail";
 import { MiddlePane } from "../middle/MiddlePane";
 import { LogViewer } from "../right/LogViewer";
 import { Banner } from "./Banner";
+import { KqlBar } from "./KqlBar";
 
 export function CommandBridge() {
   return (
@@ -32,10 +33,12 @@ function BridgeInner() {
         fontFamily: theme.font.ui,
       }}
     >
-      <div data-testid="kql-bar" style={{ padding: "0.5rem 0.75rem", borderBottom: `1px solid ${theme.border}` }}>
-        <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.72rem" }}>
-          KQL bar placeholder
-        </span>
+      {/* Wrap KqlBar in a testid'd div so the existing CommandBridge test
+          continues to find the kql-bar region without coupling KqlBar to the
+          test. onRun is a console.log placeholder — Task 14 wires the real
+          executor. */}
+      <div data-testid="kql-bar">
+        <KqlBar onRun={(q) => { /* wired in Task 14 */ console.log("run", q); }} />
       </div>
       {/* Banner reflects the rail's selected device. Real device data flows in
           later when the rail knows which device is selected (Task 6+). */}
