@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { MsalProvider } from "@azure/msal-react";
 import App from "./App";
+import { CommandBridge } from "./components/shell/CommandBridge";
 import { entraConfig } from "./lib/auth-config";
 import { ThemeProvider } from "./lib/theme-context";
 import { WorkspaceProvider } from "./lib/workspace-context";
@@ -10,6 +11,12 @@ const rootEl = document.getElementById("root");
 if (!rootEl) {
   throw new Error("#root element not found");
 }
+
+// `?v=next` opts into the command-bridge shell (Task 3 of 19). Default stays
+// on the legacy <ViewerShell /> until Task 18 cutover. Read once at module
+// scope — no router dependency, and we don't need per-render re-reads.
+const useNextShell =
+  new URLSearchParams(window.location.search).get("v") === "next";
 
 // MSAL needs `initialize()` to resolve before any token APIs are called.
 // In anonymous mode there's no instance, so we render immediately.
@@ -36,7 +43,7 @@ async function bootstrap() {
         <ThemeProvider>
           <WorkspaceProvider>
             <MsalProvider instance={entraConfig.msalInstance}>
-              <App />
+              {useNextShell ? <CommandBridge /> : <App />}
             </MsalProvider>
           </WorkspaceProvider>
         </ThemeProvider>
@@ -49,7 +56,7 @@ async function bootstrap() {
       <StrictMode>
         <ThemeProvider>
           <WorkspaceProvider>
-            <App />
+            {useNextShell ? <CommandBridge /> : <App />}
           </WorkspaceProvider>
         </ThemeProvider>
       </StrictMode>,
