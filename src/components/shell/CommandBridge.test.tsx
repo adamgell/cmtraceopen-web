@@ -2,14 +2,15 @@ import { describe, it, expect, vi } from "vitest";
 import { act, render, screen, within } from "@testing-library/react";
 import { CommandBridge } from "./CommandBridge";
 
-// CommandBridge mounts DeviceRail, which calls listDevices() on mount. These
-// tests assert on the static shell layout only — stub the client so the fetch
-// resolves to an empty list. Each test awaits one microtask tick inside act()
-// so React can flush the settled state update before we assert, avoiding the
-// `not wrapped in act(...)` warning.
+// CommandBridge mounts DeviceRail + MiddlePane, which call listDevices,
+// listSessions, and listFiles. These tests assert on the static shell layout
+// only — stub the client so the fetches resolve to an empty list. Each test
+// awaits one microtask tick inside act() so React can flush the settled state
+// update before we assert, avoiding the `not wrapped in act(...)` warning.
 vi.mock("../../lib/api-client", () => ({
   listDevices: async () => ({ items: [], nextCursor: null }),
   listSessions: async () => ({ items: [], nextCursor: null }),
+  listFiles: async () => ({ items: [], nextCursor: null }),
 }));
 
 async function flush() {

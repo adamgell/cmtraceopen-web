@@ -6,6 +6,7 @@
 import { BridgeStateProvider, useBridgeState } from "../../lib/bridge-state";
 import { theme } from "../../lib/theme";
 import { DeviceRail } from "../rail/DeviceRail";
+import { MiddlePane } from "../middle/MiddlePane";
 import { Banner } from "./Banner";
 
 export function CommandBridge() {
@@ -42,8 +43,8 @@ function BridgeInner() {
         <div data-testid="rail" style={{ borderRight: `1px solid ${theme.border}`, overflow: "hidden" }}>
           <DeviceRail />
         </div>
-        <div data-testid="middle-pane" style={{ borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>
-          <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.6rem", padding: "0.5rem", display: "block" }}>middle</span>
+        <div data-testid="middle-pane" style={{ borderRight: `1px solid ${theme.border}`, overflow: "hidden" }}>
+          <MiddlePane />
         </div>
         <div data-testid="right-pane" style={{ display: "grid", gridTemplateRows: "1fr auto", minHeight: 0 }}>
           <div style={{ overflow: "auto", padding: "0.5rem", fontFamily: theme.font.mono, color: theme.textDim, fontSize: "0.7rem" }}>
