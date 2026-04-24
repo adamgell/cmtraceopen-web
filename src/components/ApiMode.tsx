@@ -15,10 +15,10 @@ import {
   listSessions,
   type ListEntriesOptions,
 } from "../lib/api-client";
+import { dtoToEntry } from "../lib/dto-to-entry";
 import type {
   DeviceSummary,
   LogEntry,
-  LogEntryDto,
   SessionFile,
   SessionSummary,
 } from "../lib/log-types";
@@ -870,38 +870,4 @@ function buildServerOptions(
   return opts;
 }
 
-/**
- * Map the server `LogEntryDto` to the WASM parser's `LogEntry` shape so
- * `EntryList` can render both without branching. Fields absent on the
- * server side (format, specialization, error-code spans) are filled with
- * conservative defaults — the list UI only consumes the common columns.
- */
-function dtoToEntry(dto: LogEntryDto): LogEntry {
-  const timestamp = dto.tsMs;
-  const timestampDisplay =
-    typeof timestamp === "number"
-      ? new Date(timestamp).toISOString().replace("T", " ").replace(/\.\d+Z$/, "")
-      : undefined;
-  // `thread` is a string on the wire but a number on the LogEntry side;
-  // preserve the original via threadDisplay so we don't lose info like
-  // "tid-42" or hex ids the server may emit.
-  const threadNum =
-    typeof dto.thread === "string" && /^\d+$/.test(dto.thread)
-      ? Number(dto.thread)
-      : undefined;
-  return {
-    id: dto.entryId,
-    lineNumber: dto.lineNumber,
-    message: dto.message,
-    component: dto.component,
-    timestamp,
-    timestampDisplay,
-    severity: dto.severity,
-    thread: threadNum,
-    threadDisplay: dto.thread,
-    sourceFile: undefined,
-    format: "Plain",
-    filePath: dto.fileId,
-    timezoneOffset: undefined,
-  };
-}
+// dtoToEntry moved to ../lib/dto-to-entry.ts so DeviceLogViewer can reuse it.

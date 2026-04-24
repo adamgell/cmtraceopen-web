@@ -11,6 +11,7 @@ import {
   listFiles as apiListFiles,
   listEntries as apiListEntries,
 } from "../lib/api-client";
+import { dtoToEntry } from "../lib/dto-to-entry";
 import type {
   DeviceSummary,
   LogEntry,
@@ -170,7 +171,11 @@ export function DeviceLogViewer({ device, onClose }: DeviceLogViewerProps) {
         if (!alive) return;
         setEntriesState({
           status: "ok",
-          entries: page.items as unknown as LogEntry[],
+          // Map DTO → LogEntry so `timestampDisplay` is populated and the
+          // TIMESTAMP column renders. A raw cast loses every field the
+          // server doesn't spell the same way (tsMs → timestamp/Display,
+          // thread as string → thread number + threadDisplay).
+          entries: page.items.map(dtoToEntry),
           truncated: page.nextCursor != null,
         });
       })
