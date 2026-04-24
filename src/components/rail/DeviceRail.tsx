@@ -26,6 +26,7 @@ import { useBridgeState } from "../../lib/bridge-state";
 import { deriveHealth } from "../../lib/health-dot";
 import { theme, type PillState } from "../../lib/theme";
 import { DeviceRow, type RailDevice } from "./DeviceRow";
+import { SavedViews } from "./SavedViews";
 
 interface FetchState {
   status: "loading" | "ok" | "error";
@@ -179,6 +180,10 @@ export function DeviceRail() {
           />
         ))}
       </div>
+      <SavedViews
+        expanded={state.railExpanded}
+        onRun={(q) => dispatch({ type: "set-fleet-query", query: q })}
+      />
     </div>
   );
 }
