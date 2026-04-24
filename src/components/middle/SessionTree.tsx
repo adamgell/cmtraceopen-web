@@ -15,7 +15,7 @@
 //
 // Filter input scopes across all expanded sessions' files by substring.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listFiles, listSessions } from "../../lib/api-client";
 import type { SessionFile, SessionSummary } from "../../lib/log-types";
 import { useBridgeState } from "../../lib/bridge-state";
@@ -49,9 +49,10 @@ export function SessionTree({ deviceId }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filesBySession, setFilesBySession] = useState<Record<string, SessionFile[]>>({});
   const [filter, setFilter] = useState("");
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
-    let cancelled = false;
+    cancelledRef.current = false;
     setLoading(true);
     setError(null);
     setSessions([]);
@@ -61,32 +62,42 @@ export function SessionTree({ deviceId }: Props) {
     (async () => {
       try {
         const page = await listSessions(deviceId);
-        if (!cancelled) setSessions(page.items);
+        if (!cancelledRef.current) setSessions(page.items);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelledRef.current) setError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelledRef.current) setLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    return () => { cancelledRef.current = true; };
   }, [deviceId]);
 
   async function toggleSession(sessionId: string) {
-    const next = new Set(expanded);
-    if (next.has(sessionId)) {
-      next.delete(sessionId);
-      setExpanded(next);
-      return;
-    }
-    next.add(sessionId);
-    setExpanded(next);
-    if (!filesBySession[sessionId]) {
-      try {
-        const page = await listFiles(sessionId);
-        setFilesBySession((prev) => ({ ...prev, [sessionId]: page.items }));
-      } catch {
-        setFilesBySession((prev) => ({ ...prev, [sessionId]: [] }));
-      }
+    // Decide synchronously from the current render whether this click expands
+    // or collapses, then commit via a functional setState so two clicks on
+    // different rows can't clobber each other's expansion sets.
+    const willExpand = !expanded.has(sessionId);
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+    if (!willExpand) return;
+    // Only fetch if we haven't already cached the files for this session.
+    // Read filesBySession via a functional updater below so two concurrent
+    // toggles don't clobber each other's entries.
+    try {
+      const page = await listFiles(sessionId);
+      if (cancelledRef.current) return;
+      setFilesBySession((prev) =>
+        prev[sessionId] ? prev : { ...prev, [sessionId]: page.items }
+      );
+    } catch {
+      if (cancelledRef.current) return;
+      setFilesBySession((prev) =>
+        prev[sessionId] ? prev : { ...prev, [sessionId]: [] }
+      );
     }
   }
 
