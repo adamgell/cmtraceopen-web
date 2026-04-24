@@ -605,6 +605,36 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn count_sessions_by_state(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        // Simple `GROUP BY parse_state`. Sort-by-count DESC so the dev
+        // status page can render the busiest state first without
+        // re-sorting in Rust. Parse_state is `TEXT`, so even future states
+        // (e.g. `timeout`) surface here automatically — the renderer maps
+        // unknown states to a neutral pill rather than crashing.
+        let rows = sqlx::query(
+            r#"
+            SELECT parse_state, COUNT(*) AS c
+            FROM sessions
+            GROUP BY parse_state
+            ORDER BY c DESC, parse_state ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let state: String = r.get::<String, _>("parse_state");
+            // SQLite's COUNT(*) is a signed 64-bit integer; sessions is
+            // non-negative so the saturating cast is a no-op in practice
+            // but keeps us honest if a test ever inserts a hand-rolled
+            // negative value via raw SQL.
+            let count: i64 = r.get::<i64, _>("c");
+            out.push((state, count.max(0) as u64));
+        }
+        Ok(out)
+    }
+
     async fn insert_file(&self, new: NewFile) -> Result<Uuid, StorageError> {
         sqlx::query(
             r#"

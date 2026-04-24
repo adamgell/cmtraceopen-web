@@ -924,6 +924,22 @@ pub trait MetadataStore: Send + Sync + 'static {
     /// specific device id up front. Returns up to `limit` rows.
     async fn recent_sessions(&self, limit: u32) -> Result<Vec<SessionRow>, StorageError>;
 
+    /// Aggregate count of sessions grouped by `parse_state`, ordered by
+    /// count DESC. Used by the dev status page (`GET /`) to surface a
+    /// "parse-state distribution" card spanning **all** sessions (not just
+    /// the recent-N window). Returns `(state, count)` tuples — the state
+    /// column is `TEXT` so callers must handle arbitrary strings, including
+    /// future states the renderer hasn't mapped yet.
+    ///
+    /// Default impl returns an empty vec so backends without a dedicated
+    /// grouped-count query (mocks, future in-memory stores, the current
+    /// Postgres impl which has no migration for this yet) don't have to
+    /// scramble. The status page renders the empty case as a muted
+    /// placeholder, mirroring how `recent_sessions` is treated.
+    async fn count_sessions_by_state(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        Ok(Vec::new())
+    }
+
     /// Flip `sessions.parse_state` to `ok` / `partial` / `failed` after the
     /// background parse worker finishes. Any other value is accepted
     /// verbatim so callers can add granular states later (e.g. `timeout`)

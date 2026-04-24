@@ -42,7 +42,7 @@ pub const MAX_EVIDENCE_ZIP_BYTES: u64 = 50 * 1024 * 1024;
 /// Four-state semantic (introduced after the IisW3c classifier fix showed
 /// that real-world bundles virtually never hit zero fallbacks):
 ///   - `ok`                — every file parsed cleanly, zero fallbacks.
-/// ///   - `ok-with-fallbacks` — every file either parsed cleanly or was empty,
+///   - `ok-with-fallbacks` — every file either parsed cleanly or was empty,
 ///     BUT at least one file's parser emitted fallback errors on some lines
 ///     (minor noise). This is the expected steady state for real Windows
 ///     logs.

@@ -21,7 +21,7 @@ use axum::{
 
 use crate::auth::AuthMode;
 use crate::state::{AppState, UNMATCHED_ROUTE_KEY};
-use crate::storage::{DeviceRow, PoolStats, SessionRow};
+use crate::storage::{DeviceRow, MetadataStore, PoolStats, SessionRow};
 
 /// Axum middleware that bumps both the per-route request counter (used by the
 /// dev status page) and the Prometheus per-route counter / latency histogram
@@ -107,6 +107,13 @@ async fn status_page(State(state): State<Arc<AppState>>) -> Response {
         .await
         .unwrap_or_default();
 
+    // Parse-state distribution across ALL sessions (not just recent N).
+    // Backends without a real impl (PG today) return an empty vec via the
+    // trait default; the renderer handles that as a muted placeholder so
+    // the card still appears with an honest "no data" message rather than
+    // being silently omitted.
+    let state_dist = fetch_state_distribution(&state.meta).await;
+
     // Device roster for the summary + top-devices panel. Cap at 1000 — this
     // is a dev dashboard, not a paginated API surface. Degrade to empty on
     // storage errors for the same reason as `recent`.
@@ -122,7 +129,9 @@ async fn status_page(State(state): State<Arc<AppState>>) -> Response {
             .then_with(|| b.last_seen_utc.cmp(&a.last_seen_utc))
     });
 
-    let body = render_html(&state, uptime, total, &routes, pool, &recent, &devices);
+    let body = render_html(
+        &state, uptime, total, &routes, pool, &recent, &devices, &state_dist,
+    );
 
     let mut resp = (StatusCode::OK, body).into_response();
     resp.headers_mut().insert(
@@ -204,6 +213,34 @@ fn render_routes(routes: &[(String, u64)]) -> String {
     out
 }
 
+/// Map a `parse_state` value to the CSS class suffix used on the
+/// `.state-<slug>` pill. Keep this list closed: any future state the
+/// parser starts emitting (e.g. `timeout`) falls through to `unknown` and
+/// picks up the neutral styling rather than crashing the renderer or
+/// inheriting the wrong color. See `STATE_OK` et al in
+/// `pipeline::parse_worker` for the canonical emitter side.
+fn state_slug(state: &str) -> &'static str {
+    match state {
+        "ok" => "ok",
+        "ok-with-fallbacks" => "ok-fallbacks",
+        "partial" => "partial",
+        "failed" => "failed",
+        "pending" => "pending",
+        _ => "unknown",
+    }
+}
+
+/// Render a parse_state value wrapped in a color-coded pill span. Shared
+/// between the Recent-bundles table and the Parse-state-distribution
+/// card so the colors line up visually.
+fn render_state_pill(state: &str) -> String {
+    format!(
+        "<span class=\"state state-{slug}\">{label}</span>",
+        slug = state_slug(state),
+        label = esc(state),
+    )
+}
+
 /// Render the recent-bundles table. Empty state surfaces a friendly note so
 /// fresh deployments don't show a blank panel.
 fn render_recent(recent: &[SessionRow]) -> String {
@@ -228,7 +265,7 @@ fn render_recent(recent: &[SessionRow]) -> String {
             "<tr><td>{dev}</td><td>{short}…</td><td>{state}</td><td>{ts}</td></tr>",
             dev = esc(&s.device_id),
             short = esc(short),
-            state = esc(&s.parse_state),
+            state = render_state_pill(&s.parse_state),
             // RFC 3339 always renders as ASCII so esc is overkill, but keep
             // it for symmetry with the other cells in case the formatter
             // ever changes.
@@ -236,6 +273,34 @@ fn render_recent(recent: &[SessionRow]) -> String {
         ));
     }
     out.push_str("</tbody></table>");
+    out
+}
+
+/// Best-effort pull of the per-state session count. Returns an empty vec on
+/// any storage error so the dev status page keeps rendering even if the
+/// metadata store is flaky — matches how `recent_sessions` is handled in
+/// the parent handler.
+async fn fetch_state_distribution(meta: &Arc<dyn MetadataStore>) -> Vec<(String, u64)> {
+    meta.count_sessions_by_state().await.unwrap_or_default()
+}
+
+/// Render the parse-state distribution strip as a `<ul class="pill-list">`
+/// so the counts render inline and wrap gracefully on narrow viewports.
+/// Each item uses the same pill styling as the Recent-bundles table cell
+/// so the colors line up visually between the two cards.
+fn render_state_distribution(dist: &[(String, u64)]) -> String {
+    if dist.is_empty() {
+        return "<p class=\"muted\">No sessions yet.</p>".to_string();
+    }
+    let mut out = String::from("<ul class=\"pill-list\">");
+    for (state, count) in dist {
+        out.push_str(&format!(
+            "<li>{pill} <span class=\"pill-count\">{count}</span></li>",
+            pill = render_state_pill(state),
+            count = count,
+        ));
+    }
+    out.push_str("</ul>");
     out
 }
 
@@ -327,6 +392,11 @@ fn render_auth_panel(state: &AppState) -> String {
     out
 }
 
+// This helper wires together every dashboard section with its rendered
+// fragment; the flat parameter list keeps each section composable and
+// testable in isolation. Hiding these behind a struct just for the sake
+// of the lint would obscure the call site without adding real cohesion.
+#[allow(clippy::too_many_arguments)]
 fn render_html(
     state: &AppState,
     uptime: Duration,
@@ -335,6 +405,7 @@ fn render_html(
     pool: PoolStats,
     recent: &[SessionRow],
     devices: &[DeviceRow],
+    state_dist: &[(String, u64)],
 ) -> String {
     let service = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
@@ -344,6 +415,7 @@ fn render_html(
     let routes_html = render_routes(routes);
     let recent_html = render_recent(recent);
     let top_devices_html = render_top_devices(devices);
+    let state_dist_html = render_state_distribution(state_dist);
     let auth_html = render_auth_panel(state);
     let total_devices = devices.len();
     let total_sessions: i64 = devices.iter().map(|d| d.session_count).sum();
@@ -365,6 +437,22 @@ fn render_html(
     --card: #ffffff;
     --border: #e5e7eb;
     --accent: #2563eb;
+    /* Parse-state pill palette (light). Chosen to stay readable against
+       a white --card background: low-saturation tints for the fill and a
+       darker shade of the same hue for the text, so 4.5:1 contrast is
+       comfortably met without needing a heavy border. */
+    --pill-ok-bg:           #d1fadf;
+    --pill-ok-fg:           #0f5132;
+    --pill-ok-fb-bg:        #fef3c7;
+    --pill-ok-fb-fg:        #7c4a03;
+    --pill-partial-bg:      #ffedd5;
+    --pill-partial-fg:      #9a3412;
+    --pill-failed-bg:       #fee2e2;
+    --pill-failed-fg:       #991b1b;
+    --pill-pending-bg:      #e5e7eb;
+    --pill-pending-fg:      #374151;
+    --pill-unknown-bg:      #e5e7eb;
+    --pill-unknown-fg:      #374151;
   }}
   @media (prefers-color-scheme: dark) {{
     :root {{
@@ -374,6 +462,21 @@ fn render_html(
       --card: #171a21;
       --border: #2a2f3a;
       --accent: #60a5fa;
+      /* Dark-mode pill palette. Darker fills (derived from the same hue
+         as the light values) keep the card-background contrast honest,
+         and the fg stays bright so the label reads at a glance. */
+      --pill-ok-bg:         #14532d;
+      --pill-ok-fg:         #bbf7d0;
+      --pill-ok-fb-bg:      #713f12;
+      --pill-ok-fb-fg:      #fde68a;
+      --pill-partial-bg:    #7c2d12;
+      --pill-partial-fg:    #fed7aa;
+      --pill-failed-bg:     #7f1d1d;
+      --pill-failed-fg:     #fecaca;
+      --pill-pending-bg:    #374151;
+      --pill-pending-fg:    #d1d5db;
+      --pill-unknown-bg:    #374151;
+      --pill-unknown-fg:    #d1d5db;
     }}
   }}
   body {{
@@ -438,6 +541,52 @@ fn render_html(
   ul.links {{ list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }}
   ul.links a {{ color: var(--accent); text-decoration: none; }}
   ul.links a:hover {{ text-decoration: underline; }}
+  /* Parse-state pill. Inline-block so it sits cleanly inside a table cell
+     next to surrounding monospace text; tight line-height + small padding
+     so the pill doesn't enlarge the row height. */
+  .state {{
+    display: inline-block;
+    padding: 0.08rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.4;
+    letter-spacing: 0.01em;
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--pill-unknown-bg);
+    color: var(--pill-unknown-fg);
+    white-space: nowrap;
+  }}
+  .state-ok            {{ background: var(--pill-ok-bg);        color: var(--pill-ok-fg); }}
+  .state-ok-fallbacks  {{ background: var(--pill-ok-fb-bg);     color: var(--pill-ok-fb-fg); }}
+  .state-partial       {{ background: var(--pill-partial-bg);   color: var(--pill-partial-fg); }}
+  .state-failed        {{ background: var(--pill-failed-bg);    color: var(--pill-failed-fg); }}
+  .state-pending       {{ background: var(--pill-pending-bg);   color: var(--pill-pending-fg); }}
+  /* Parse-state distribution strip. Horizontal wrap of (pill + count)
+     pairs separated by a subtle dot so the card stays glanceable on
+     narrow viewports. */
+  ul.pill-list {{
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: center;
+  }}
+  ul.pill-list li {{ display: inline-flex; align-items: center; gap: 0.4rem; }}
+  ul.pill-list li + li {{ position: relative; padding-left: 1rem; }}
+  ul.pill-list li + li::before {{
+    content: "·";
+    color: var(--muted);
+    position: absolute;
+    left: 0.35rem;
+  }}
+  .pill-count {{
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.85rem;
+    color: var(--fg);
+  }}
   footer {{ color: var(--muted); font-size: 0.8rem; margin-top: 1.5rem; }}
 </style>
 </head>
@@ -479,6 +628,11 @@ fn render_html(
   <section class="card">
     <h2>Top devices</h2>
     {top_devices_html}
+  </section>
+
+  <section class="card">
+    <h2>Parse-state distribution</h2>
+    {state_dist_html}
   </section>
 
   <section class="card">
@@ -529,6 +683,7 @@ fn render_html(
         recent_html = recent_html,
         routes_html = routes_html,
         top_devices_html = top_devices_html,
+        state_dist_html = state_dist_html,
         auth_html = auth_html,
         total_devices = total_devices,
         total_sessions = total_sessions,
@@ -707,7 +862,56 @@ mod tests {
         assert!(html.contains("WIN-X"));
         // Short session id is the first 8 chars + ellipsis.
         assert!(html.contains("019db170…"));
-        assert!(html.contains("ok"));
+        // parse_state is rendered as a color-coded pill so the operator can
+        // spot unhealthy bundles at a glance.
+        assert!(html.contains("<span class=\"state state-ok\">ok</span>"));
+    }
+
+    #[test]
+    fn state_slug_maps_known_states() {
+        // Closed list — every known value the parse worker emits (see
+        // `STATE_OK` et al in pipeline::parse_worker) plus `pending` which
+        // is the schema default before the worker runs. Anything else
+        // falls through to `unknown` so the renderer can't crash on a
+        // future state.
+        assert_eq!(state_slug("ok"), "ok");
+        assert_eq!(state_slug("ok-with-fallbacks"), "ok-fallbacks");
+        assert_eq!(state_slug("partial"), "partial");
+        assert_eq!(state_slug("failed"), "failed");
+        assert_eq!(state_slug("pending"), "pending");
+        // Unknown state -> neutral pill.
+        assert_eq!(state_slug("timeout"), "unknown");
+    }
+
+    #[test]
+    fn render_state_distribution_empty() {
+        // Empty input renders the muted-copy placeholder so the card
+        // surfaces a clear "nothing yet" rather than being silently omitted.
+        let html = render_state_distribution(&[]);
+        assert!(html.contains("No sessions yet"));
+        assert!(html.contains("class=\"muted\""));
+    }
+
+    #[test]
+    fn render_state_distribution_renders_counts() {
+        // Synthetic input from the SQL GROUP BY: two states, distinct
+        // counts. Assert that (a) each value is wrapped in the correct
+        // state-<slug> class, and (b) the count text appears next to it.
+        let dist: Vec<(String, u64)> = vec![
+            ("ok".to_string(), 1),
+            ("partial".to_string(), 140),
+        ];
+        let html = render_state_distribution(&dist);
+        // Class wrapping for each state.
+        assert!(html.contains("<span class=\"state state-ok\">ok</span>"));
+        assert!(
+            html.contains("<span class=\"state state-partial\">partial</span>"),
+        );
+        // Counts rendered via the .pill-count span.
+        assert!(html.contains("<span class=\"pill-count\">1</span>"));
+        assert!(html.contains("<span class=\"pill-count\">140</span>"));
+        // Structural wrapper.
+        assert!(html.contains("<ul class=\"pill-list\">"));
     }
 
     #[tokio::test]
@@ -715,7 +919,16 @@ mod tests {
         let state = fake_state("0.0.0.0:8080").await;
         let pool = PoolStats { size: 3, idle: 2, max_size: 8 };
         let routes = vec![("/healthz".to_string(), 42)];
-        let html = render_html(&state, Duration::from_secs(65), 42, &routes, pool, &[], &[]);
+        let html = render_html(
+            &state,
+            Duration::from_secs(65),
+            42,
+            &routes,
+            pool,
+            &[],
+            &[],
+            &[],
+        );
         assert!(html.contains("<!doctype html>"));
         assert!(html.contains("api-server"));
         assert!(html.contains("1m 5s"));
@@ -739,12 +952,29 @@ mod tests {
         // Top devices section renders the empty-state copy.
         assert!(html.contains("Top devices"));
         assert!(html.contains("No devices registered yet"));
+        // Parse-state distribution card renders between Top devices and
+        // Recent bundles, with the empty-state copy when no sessions
+        // have been ingested yet. Use the <h2> tag to disambiguate from
+        // the same string appearing inside the embedded <style> comments.
+        assert!(html.contains("<h2>Parse-state distribution</h2>"));
+        assert!(html.contains("No sessions yet"));
+        let pos_top_devices = html.find("<h2>Top devices</h2>").unwrap();
+        let pos_dist = html.find("<h2>Parse-state distribution</h2>").unwrap();
+        let pos_recent = html.find("<h2>Recent bundles</h2>").unwrap();
+        assert!(
+            pos_top_devices < pos_dist && pos_dist < pos_recent,
+            "distribution card must render between Top devices and Recent bundles",
+        );
         // Recent bundles section renders the empty-state copy.
         assert!(html.contains("Recent bundles"));
         assert!(html.contains("No bundles ingested yet"));
         // Top routes section shows the supplied route + count.
         assert!(html.contains("Top routes"));
         assert!(html.contains("<dt>/healthz</dt><dd>42</dd>"));
+        // Pill CSS is present in the embedded <style> block so the colors
+        // are available whether or not any state rows render today.
+        assert!(html.contains(".state-ok"));
+        assert!(html.contains(".state-failed"));
     }
 
     #[test]
