@@ -47,7 +47,7 @@ function BridgeInner() {
         </span>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: `${railWidth} 220px 1fr`, minHeight: 0 }}>
-        <div data-testid="rail" style={{ width: railWidth, borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>
+        <div data-testid="rail" style={{ borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>
           <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.6rem", padding: "0.5rem", display: "block" }}>rail</span>
         </div>
         <div data-testid="middle-pane" style={{ borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>

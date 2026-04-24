@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { CommandBridge } from "./CommandBridge";
 
 describe("CommandBridge skeleton", () => {
@@ -13,9 +13,18 @@ describe("CommandBridge skeleton", () => {
     expect(screen.getByTestId("status-bar")).toBeInTheDocument();
   });
 
-  it("defaults the rail width to the collapsed size (56px)", () => {
+  it("defaults the grid to the collapsed rail width (56px)", () => {
     render(<CommandBridge />);
     const rail = screen.getByTestId("rail");
-    expect(rail.style.width).toBe("56px");
+    // Rail is the first grid-track in its parent's columns template.
+    const track = rail.parentElement!.style.gridTemplateColumns;
+    expect(track).toMatch(/^56px\s+220px\s+1fr$/);
+  });
+
+  it("nests the status bar inside the right pane", () => {
+    const { getByTestId } = render(<CommandBridge />);
+    const rightPane = getByTestId("right-pane");
+    // Must be nested — not a sibling of right-pane.
+    expect(within(rightPane).getByTestId("status-bar")).toBeInTheDocument();
   });
 });
