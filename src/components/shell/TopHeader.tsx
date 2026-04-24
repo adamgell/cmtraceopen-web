@@ -2,6 +2,7 @@
 // Sits above the KQL bar. Links open in new tabs.
 
 import { theme } from "../../lib/theme";
+import { UserChip } from "./UserChip";
 
 const REPO_URL = "https://github.com/adamgell/cmtraceopen-web";
 const DOCS_URL = "https://github.com/adamgell/cmtraceopen-web/tree/main/docs";
@@ -63,6 +64,8 @@ export function TopHeader({ onHelp, version = "0.1.0" }: Props) {
         >
           Help <span style={{ color: theme.textFainter }}>·</span> ?
         </button>
+        <span style={{ width: 1, height: 18, background: theme.border, marginLeft: "0.35rem", marginRight: "0.35rem" }} />
+        <UserChip />
       </nav>
     </div>
   );
