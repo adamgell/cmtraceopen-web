@@ -44,9 +44,10 @@ function rowBackground(sev: string, zebra: boolean): string {
 
 interface Props {
   entries: LogEntry[];
+  onOpenRow?: (entry: LogEntry) => void;
 }
 
-export function EntryGrid({ entries }: Props) {
+export function EntryGrid({ entries, onOpenRow }: Props) {
   const parentRef = useRef<HTMLDivElement | null>(null);
   const virt = useVirtualizer({
     count: entries.length,
@@ -105,6 +106,12 @@ export function EntryGrid({ entries }: Props) {
             return (
               <div
                 key={e.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onOpenRow?.(e)}
+                onKeyDown={(ev) => {
+                  if (ev.key === "Enter") onOpenRow?.(e);
+                }}
                 style={{
                   position: "absolute",
                   top: 0,
@@ -120,6 +127,7 @@ export function EntryGrid({ entries }: Props) {
                   background: bg,
                   whiteSpace: "nowrap",
                   overflow: "hidden",
+                  cursor: onOpenRow ? "pointer" : "default",
                 }}
               >
                 <span style={{ color }}>{glyph}</span>

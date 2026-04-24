@@ -18,6 +18,7 @@ import { useBridgeState } from "../../lib/bridge-state";
 import { theme } from "../../lib/theme";
 import { EntryGrid } from "./EntryGrid";
 import { FilterBar, type Filters } from "./FilterBar";
+import { RowDetail } from "./RowDetail";
 import { StatusBar } from "./StatusBar";
 
 const DEFAULT_FILTERS: Filters = {
@@ -35,9 +36,11 @@ export function LogViewer() {
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS);
   const [status, setStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [detailEntry, setDetailEntry] = useState<LogEntry | null>(null);
 
   useEffect(() => {
     setFilters(DEFAULT_FILTERS);
+    setDetailEntry(null);
     if (!state.selectedSessionId || !state.selectedFileId) {
       setEntries([]);
       setStatus("idle");
@@ -119,14 +122,22 @@ export function LogViewer() {
     );
   }
   return (
-    <div style={{ display: "grid", gridTemplateRows: "auto auto 1fr auto", height: "100%", minHeight: 0 }}>
+    <div
+      style={{
+        position: "relative",
+        display: "grid",
+        gridTemplateRows: "auto auto 1fr auto",
+        height: "100%",
+        minHeight: 0,
+      }}
+    >
       <FileCrumb />
       <FilterBar
         filters={filters}
         totals={{ rendered: visible.length, total: totalEntriesInFile }}
         onChange={setFilters}
       />
-      <EntryGrid entries={visible} />
+      <EntryGrid entries={visible} onOpenRow={setDetailEntry} />
       <StatusBar
         rendered={visible.length}
         limit={500}
@@ -134,6 +145,7 @@ export function LogViewer() {
         warnCount={warnCount}
         errCount={errCount}
       />
+      <RowDetail entry={detailEntry} onClose={() => setDetailEntry(null)} />
     </div>
   );
 }
