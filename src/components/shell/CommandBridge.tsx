@@ -5,6 +5,7 @@
 
 import { BridgeStateProvider, useBridgeState } from "../../lib/bridge-state";
 import { theme } from "../../lib/theme";
+import { Banner } from "./Banner";
 
 export function CommandBridge() {
   return (
@@ -33,19 +34,9 @@ function BridgeInner() {
           KQL bar placeholder
         </span>
       </div>
-      <div
-        data-testid="banner"
-        style={{
-          padding: "0.45rem 0.9rem",
-          borderBottom: `1px solid ${theme.border}`,
-          background: theme.bg,
-          backgroundImage: theme.pattern.dots,
-        }}
-      >
-        <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.72rem" }}>
-          banner placeholder
-        </span>
-      </div>
+      {/* Banner reflects the rail's selected device. Real device data flows in
+          later when the rail knows which device is selected (Task 6+). */}
+      <Banner device={null} />
       <div style={{ display: "grid", gridTemplateColumns: `${railWidth} 220px 1fr`, minHeight: 0 }}>
         <div data-testid="rail" style={{ borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>
           <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.6rem", padding: "0.5rem", display: "block" }}>rail</span>
