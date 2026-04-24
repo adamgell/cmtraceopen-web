@@ -30,4 +30,30 @@ describe("DeviceRow", () => {
     fireEvent.click(screen.getByRole("button"));
     expect(captured).toBe("GELL-01AA310");
   });
+
+  it("uppercases the slug for lowercase device ids", () => {
+    render(
+      <DeviceRow
+        device={{ deviceId: "gell-01", lastSeenLabel: "5m", health: "ok" }}
+        expanded={false}
+        active={false}
+        onSelect={() => {}}
+      />
+    );
+    // "gell-01" → uppercased to "GELL-01" → [A-Z0-9] match → "GELL" (first 4 chars).
+    expect(screen.getByText("GELL")).toBeInTheDocument();
+  });
+
+  it("pads short slugs with · so the column layout stays stable", () => {
+    render(
+      <DeviceRow
+        device={{ deviceId: "X-1", lastSeenLabel: "5m", health: "ok" }}
+        expanded={false}
+        active={false}
+        onSelect={() => {}}
+      />
+    );
+    // "X-1" → "X1" → padded to "X1··" (4 chars, dot-filler).
+    expect(screen.getByText("X1··")).toBeInTheDocument();
+  });
 });

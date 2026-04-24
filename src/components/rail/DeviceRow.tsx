@@ -23,7 +23,7 @@ export function DeviceRow({ device, expanded, active, onSelect }: Props) {
   // Collapsed mode shows a 4-char slug built from the first A-Z0-9 run of the
   // deviceId (typically the hostname prefix). Pad with `·` so rows line up
   // visually when a device has a very short id.
-  const slug = device.deviceId.replace(/[^A-Z0-9]/g, "").slice(0, 4).padEnd(4, "·");
+  const slug = device.deviceId.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).padEnd(4, "·");
   const dotColor = theme.pill[device.health].dot;
   const bg = active ? theme.accentBg : "transparent";
   const textColor = active ? theme.accent : theme.text;
