@@ -10,6 +10,16 @@
 //!   and compare TEXT lexicographically, which works because RFC-3339 strings
 //!   sort identically to their epoch values when zero-padded (our
 //!   `DateTime::to_rfc3339()` output always is).
+//!
+//!   CAVEAT: because the columns are TEXT, WHERE-clause comparisons against
+//!   those columns MUST bind a `to_rfc3339()` TEXT value, not an in-DB
+//!   `now()` / `now() - interval '…'` expression — the latter yields a
+//!   `TIMESTAMPTZ` and Postgres (unlike SQLite) refuses to implicitly coerce
+//!   `TEXT < TIMESTAMPTZ`, surfacing as
+//!   `operator does not exist: text < timestamp with time zone`. See
+//!   `sessions_older_than` for the canonical pattern. Migrating these
+//!   columns to real TIMESTAMPTZ is tracked as a follow-up (would need a
+//!   data migration + rebind every site in this file).
 //! * **NULLS LAST**: Postgres natively supports the SQL:2003 `NULLS LAST`
 //!   clause in `ORDER BY`, so the `(ts_ms IS NULL) ASC` trick used in the
 //!   SQLite backend is replaced with the more readable standard form.
@@ -125,23 +135,41 @@ impl MetadataStore for PgMetadataStore {
         ttl_days: u32,
         batch_size: u32,
     ) -> Result<Vec<(Uuid, String)>, StorageError> {
-        // Postgres native: `now() - interval 'N days'` cuts off in-DB,
-        // mirroring meta_sqlite's `datetime('now', '-N days')`.
-        let cutoff_interval = format!("{} days", ttl_days);
+        // `sessions.ingested_utc` is declared TEXT in `migrations-pg/0001`
+        // (RFC-3339 strings, same wire format as the SQLite backend — see
+        // the module-level comment on the dialect parity). Comparing that
+        // column against an in-DB `now() - interval` expression fails on
+        // Postgres with
+        //     operator does not exist: text < timestamp with time zone
+        // because PG refuses to implicitly coerce TEXT ↔ TIMESTAMPTZ.
+        // SQLite silently type-juggles via its affinity rules, which is why
+        // the bug only surfaces on the PG backend.
+        //
+        // Fix: compute the cutoff in Rust and bind it as an RFC-3339 TEXT
+        // string so both sides of the comparison are TEXT. This mirrors
+        // `list_sessions_for_device` above (also TEXT-vs-TEXT via
+        // `to_rfc3339()`). Lexicographic ordering of RFC-3339 TEXT is
+        // chronologically correct because our `to_rfc3339()` output is
+        // always zero-padded and UTC-normalised.
+        //
+        // NOTE: the LONGER-term fix is to migrate `ingested_utc` (and the
+        // other *_utc columns) to `TIMESTAMPTZ` on the PG side, but that
+        // needs a data migration + a coordinated bind-site update across
+        // the whole module. Flagged as a follow-up in the commit body.
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(ttl_days));
         let rows = sqlx::query_as::<_, (Uuid, String)>(
             r#"
             SELECT session_id, blob_uri
               FROM sessions
-             WHERE ingested_utc < (now() - $1::interval)
+             WHERE ingested_utc < $1
              ORDER BY ingested_utc ASC
              LIMIT $2
             "#,
         )
-        .bind(&cutoff_interval)
+        .bind(cutoff.to_rfc3339())
         .bind(i64::from(batch_size))
         .fetch_all(&self.pool)
-        .await
-        ?;
+        .await?;
         Ok(rows)
     }
 
