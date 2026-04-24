@@ -41,10 +41,11 @@ export function Banner({ device }: Props) {
         alignItems: "center",
         gap: "0.9rem",
         fontFamily: theme.font.ui,
+        minWidth: 0,
       }}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: "0.15rem" }}>
-        <span style={{ fontSize: "0.6rem", letterSpacing: "0.18em", color: theme.accent, textTransform: "uppercase" }}>
+        <span style={{ fontSize: "0.58rem", letterSpacing: "0.18em", color: theme.accent, textTransform: "uppercase" }}>
           {kicker}
         </span>
         <span style={{ fontSize: "0.95rem", fontWeight: 700, color: theme.textPrimary, letterSpacing: "-0.01em" }}>
@@ -52,14 +53,27 @@ export function Banner({ device }: Props) {
         </span>
       </div>
       {device && (
-        <div style={{ display: "flex", gap: "0.4rem", alignItems: "center" }}>
+        <div
+          data-testid="banner-chips"
+          style={{
+            display: "flex",
+            gap: "0.4rem",
+            alignItems: "center",
+            flexWrap: "nowrap",
+            overflow: "hidden",
+            minWidth: 0,
+            // TODO(task-4-followup): Spec §3 calls for a `…` expander when the
+            // chips row overflows. For now we hard-clip so the kbd strip stays
+            // visible — the expander UI is a downstream follow-up.
+          }}
+        >
           <Chip k="LAST SEEN" v={device.lastSeenLabel} />
           <Chip k="SESSIONS" v={String(device.sessionCount)} />
           <Chip k="FILES" v={String(device.fileCount)} />
           <Chip k="PARSE" v={device.parseState} pill={mapPillState(device.parseState)} />
         </div>
       )}
-      <div style={{ marginLeft: "auto", display: "flex", gap: "0.7rem", fontFamily: theme.font.mono, fontSize: "0.6rem", color: theme.textDim }}>
+      <div style={{ marginLeft: "auto", display: "flex", gap: "0.7rem", fontFamily: theme.font.mono, fontSize: "0.58rem", color: theme.textDim }}>
         <Kbd k="⌘/" label="focus query" />
         <Kbd k="⌘B" label="rail" />
         <Kbd k="⌘K" label="jump" />

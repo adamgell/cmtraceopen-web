@@ -6,7 +6,7 @@ describe("Banner", () => {
   it("renders the empty-state kicker when no device is selected", () => {
     render(<Banner device={null} />);
     expect(screen.getByText("—")).toBeInTheDocument();
-    expect(screen.queryByText(/LAST SEEN/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("banner-chips")).not.toBeInTheDocument();
   });
 
   it("renders hostname, chips, and the kbd strip when a device is selected", () => {
