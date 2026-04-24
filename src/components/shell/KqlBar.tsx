@@ -143,19 +143,26 @@ export function KqlBar({ onRun }: Props) {
       <button
         type="button"
         onClick={runNow}
+        aria-label="Run query"
+        title="Run query (⏎)"
         style={{
-          background: theme.accentBg,
+          background: theme.accent,
           border: `1px solid ${theme.accent}`,
-          color: theme.accent,
-          padding: "0.35rem 0.8rem",
+          color: theme.bgDeep,
+          padding: "0.4rem 0.95rem",
           borderRadius: 4,
           fontFamily: theme.font.mono,
-          fontSize: "0.7rem",
-          letterSpacing: "0.06em",
+          fontSize: "0.72rem",
+          fontWeight: 700,
+          letterSpacing: "0.08em",
           cursor: "pointer",
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "0.4rem",
         }}
       >
-        RUN · ⏎
+        <span aria-hidden="true" style={{ fontSize: "0.6rem" }}>▶</span>
+        RUN
       </button>
       <button
         type="button"

@@ -15,6 +15,7 @@ import { MiddlePane } from "../middle/MiddlePane";
 import { LogViewer } from "../right/LogViewer";
 import { Banner } from "./Banner";
 import { KqlBar } from "./KqlBar";
+import { TopHeader } from "./TopHeader";
 import { ResultStrip } from "./ResultStrip";
 
 export function CommandBridge() {
@@ -78,13 +79,14 @@ function BridgeInner() {
         }}
         style={{
           display: "grid",
-          gridTemplateRows: "auto auto 1fr",
+          gridTemplateRows: "auto auto auto 1fr",
           height: "100vh",
           background: theme.bg,
           color: theme.text,
           fontFamily: theme.font.ui,
         }}
       >
+        <TopHeader onHelp={() => setHelpOpen(true)} />
         {/* Wrap KqlBar + ResultStrip in a testid'd div so the existing
             CommandBridge test continues to find the kql-bar region without
             coupling KqlBar to the test. onRun writes the query + a stubbed
