@@ -5,6 +5,7 @@
 
 import { BridgeStateProvider, useBridgeState } from "../../lib/bridge-state";
 import { theme } from "../../lib/theme";
+import { DeviceRail } from "../rail/DeviceRail";
 import { Banner } from "./Banner";
 
 export function CommandBridge() {
@@ -38,8 +39,8 @@ function BridgeInner() {
           later when the rail knows which device is selected (Task 6+). */}
       <Banner device={null} />
       <div style={{ display: "grid", gridTemplateColumns: `${railWidth} 220px 1fr`, minHeight: 0 }}>
-        <div data-testid="rail" style={{ borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>
-          <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.6rem", padding: "0.5rem", display: "block" }}>rail</span>
+        <div data-testid="rail" style={{ borderRight: `1px solid ${theme.border}`, overflow: "hidden" }}>
+          <DeviceRail />
         </div>
         <div data-testid="middle-pane" style={{ borderRight: `1px solid ${theme.border}`, overflow: "auto" }}>
           <span style={{ color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.6rem", padding: "0.5rem", display: "block" }}>middle</span>
