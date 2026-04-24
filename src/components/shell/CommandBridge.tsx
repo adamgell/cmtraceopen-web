@@ -9,6 +9,7 @@ import { runKqlStub } from "../../lib/kql-executor-stub";
 import { useShortcut } from "../../lib/keyboard-shortcuts";
 import { theme } from "../../lib/theme";
 import { HelpOverlay } from "../overlays/HelpOverlay";
+import { LocalOverlay } from "../overlays/LocalOverlay";
 import { DeviceRail } from "../rail/DeviceRail";
 import { MiddlePane } from "../middle/MiddlePane";
 import { LogViewer } from "../right/LogViewer";
@@ -28,6 +29,7 @@ function BridgeInner() {
   const { state, dispatch } = useBridgeState();
   const railWidth = state.railExpanded ? "220px" : "56px";
   const [helpOpen, setHelpOpen] = useState(false);
+  const [localOpen, setLocalOpen] = useState(false);
 
   // ⌘B — toggle rail (collapse/expand)
   useShortcut({ key: "b", meta: true }, (e) => {
@@ -38,6 +40,12 @@ function BridgeInner() {
   useShortcut({ key: "/", meta: true }, (e) => {
     e.preventDefault();
     document.getElementById("kql-input")?.focus();
+  });
+  // ⌘O — open LocalMode overlay (file-open). The overlay's own drop-zone
+  // handles the actual file — this shortcut just reveals the UI.
+  useShortcut({ key: "o", meta: true }, (e) => {
+    e.preventDefault();
+    setLocalOpen(true);
   });
   // ? — open help overlay. Bail if the user is typing in an input so a literal
   // `?` inside the query bar isn't stolen.
@@ -52,6 +60,22 @@ function BridgeInner() {
   return (
     <>
       <div
+        onDragOver={(e) => {
+          // Must prevent default so the browser accepts the subsequent drop.
+          e.preventDefault();
+        }}
+        onDrop={(e) => {
+          const file = e.dataTransfer.files?.[0];
+          if (!file) return;
+          const name = file.name.toLowerCase();
+          if (!/\.(log|cmtlog|txt)$/.test(name)) return;
+          e.preventDefault();
+          setLocalOpen(true);
+          // LocalMode's own drop-zone handles the actual file — we just
+          // reveal the overlay here. Passing the file directly would need
+          // a new prop on LocalMode; for v1 the overlay's first render
+          // picks up the user's next drop inside its own DropZone.
+        }}
         style={{
           display: "grid",
           gridTemplateRows: "auto auto 1fr",
@@ -105,6 +129,7 @@ function BridgeInner() {
         </div>
       </div>
       <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <LocalOverlay open={localOpen} onClose={() => setLocalOpen(false)} />
     </>
   );
 }
