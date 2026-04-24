@@ -93,6 +93,13 @@ function reducer(state: BridgeState, action: BridgeAction): BridgeState {
       return { ...state, fleetQuery: action.query };
     case "set-fleet-result":
       return { ...state, fleetResult: action.result };
+    default: {
+      // Exhaustiveness check — if a new BridgeAction variant is added and
+      // a case is missed, TypeScript flags this line because `_exhaustive`
+      // is typed `never`. Protects the state layer across 17 downstream tasks.
+      const _exhaustive: never = action;
+      return _exhaustive;
+    }
   }
 }
 

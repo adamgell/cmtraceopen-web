@@ -1,10 +1,39 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import { BridgeStateProvider, useBridgeState } from "./bridge-state";
 import type { ReactNode } from "react";
 
 function wrapper({ children }: { children: ReactNode }) {
   return <BridgeStateProvider>{children}</BridgeStateProvider>;
+}
+
+// The harness-provided `localStorage` in this test env is an empty object
+// (no `getItem`/`setItem`/`removeItem`/`clear`). Install a Map-backed shim so
+// the persistence contract tests below can observe real reads/writes. Scoped
+// to this test file via `beforeEach`; other tests continue to see the
+// inert stub and fall through `bridge-state.tsx`'s try/catch.
+function installLocalStorageShim() {
+  const store = new Map<string, string>();
+  const shim = {
+    getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+    setItem: (k: string, v: string) => {
+      store.set(k, String(v));
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+    clear: () => {
+      store.clear();
+    },
+    key: (i: number) => Array.from(store.keys())[i] ?? null,
+    get length() {
+      return store.size;
+    },
+  };
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: shim,
+  });
 }
 
 describe("bridge state", () => {
@@ -38,5 +67,27 @@ describe("bridge state", () => {
     act(() => result.current.dispatch({ type: "set-middle-mode", mode: "fleet" }));
     expect(result.current.state.middleMode).toBe("fleet");
     expect(result.current.state.selectedDeviceId).toBe("GELL-01AA310");
+  });
+
+  describe("rail persistence", () => {
+    beforeEach(() => {
+      installLocalStorageShim();
+    });
+
+    it("persists rail expanded to localStorage on toggle", () => {
+      localStorage.clear();
+      const { result } = renderHook(() => useBridgeState(), { wrapper });
+      act(() => result.current.dispatch({ type: "toggle-rail" }));
+      expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("1");
+      act(() => result.current.dispatch({ type: "toggle-rail" }));
+      expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("0");
+    });
+
+    it("initializes rail expanded from localStorage on mount", () => {
+      localStorage.clear();
+      localStorage.setItem("cmtrace.rail-expanded", "1");
+      const { result } = renderHook(() => useBridgeState(), { wrapper });
+      expect(result.current.state.railExpanded).toBe(true);
+    });
   });
 });
