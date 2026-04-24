@@ -7,6 +7,7 @@ import { BridgeStateProvider, useBridgeState } from "../../lib/bridge-state";
 import { theme } from "../../lib/theme";
 import { DeviceRail } from "../rail/DeviceRail";
 import { MiddlePane } from "../middle/MiddlePane";
+import { LogViewer } from "../right/LogViewer";
 import { Banner } from "./Banner";
 
 export function CommandBridge() {
@@ -47,8 +48,8 @@ function BridgeInner() {
           <MiddlePane />
         </div>
         <div data-testid="right-pane" style={{ display: "grid", gridTemplateRows: "1fr auto", minHeight: 0 }}>
-          <div style={{ overflow: "auto", padding: "0.5rem", fontFamily: theme.font.mono, color: theme.textDim, fontSize: "0.7rem" }}>
-            right-pane content
+          <div style={{ overflow: "hidden", minHeight: 0 }}>
+            <LogViewer />
           </div>
           <div
             data-testid="status-bar"

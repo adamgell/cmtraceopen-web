@@ -11,6 +11,7 @@ vi.mock("../../lib/api-client", () => ({
   listDevices: async () => ({ items: [], nextCursor: null }),
   listSessions: async () => ({ items: [], nextCursor: null }),
   listFiles: async () => ({ items: [], nextCursor: null }),
+  listEntries: async () => ({ items: [], nextCursor: null }),
 }));
 
 async function flush() {
