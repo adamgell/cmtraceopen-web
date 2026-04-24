@@ -45,7 +45,10 @@ export type BridgeAction =
   | { type: "set-fleet-query"; query: string }
   | { type: "set-fleet-result"; result: FleetResultSummary | null };
 
-const RAIL_STORAGE_KEY = "cmtrace.rail-expanded";
+// Versioned to invalidate preferences saved before the rail defaulted to
+// expanded. Old key `cmtrace.rail-expanded` is ignored on purpose — it held
+// the collapsed state from the pre-default-expanded UI.
+const RAIL_STORAGE_KEY = "cmtrace.rail-expanded.v2";
 
 function initialState(): BridgeState {
   // Default to expanded so full device IDs are visible on first load.

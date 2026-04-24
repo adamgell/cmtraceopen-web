@@ -79,14 +79,14 @@ describe("bridge state", () => {
       const { result } = renderHook(() => useBridgeState(), { wrapper });
       // Default state is expanded — first toggle flips to collapsed.
       act(() => result.current.dispatch({ type: "toggle-rail" }));
-      expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("0");
+      expect(localStorage.getItem("cmtrace.rail-expanded.v2")).toBe("0");
       act(() => result.current.dispatch({ type: "toggle-rail" }));
-      expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("1");
+      expect(localStorage.getItem("cmtrace.rail-expanded.v2")).toBe("1");
     });
 
     it("initializes rail expanded from localStorage on mount", () => {
       localStorage.clear();
-      localStorage.setItem("cmtrace.rail-expanded", "1");
+      localStorage.setItem("cmtrace.rail-expanded.v2", "1");
       const { result } = renderHook(() => useBridgeState(), { wrapper });
       expect(result.current.state.railExpanded).toBe(true);
     });
