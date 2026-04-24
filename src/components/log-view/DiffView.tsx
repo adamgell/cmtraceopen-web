@@ -21,7 +21,7 @@
 // local definition here.
 
 import { useMemo, useRef } from "react";
-import { tokens } from "@fluentui/react-components";
+import { theme } from "../../lib/theme";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   LOG_MONOSPACE_FONT_FAMILY,
@@ -100,12 +100,12 @@ const CLASS_COLORS: Record<
 > = {
   common: { bg: "transparent", border: "transparent" },
   "only-a": {
-    bg: tokens.colorPaletteGreenBackground1,
-    border: tokens.colorPaletteGreenForeground1,
+    bg: theme.accentBg,
+    border: theme.accent,
   },
   "only-b": {
-    bg: tokens.colorPaletteRedBackground1,
-    border: tokens.colorPaletteRedForeground1,
+    bg: theme.pill.failed.bg,
+    border: theme.pill.failed.fg,
   },
 };
 
@@ -217,7 +217,7 @@ function SideBySideView({
           flex: 1,
           display: "flex",
           flexDirection: "column",
-          borderRight: `1px solid ${tokens.colorNeutralStroke1}`,
+          borderRight: `1px solid ${theme.border}`,
         }}
       >
         <div
@@ -225,9 +225,9 @@ function SideBySideView({
             padding: "4px 8px",
             fontSize: "11px",
             fontWeight: 600,
-            backgroundColor: tokens.colorNeutralBackground3,
-            borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-            color: tokens.colorPaletteGreenForeground1,
+            backgroundColor: theme.surfaceAlt,
+            borderBottom: `1px solid ${theme.border}`,
+            color: theme.accent,
           }}
         >
           A: {diffFileBaseName(diffState.sourceA.filePath)} (
@@ -281,9 +281,9 @@ function SideBySideView({
             padding: "4px 8px",
             fontSize: "11px",
             fontWeight: 600,
-            backgroundColor: tokens.colorNeutralBackground3,
-            borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
-            color: tokens.colorPaletteRedForeground1,
+            backgroundColor: theme.surfaceAlt,
+            borderBottom: `1px solid ${theme.border}`,
+            color: theme.pill.failed.fg,
           }}
         >
           B: {diffFileBaseName(diffState.sourceB.filePath)} (
@@ -437,12 +437,12 @@ function DiffRow({
         gap: "6px",
         padding: "2px 8px",
         fontSize: `${fontSize}px`,
-        backgroundColor: isSelected ? tokens.colorBrandBackground : colors.bg,
+        backgroundColor: isSelected ? theme.accent : colors.bg,
         color: isSelected
-          ? tokens.colorNeutralForegroundOnBrand
-          : tokens.colorNeutralForeground1,
+          ? theme.bg
+          : theme.textPrimary,
         borderLeft: `3px solid ${colors.border}`,
-        borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+        borderBottom: `1px solid ${theme.border}`,
         cursor: "pointer",
         height: "100%",
         boxSizing: "border-box",
@@ -457,16 +457,16 @@ function DiffRow({
             borderRadius: "2px",
             backgroundColor:
               classification === "only-a"
-                ? tokens.colorPaletteGreenBackground1
+                ? theme.accentBg
                 : classification === "only-b"
-                  ? tokens.colorPaletteRedBackground1
-                  : tokens.colorNeutralBackground4,
+                  ? theme.pill.failed.bg
+                  : theme.border,
             color:
               classification === "only-a"
-                ? tokens.colorPaletteGreenForeground1
+                ? theme.accent
                 : classification === "only-b"
-                  ? tokens.colorPaletteRedForeground1
-                  : tokens.colorNeutralForeground3,
+                  ? theme.pill.failed.fg
+                  : theme.textDim,
             flexShrink: 0,
             width: "16px",
             textAlign: "center",
@@ -478,7 +478,7 @@ function DiffRow({
       <span
         style={{
           fontSize: `${monoFont}px`,
-          color: isSelected ? "inherit" : tokens.colorNeutralForeground3,
+          color: isSelected ? "inherit" : theme.textDim,
           fontFamily: LOG_MONOSPACE_FONT_FAMILY,
           flexShrink: 0,
           width: "145px",

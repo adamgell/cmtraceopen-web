@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { Button, Tooltip, tokens } from "@fluentui/react-components";
+import { theme } from "../lib/theme";
 import { initWasm, parse } from "../lib/wasm-bridge";
 import type { ParseResult } from "../lib/log-types";
 import { useWorkspace } from "../lib/workspace-context";
@@ -215,7 +216,7 @@ export const LocalMode = forwardRef<LocalModeHandle, LocalModeProps>(
                 style={{
                   marginTop: 16,
                   textAlign: "center",
-                  color: tokens.colorNeutralForeground2,
+                  color: theme.text,
                   fontSize: 14,
                 }}
               >
@@ -289,9 +290,9 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
         alignItems: "flex-start",
         gap: 12,
         padding: "10px 14px",
-        background: tokens.colorPaletteRedBackground1,
-        border: `1px solid ${tokens.colorPaletteRedBorder1}`,
-        color: tokens.colorPaletteRedForeground1,
+        background: theme.pill.failed.bg,
+        border: `1px solid ${theme.pill.failed.fg}`,
+        color: theme.pill.failed.fg,
         borderRadius: tokens.borderRadiusMedium,
         whiteSpace: "pre-wrap",
       }}
@@ -303,9 +304,9 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
         style={{
           padding: "4px 10px",
           fontSize: 12,
-          border: `1px solid ${tokens.colorPaletteRedBorderActive}`,
-          background: tokens.colorNeutralBackground1,
-          color: tokens.colorPaletteRedForeground1,
+          border: `1px solid ${theme.pill.failed.fg}`,
+          background: theme.bg,
+          color: theme.pill.failed.fg,
           borderRadius: tokens.borderRadiusMedium,
           cursor: "pointer",
         }}
@@ -324,7 +325,7 @@ function CenteredMessage({ text }: { text: string }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        color: tokens.colorNeutralForeground2,
+        color: theme.text,
       }}
     >
       {text}

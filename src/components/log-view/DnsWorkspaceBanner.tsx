@@ -18,7 +18,8 @@
 // local `DnsParserKind` string-literal alias.
 
 import { useState } from "react";
-import { tokens, Button } from "@fluentui/react-components";
+import { Button } from "@fluentui/react-components";
+import { theme } from "../../lib/theme";
 
 /**
  * Parser kinds the banner recognizes. Matches a subset of the desktop
@@ -85,10 +86,10 @@ export function DnsWorkspaceBanner({
         alignItems: "center",
         gap: 12,
         padding: "6px 12px",
-        background: tokens.colorNeutralBackground4,
-        borderBottom: `1px solid ${tokens.colorNeutralStroke1}`,
+        background: theme.surfaceAlt,
+        borderBottom: `1px solid ${theme.border}`,
         fontSize: 13,
-        color: tokens.colorNeutralForeground2,
+        color: theme.text,
         flexShrink: 0,
       }}
     >

@@ -8,7 +8,7 @@
 //     lib dependencies.
 //   - Uses tokens + shared font constants only — no hardcoded colors.
 
-import { tokens } from "@fluentui/react-components";
+import { theme } from "../../lib/theme";
 import { LOG_UI_FONT_FAMILY } from "../../lib/log-accessibility";
 
 export type DiffDisplayMode = "side-by-side" | "unified";
@@ -54,14 +54,14 @@ export function DiffHeader({
         alignItems: "center",
         gap: "10px",
         padding: "6px 12px",
-        backgroundColor: tokens.colorNeutralBackground3,
-        borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+        backgroundColor: theme.surfaceAlt,
+        borderBottom: `1px solid ${theme.border}`,
         fontFamily: LOG_UI_FONT_FAMILY,
         fontSize: "11px",
         flexShrink: 0,
       }}
     >
-      <span style={{ fontWeight: 600, color: tokens.colorNeutralForeground1 }}>
+      <span style={{ fontWeight: 600, color: theme.textPrimary }}>
         Diff: {diffFileBaseName(sourceA.filePath)} vs{" "}
         {diffFileBaseName(sourceB.filePath)}
       </span>
@@ -70,16 +70,16 @@ export function DiffHeader({
         style={{
           width: "1px",
           height: "16px",
-          backgroundColor: tokens.colorNeutralStroke2,
+          backgroundColor: theme.border,
         }}
       />
 
-      <span style={{ color: tokens.colorNeutralForeground3 }}>
+      <span style={{ color: theme.textDim }}>
         {stats.common} common
       </span>
       <span
         style={{
-          color: tokens.colorPaletteGreenForeground1,
+          color: theme.accent,
           fontWeight: 600,
         }}
       >
@@ -87,7 +87,7 @@ export function DiffHeader({
       </span>
       <span
         style={{
-          color: tokens.colorPaletteRedForeground1,
+          color: theme.pill.failed.fg,
           fontWeight: 600,
         }}
       >
@@ -98,7 +98,7 @@ export function DiffHeader({
         style={{
           width: "1px",
           height: "16px",
-          backgroundColor: tokens.colorNeutralStroke2,
+          backgroundColor: theme.border,
         }}
       />
 
@@ -109,15 +109,15 @@ export function DiffHeader({
           style={{
             fontSize: "10px",
             padding: "2px 8px",
-            border: `1px solid ${displayMode === "side-by-side" ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke2}`,
+            border: `1px solid ${displayMode === "side-by-side" ? theme.accent : theme.border}`,
             backgroundColor:
               displayMode === "side-by-side"
-                ? tokens.colorBrandBackground2
-                : tokens.colorNeutralBackground1,
+                ? theme.accentBg
+                : theme.bg,
             color:
               displayMode === "side-by-side"
-                ? tokens.colorBrandForeground1
-                : tokens.colorNeutralForeground3,
+                ? theme.accent
+                : theme.textDim,
             fontWeight: displayMode === "side-by-side" ? 700 : 500,
             cursor: "pointer",
             borderRadius: "3px 0 0 3px",
@@ -132,15 +132,15 @@ export function DiffHeader({
           style={{
             fontSize: "10px",
             padding: "2px 8px",
-            border: `1px solid ${displayMode === "unified" ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke2}`,
+            border: `1px solid ${displayMode === "unified" ? theme.accent : theme.border}`,
             backgroundColor:
               displayMode === "unified"
-                ? tokens.colorBrandBackground2
-                : tokens.colorNeutralBackground1,
+                ? theme.accentBg
+                : theme.bg,
             color:
               displayMode === "unified"
-                ? tokens.colorBrandForeground1
-                : tokens.colorNeutralForeground3,
+                ? theme.accent
+                : theme.textDim,
             fontWeight: displayMode === "unified" ? 700 : 500,
             cursor: "pointer",
             borderRadius: "0 3px 3px 0",
@@ -157,10 +157,10 @@ export function DiffHeader({
           marginLeft: "auto",
           fontSize: "10px",
           padding: "2px 8px",
-          border: `1px solid ${tokens.colorNeutralStroke2}`,
+          border: `1px solid ${theme.border}`,
           borderRadius: "3px",
-          backgroundColor: tokens.colorNeutralBackground1,
-          color: tokens.colorNeutralForeground1,
+          backgroundColor: theme.bg,
+          color: theme.textPrimary,
           cursor: "pointer",
         }}
       >

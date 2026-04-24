@@ -17,7 +17,7 @@
 // (mirroring desktop) once the web viewer grows a real merge feature. For
 // now it's a local type so this file has no desktop-only lib dependencies.
 
-import { tokens } from "@fluentui/react-components";
+import { theme } from "../../lib/theme";
 import type { LogEntry } from "../../lib/log-types";
 import { LOG_UI_FONT_FAMILY } from "../../lib/log-accessibility";
 
@@ -84,8 +84,8 @@ export function MergeLegendBar({
         alignItems: "center",
         gap: "6px",
         padding: "4px 12px",
-        backgroundColor: tokens.colorNeutralBackground3,
-        borderBottom: `1px solid ${tokens.colorNeutralStroke2}`,
+        backgroundColor: theme.surfaceAlt,
+        borderBottom: `1px solid ${theme.border}`,
         fontFamily: LOG_UI_FONT_FAMILY,
         fontSize: "11px",
         overflowX: "auto",
@@ -96,7 +96,7 @@ export function MergeLegendBar({
       {mergedTabState.sourceFilePaths.map((fp) => {
         const color =
           mergedTabState.colorAssignments[fp] ??
-          tokens.colorNeutralForeground4;
+          theme.textFainter;
         const visible = mergedTabState.fileVisibility[fp] !== false;
         const count = fileCounts[fp] ?? 0;
 
@@ -112,15 +112,15 @@ export function MergeLegendBar({
               gap: "4px",
               padding: "2px 8px",
               borderRadius: "12px",
-              border: `1px solid ${visible ? color : tokens.colorNeutralStroke2}`,
+              border: `1px solid ${visible ? color : theme.border}`,
               // Append a low-alpha hex suffix to the caller-provided color
               // for the pill background when visible. If the supplied value
               // isn't a 6-digit hex, the browser just ignores the suffixed
               // form and falls back to a plain color — still readable.
               backgroundColor: visible ? `${color}20` : "transparent",
               color: visible
-                ? tokens.colorNeutralForeground1
-                : tokens.colorNeutralForeground4,
+                ? theme.textPrimary
+                : theme.textFainter,
               cursor: "pointer",
               opacity: visible ? 1 : 0.5,
               whiteSpace: "nowrap",
@@ -135,14 +135,14 @@ export function MergeLegendBar({
                 borderRadius: "50%",
                 backgroundColor: visible
                   ? color
-                  : tokens.colorNeutralForeground4,
+                  : theme.textFainter,
                 flexShrink: 0,
               }}
             />
             <span>{fileBaseName(fp)}</span>
             <span
               style={{
-                color: tokens.colorNeutralForeground3,
+                color: theme.textDim,
                 fontWeight: 600,
               }}
             >
@@ -156,7 +156,7 @@ export function MergeLegendBar({
         style={{
           width: "1px",
           height: "16px",
-          backgroundColor: tokens.colorNeutralStroke2,
+          backgroundColor: theme.border,
           margin: "0 2px",
           flexShrink: 0,
         }}
@@ -168,10 +168,10 @@ export function MergeLegendBar({
         style={{
           fontSize: "10px",
           padding: "2px 6px",
-          border: `1px solid ${tokens.colorNeutralStroke2}`,
+          border: `1px solid ${theme.border}`,
           borderRadius: "3px",
-          backgroundColor: tokens.colorNeutralBackground1,
-          color: tokens.colorNeutralForeground1,
+          backgroundColor: theme.bg,
+          color: theme.textPrimary,
           cursor: "pointer",
         }}
       >
@@ -183,10 +183,10 @@ export function MergeLegendBar({
         style={{
           fontSize: "10px",
           padding: "2px 6px",
-          border: `1px solid ${tokens.colorNeutralStroke2}`,
+          border: `1px solid ${theme.border}`,
           borderRadius: "3px",
-          backgroundColor: tokens.colorNeutralBackground1,
-          color: tokens.colorNeutralForeground1,
+          backgroundColor: theme.bg,
+          color: theme.textPrimary,
           cursor: "pointer",
         }}
       >
@@ -197,7 +197,7 @@ export function MergeLegendBar({
         style={{
           width: "1px",
           height: "16px",
-          backgroundColor: tokens.colorNeutralStroke2,
+          backgroundColor: theme.border,
           margin: "0 2px",
           flexShrink: 0,
         }}
@@ -205,7 +205,7 @@ export function MergeLegendBar({
 
       <span
         style={{
-          color: tokens.colorNeutralForeground3,
+          color: theme.textDim,
           fontWeight: 600,
           fontSize: "10px",
           textTransform: "uppercase",
@@ -219,10 +219,10 @@ export function MergeLegendBar({
         style={{
           fontSize: "11px",
           padding: "1px 4px",
-          border: `1px solid ${tokens.colorNeutralStroke2}`,
+          border: `1px solid ${theme.border}`,
           borderRadius: "3px",
-          backgroundColor: tokens.colorNeutralBackground1,
-          color: tokens.colorNeutralForeground1,
+          backgroundColor: theme.bg,
+          color: theme.textPrimary,
         }}
       >
         {CORRELATION_WINDOWS.map((w) => (
@@ -237,14 +237,14 @@ export function MergeLegendBar({
         style={{
           fontSize: "10px",
           padding: "2px 6px",
-          border: `1px solid ${autoCorrelate ? tokens.colorBrandStroke1 : tokens.colorNeutralStroke2}`,
+          border: `1px solid ${autoCorrelate ? theme.accent : theme.border}`,
           borderRadius: "3px",
           backgroundColor: autoCorrelate
-            ? tokens.colorBrandBackground2
-            : tokens.colorNeutralBackground1,
+            ? theme.accentBg
+            : theme.bg,
           color: autoCorrelate
-            ? tokens.colorBrandForeground1
-            : tokens.colorNeutralForeground3,
+            ? theme.accent
+            : theme.textDim,
           cursor: "pointer",
         }}
       >
@@ -254,7 +254,7 @@ export function MergeLegendBar({
       <div
         style={{
           marginLeft: "auto",
-          color: tokens.colorNeutralForeground3,
+          color: theme.textDim,
           flexShrink: 0,
         }}
       >
