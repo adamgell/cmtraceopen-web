@@ -32,13 +32,14 @@ describe("CommandBridge skeleton", () => {
     expect(screen.getByTestId("status-bar")).toBeInTheDocument();
   });
 
-  it("defaults the grid to the collapsed rail width (56px)", async () => {
+  it("defaults the grid to the expanded rail width (220px)", async () => {
     render(<CommandBridge />);
     await flush();
     const rail = screen.getByTestId("rail");
     // Rail is the first grid-track in its parent's columns template.
+    // Rail defaults to expanded so device IDs are visible on first load.
     const track = rail.parentElement!.style.gridTemplateColumns;
-    expect(track).toMatch(/^56px\s+220px\s+1fr$/);
+    expect(track).toMatch(/^220px\s+220px\s+1fr$/);
   });
 
   it("nests the status bar inside the right pane", async () => {

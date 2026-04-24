@@ -52,7 +52,7 @@ describe("DeviceRail", () => {
         <DeviceRail />
       </BridgeStateProvider>
     );
-    await waitFor(() => expect(screen.getByText("GELL")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("GELL-01AA310")).toBeInTheDocument());
   });
 
   it("shows a retry banner when the listDevices call rejects", async () => {
@@ -106,7 +106,7 @@ describe("DeviceRail", () => {
     await waitFor(() => expect(screen.getByText(/fleet unreachable/i)).toBeInTheDocument());
     // Click retry → second fetch succeeds → device renders.
     fireEvent.click(screen.getByRole("button", { name: /retry/i }));
-    await waitFor(() => expect(screen.getByText("GELL")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("GELL-01AA310")).toBeInTheDocument());
     expect(listCalls).toBe(2);
   });
 
@@ -139,9 +139,8 @@ describe("DeviceRail", () => {
       </Provider>
     );
     // Both devices still render — A is "pending"/gray, B renders normally.
-    await waitFor(() => {
-      const rows = screen.getAllByRole("button").filter((el) => el.getAttribute("title")?.startsWith("GELL-"));
-      expect(rows.length).toBe(2);
-    });
+    // Rail defaults to expanded, so each row renders the full device id as text.
+    await waitFor(() => expect(screen.getByText("GELL-AAA")).toBeInTheDocument());
+    expect(screen.getByText("GELL-BBB")).toBeInTheDocument();
   });
 });

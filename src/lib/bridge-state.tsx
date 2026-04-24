@@ -48,11 +48,15 @@ export type BridgeAction =
 const RAIL_STORAGE_KEY = "cmtrace.rail-expanded";
 
 function initialState(): BridgeState {
-  let rail = false;
+  // Default to expanded so full device IDs are visible on first load.
+  // Collapsed mode is still reachable via ⌘B and the preference persists.
+  let rail = true;
   try {
-    rail = localStorage.getItem(RAIL_STORAGE_KEY) === "1";
+    const stored = localStorage.getItem(RAIL_STORAGE_KEY);
+    if (stored === "1") rail = true;
+    else if (stored === "0") rail = false;
   } catch {
-    // localStorage may be unavailable (private mode, SSR) — default collapsed.
+    // localStorage may be unavailable (private mode, SSR) — keep default.
   }
   return {
     railExpanded: rail,

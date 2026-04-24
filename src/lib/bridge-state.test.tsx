@@ -37,9 +37,9 @@ function installLocalStorageShim() {
 }
 
 describe("bridge state", () => {
-  it("starts with rail collapsed and no selection", () => {
+  it("starts with rail expanded and no selection", () => {
     const { result } = renderHook(() => useBridgeState(), { wrapper });
-    expect(result.current.state.railExpanded).toBe(false);
+    expect(result.current.state.railExpanded).toBe(true);
     expect(result.current.state.selectedDeviceId).toBeNull();
     expect(result.current.state.middleMode).toBe("device");
   });
@@ -47,9 +47,9 @@ describe("bridge state", () => {
   it("toggles the rail", () => {
     const { result } = renderHook(() => useBridgeState(), { wrapper });
     act(() => result.current.dispatch({ type: "toggle-rail" }));
-    expect(result.current.state.railExpanded).toBe(true);
-    act(() => result.current.dispatch({ type: "toggle-rail" }));
     expect(result.current.state.railExpanded).toBe(false);
+    act(() => result.current.dispatch({ type: "toggle-rail" }));
+    expect(result.current.state.railExpanded).toBe(true);
   });
 
   it("selects a device and resets session/file", () => {
@@ -77,10 +77,11 @@ describe("bridge state", () => {
     it("persists rail expanded to localStorage on toggle", () => {
       localStorage.clear();
       const { result } = renderHook(() => useBridgeState(), { wrapper });
-      act(() => result.current.dispatch({ type: "toggle-rail" }));
-      expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("1");
+      // Default state is expanded — first toggle flips to collapsed.
       act(() => result.current.dispatch({ type: "toggle-rail" }));
       expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("0");
+      act(() => result.current.dispatch({ type: "toggle-rail" }));
+      expect(localStorage.getItem("cmtrace.rail-expanded")).toBe("1");
     });
 
     it("initializes rail expanded from localStorage on mount", () => {
