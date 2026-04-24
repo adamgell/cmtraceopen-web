@@ -23,14 +23,14 @@ The DeviceLogViewer look is better at conveying "this is a forensics console" an
 - mTLS hardening + testing (next spec)
 - Real KQL execution (this spec delivers the UI + a stubbed executor; real parser and query compiler land in a follow-up)
 - Agent-side changes. Everything here is viewer-only.
-- Migrating DiffView or LocalMode into the new shell — they get a compatibility path (see §7) but a dedicated redesign is deferred.
+- **Redesign** of DiffView or LocalMode — they stay functionally as-is, reachable via the shell (see §7). A token-adoption styling pass on those two components is in scope as the final build step; their feature surfaces are not.
 - Theming for the api-server status page at `:8080` (already colorized in 2026-04-23 work).
 
 ## Design
 
 ### 1. Shell architecture
 
-A single top-level `<CommandBridge>` component replaces today's ViewerShell-mode-switching branch tree. It owns three stacked regions:
+A single top-level `<CommandBridge>` component replaces today's ViewerShell-mode-switching branch tree. It owns four stacked regions, with the status bar nested inside the right pane rather than spanning the full width:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -42,13 +42,12 @@ A single top-level `<CommandBridge>` component replaces today's ViewerShell-mode
 │  rail    │  (device ▾     │                                              │
 │  56px    │   fleet tabs)  │  ~72% of viewport width                      │
 │ (icon)   │    220px       │                                              │
-│          │                │                                              │
-├──────────┴────────────────┴──────────────────────────────────────────────┤
-│  Status bar (row count, warn/err, shortcuts)                             │
-└──────────────────────────────────────────────────────────────────────────┘
+│          │                ├──────────────────────────────────────────────┤
+│          │                │  Status bar (row count, warn/err, shortcuts) │
+└──────────┴────────────────┴──────────────────────────────────────────────┘
 ```
 
-Regions are independently scrollable. Total viewport is split `56 : 220 : 1fr` on a fresh load. A keyboard toggle (`⌘B`) expands the left rail to 220px.
+Regions are independently scrollable. On a fresh load the three panes split `56 : 220 : 1fr` (rail collapsed). `⌘B` toggles the rail to expanded mode, changing the split to `220 : 220 : 1fr` without touching the middle and right pane ratios — the right pane loses 164px of width when the rail expands. State is persisted in localStorage so the rail preference survives reloads.
 
 The three panes communicate through a single shell-level store (`useBridgeState()` — a lightweight React context, no Redux) containing: `{ selectedDevice, selectedSession, selectedFile, fleetFilter, kqlQuery, kqlResult, ui: { railExpanded, railSort } }`.
 
@@ -102,10 +101,10 @@ Docs link at the bottom: `? → KQL quick reference` opens a side panel with the
 Replaces the current top region of ViewerShell and the DeviceLogViewer header. Always visible when a device is selected.
 
 - **Dotted texture**: radial gradient (12px grid). Render via a CSS `background-image` so no SVG assets.
-- **Kicker**: `DEVICE · LOGS` / `FLEET · QUERY` / `LOCAL · FILE` — changes with context. 0.58rem, letter-spacing 0.18em, teal.
-- **Name**: the device hostname (or `—` when nothing selected). 0.95rem, font-weight 700, white.
-- **Chips** (compact, single-line, monospace): `LAST SEEN 11h`, `SESSIONS 44`, `FILES 15`, `PARSE <state>`. State chip color matches the pill palette (§4.2). Overflow: hide behind a `…` expander past viewport width — don't wrap.
-- **Kbd strip** (right-aligned): `⌘/ focus query`, `⌘B rail`, `⌘K jump`, `⌘↑↓ next file`. 0.58rem monospace, teal-keys. Always visible.
+- **Kicker**: a contextual label (not a mode selector). Derived from the shell store's current selection: `DEVICE · LOGS` when a file is active, `FLEET · QUERY` when the middle pane is in FLEET mode with no file selected, `LOCAL · FILE` when the local-mode overlay is open. 0.58rem, letter-spacing 0.18em, teal.
+- **Name**: the device hostname when a device is selected; the query head (`parse_state:failed · 24h`) when in fleet mode; the filename when in local mode; `—` when nothing is selected. 0.95rem, font-weight 700, white.
+- **Chips** (compact, single-line, monospace): `LAST SEEN 11h`, `SESSIONS 44`, `FILES 15`, `PARSE <state>`. State chip color matches the pill palette (§4.2). Overflow: hide behind a `…` expander past viewport width — don't wrap. Chips are only rendered when a device is selected; the row is empty otherwise.
+- **Kbd strip** (right-aligned): `⌘/ focus query`, `⌘B rail`, `⌘K jump`, `⌘↑↓ next file`. 0.58rem monospace, teal-keys. Always visible. `⌘K` opens the device-rail search palette (see §4.3) — not a generic command palette.
 
 ### 4. Left rail (devices)
 
@@ -144,11 +143,11 @@ Full row per device:
 | Red `#f38c8c` | `failed` | Recent session's parse worker crashed |
 | Gray `#5a6878` | `stale` | No bundle in > 24h |
 
-The health dot is computed client-side from the device list + the device's most-recent `parse_state`. No new API — use the existing `/v1/devices` response plus `/v1/devices/{id}/sessions?limit=1`.
+The health dot is computed client-side from the device list + the device's most-recent `parse_state`. No new API — use the existing `/v1/devices` response plus `/v1/devices/{id}/sessions?limit=1` per device. This is N+1 for a fleet of N — 50 devices = 51 initial calls. Acceptable for current fleet sizes; a bulk `/v1/devices/health` endpoint is flagged as an open question for larger fleets.
 
 #### 4.3 Header + controls
 
-- Search input (top of rail when expanded, hidden when collapsed — focus goes through `⌘K` from either state).
+- Search input (top of rail, visible only when expanded). When the rail is collapsed, `⌘K` first expands the rail and then focuses the search input — the palette IS the rail search, there's no floating popover.
 - Section head: `DEVICES · <n>` with a sort indicator (`last-seen` default; alternates: `device-id`, `health`, `session-count`).
 - Below the device list, a **Saved views** section: each entry is a ★-prefixed KQL query pinned from the query bar.
 
@@ -182,7 +181,7 @@ Shows a flat list of matches (session rows or file rows depending on the KQL que
 
 - Device ID (teal) · file path · parse_state tag · elapsed time
 
-Clicking a row pins the device in the left rail (if not already) and loads the entry into the right pane without losing the fleet list — the fleet list stays in the middle pane until explicitly cleared. Provides breadcrumb back-and-forth between fleet query and specific device.
+Clicking a row pins the device in the left rail (if not already) and loads the entry into the right pane. The fleet list stays in the middle pane — it's cleared ONLY by one of: (a) clicking the `DEVICE` tab, (b) running a new KQL query that replaces the result set, (c) pressing `Esc` while the fleet tab has focus. Provides breadcrumb back-and-forth between fleet query and specific device.
 
 ### 6. Right pane (log viewer)
 
@@ -208,7 +207,7 @@ Row styling:
 
 **Filter bar** below the crumb: severity pills (Info/Warn/Error toggleable, defaults all on; Error is highlighted with the red pill variant), search input, component selector, match counter (`500 / 1.3M`).
 
-**Status bar** (bottom of right pane): `rows 28/500 · 1.3M total · 2 warn · 2 err · 24h window · ⌘↑↓ next file · J/K row · / find`.
+**Status bar** (bottom of right pane — right-pane-local, NOT full shell width; see §1 ASCII): `rows 28/500 · 1.3M total · 2 warn · 2 err · 24h window · ⌘↑↓ next file · J/K row · / find`.
 
 **Keyboard**:
 
@@ -222,7 +221,7 @@ Row styling:
 - `ViewerShell` → `CommandBridge` (new component, similar imports). Delete the `mode` state machine (`"local" | "api" | "devices" | "diff"`).
 - `DeviceLogViewer` → deleted after its rail/session/file logic migrates into the new shell's middle pane. Shares `dtoToEntry` and `EntryList` (already extracted).
 - `ApiMode` entry-fetching logic → moves into the right-pane controller.
-- `LocalMode` → stays, invoked as an overlay from the KQL bar's "drag file" affordance (or a menu). Not redesigned; just reachable.
+- `LocalMode` → stays. Invoked via a global drag-and-drop handler on the shell root (dropping a `.log`/`.cmtlog`/`.txt` file anywhere on the shell opens LocalMode as a full-screen overlay) OR via `⌘O` which shows the File Picker from `src/lib/file-pickers.ts`. The overlay covers the shell; `Esc` dismisses back to the previous shell state. Not redesigned; just reachable without a mode switch.
 - `FilterBar` → inlined into the right pane's filter bar (it's already the same chips + severity toggle; rename and hard-code to right-pane ownership).
 - `FilesPanel` → deleted. Middle pane owns the files list.
 - `Toolbar` → deleted. Keyboard shortcuts + the KQL bar replace it. Theme-picker (if present) moves to a shell-level menu behind `⌘,`.
@@ -282,7 +281,7 @@ No loading spinners in the main chrome. Skeleton rows (3 rail slots, 4 session s
 
 - **Component tests** (vitest + testing-library): every new component gets a `<Component>.test.tsx`. Target: smoke render, keyboard shortcuts, and one error path.
 - **Integration**: `CommandBridge.test.tsx` mounts the whole shell with a mocked api-client, confirms device select → session expand → file open → entries render flow.
-- **Visual regression**: out of scope for v1 — no Percy/Chromatic. Add TODO for a future spec.
+- **Visual regression**: out of scope for v1 — no Percy/Chromatic. Flagged as a separate-spec concern in the Open Questions list.
 - **Accessibility**: all interactive elements (pills, rows, tabs) get aria-label + role. Keyboard navigation asserts: `⌘B`, `⌘K`, `⌘/`, `J`/`K`, `⌘↑/↓`, `Esc`. The dense grid's scroll follows focus.
 - **Manual**: GELL-01AA310 session on local dev (has the SecureBoot + ccmexec data I already verified).
 
@@ -291,7 +290,7 @@ No loading spinners in the main chrome. Skeleton rows (3 rail slots, 4 session s
 Incrementally shippable. Each step merges to main and deploys.
 
 1. **Theme tokens + palette extraction**. New `src/lib/theme.ts`. No UI change yet. Existing components don't consume it until step 2.
-2. **CommandBridge shell skeleton**: the 3-pane grid with hardcoded content, plus banner + kbd strip. Wires no data. Mounted at a new route (`/?v=next`) so the old ViewerShell stays reachable.
+2. **CommandBridge shell skeleton**: the 3-pane grid with hardcoded content, plus banner + kbd strip. Wires no data. Gated behind `URLSearchParams.get("v") === "next"` (no router dependency; the existing viewer is already a no-router SPA) so the old ViewerShell stays reachable until cutover.
 3. **Left rail (collapsed + expanded)** with live device fetches and health dots.
 4. **Middle pane — device mode**: sessions + files, matching the existing DeviceLogViewer data flow.
 5. **Right pane — log grid**: port EntryList into the dense 6-column layout, status bar.
@@ -308,5 +307,7 @@ mTLS hardening + real KQL executor follow in separate specs after step 10 lands.
 
 - **Saved view storage**: localStorage for v1 works for single-operator dev. A team would want server-side persistence. Not in scope; will fall out of a later api-server spec that adds a `/v1/saved_views` surface.
 - **KQL executor boundary**: the real executor could live client-side (translating to existing REST filters) or server-side (new `/v1/query` endpoint compiling to SQL). No decision this spec. UI is identical either way.
+- **Device-health bulk endpoint**: N+1 per-device session fetch for health dots works for <100-device fleets. A bulk `/v1/devices/health` (returning `(device_id, most_recent_parse_state, most_recent_ingested_utc)` tuples) would collapse that to a single call. Defer until a fleet has enough devices to matter.
+- **Visual regression testing**: no Percy / Chromatic / Storybook-snapshot wiring today. Worth its own spec once the new shell stabilizes — catches unintended layout drift on dense-grid changes, which this spec is particularly vulnerable to.
 - **Theme light mode**: if someone wants it, pair with tokens redesign. Deferred.
 - **Viewer on `:5173` vs `:8083`**: containerized viewer stays canonical. Dev mode on `:5173` continues to work; theme tokens are shared.
