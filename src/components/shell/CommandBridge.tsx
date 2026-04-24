@@ -4,12 +4,14 @@
 // in Tasks 4-17.
 
 import { BridgeStateProvider, useBridgeState } from "../../lib/bridge-state";
+import { runKqlStub } from "../../lib/kql-executor-stub";
 import { theme } from "../../lib/theme";
 import { DeviceRail } from "../rail/DeviceRail";
 import { MiddlePane } from "../middle/MiddlePane";
 import { LogViewer } from "../right/LogViewer";
 import { Banner } from "./Banner";
 import { KqlBar } from "./KqlBar";
+import { ResultStrip } from "./ResultStrip";
 
 export function CommandBridge() {
   return (
@@ -20,7 +22,7 @@ export function CommandBridge() {
 }
 
 function BridgeInner() {
-  const { state } = useBridgeState();
+  const { state, dispatch } = useBridgeState();
   const railWidth = state.railExpanded ? "220px" : "56px";
   return (
     <div
@@ -33,12 +35,19 @@ function BridgeInner() {
         fontFamily: theme.font.ui,
       }}
     >
-      {/* Wrap KqlBar in a testid'd div so the existing CommandBridge test
-          continues to find the kql-bar region without coupling KqlBar to the
-          test. onRun is a console.log placeholder — Task 14 wires the real
-          executor. */}
+      {/* Wrap KqlBar + ResultStrip in a testid'd div so the existing
+          CommandBridge test continues to find the kql-bar region without
+          coupling KqlBar to the test. onRun writes the query + a stubbed
+          summary into bridge state; ResultStrip renders under the bar when
+          state.fleetResult is non-null. */}
       <div data-testid="kql-bar">
-        <KqlBar onRun={(q) => { /* wired in Task 14 */ console.log("run", q); }} />
+        <KqlBar
+          onRun={(q) => {
+            dispatch({ type: "set-fleet-query", query: q });
+            dispatch({ type: "set-fleet-result", result: runKqlStub(q) });
+          }}
+        />
+        <ResultStrip />
       </div>
       {/* Banner reflects the rail's selected device. Real device data flows in
           later when the rail knows which device is selected (Task 6+). */}
