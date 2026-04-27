@@ -9,7 +9,7 @@
   /* ── Type ─────────────────────────────────────────────────── */
   --cmt-font-ui: 'Segoe UI', 'Segoe UI Web (West European)', -apple-system,
     BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
-  --cmt-font-mono: Consolas, 'Cascadia Mono', 'Courier New', Courier, monospace;
+  --cmt-font-mono: Consolas, 'Courier New', Courier, monospace;
   --cmt-font-numeric: Bahnschrift, 'Segoe UI', sans-serif;
 
   /* Fluent type ramp — Base 100…600, Hero 700…1000 */
@@ -392,6 +392,11 @@
   --shell-accent: #5ee3c5;
   --shell-accent-bg: #0e2d22;
   --shell-hover-bg: #151c25;
+  --shell-backdrop: rgba(0,0,0,0.55);
+  --shell-syntax-keyword: #9a7ef8;
+  --shell-row-tint-error: rgba(243,140,140,.08);
+  --shell-row-tint-warning: rgba(243,195,127,.06);
+  --shell-shadow-dropdown: 0 6px 18px rgba(0,0,0,0.4);
 
   /* Pills (parse / health state) */
   --shell-pill-ok-fg: #5ee3c5;            --shell-pill-ok-bg: #0e2d22;            --shell-pill-ok-dot: #5ee3c5;

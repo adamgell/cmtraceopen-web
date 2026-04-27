@@ -46,7 +46,7 @@ function writeRecent(queries: string[]) {
 const TOKEN_COLORS: Record<Token["kind"], string> = {
   table: theme.pill.okFallbacks.fg, // amber
   pipe: theme.accent,
-  keyword: "#9a7ef8", // purple
+  keyword: theme.syntax.keyword, // purple
   field: theme.textDim,
   operator: theme.accent,
   string: theme.pill.partial.fg, // orange
@@ -240,7 +240,7 @@ function HighlightOverlay({ tokens }: { tokens: Token[] }) {
 
 const SUGGESTION_KIND_COLORS: Record<Suggestion["kind"], string> = {
   table: theme.pill.okFallbacks.fg,
-  keyword: "#9a7ef8",
+  keyword: theme.syntax.keyword,
   field: theme.textDim,
   operator: theme.accent,
   function: theme.accent,

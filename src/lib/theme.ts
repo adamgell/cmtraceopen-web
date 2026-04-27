@@ -18,6 +18,17 @@ export const theme = {
   accent: "#5ee3c5",
   accentBg: "#0e2d22",
   hoverBg: "#151c25",
+  backdrop: "rgba(0,0,0,0.55)",
+  syntax: {
+    keyword: "#9a7ef8",
+  },
+  rowTint: {
+    error: "rgba(243,140,140,.08)",
+    warning: "rgba(243,195,127,.06)",
+  },
+  shadow: {
+    dropdown: "0 6px 18px rgba(0,0,0,0.4)",
+  },
   pill: {
     ok:          { fg: "#5ee3c5", bg: "#0e2d22", dot: "#5ee3c5" },
     okFallbacks: { fg: "#f3c37f", bg: "#3d2e12", dot: "#f3c37f" },

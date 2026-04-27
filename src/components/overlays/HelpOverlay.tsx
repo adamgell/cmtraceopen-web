@@ -32,7 +32,7 @@ export function HelpOverlay({ open, onClose }: Props) {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.55)",
+        background: theme.backdrop,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

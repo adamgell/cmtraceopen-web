@@ -37,8 +37,8 @@ function severityColor(sev: string): string {
 }
 
 function rowBackground(sev: string, zebra: boolean): string {
-  if (sev === "Error") return "rgba(243,140,140,.08)";
-  if (sev === "Warning") return "rgba(243,195,127,.06)";
+  if (sev === "Error") return theme.rowTint.error;
+  if (sev === "Warning") return theme.rowTint.warning;
   return zebra ? theme.surfaceAlt : "transparent";
 }
 
