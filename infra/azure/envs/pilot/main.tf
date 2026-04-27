@@ -1,11 +1,7 @@
 ###############################################################################
-# Pilot environment — creates the RG, Entra groups, and calls the module.
-#
-# Two-phase apply:
-#   1. `terraform apply` — creates RG, KV, network, Postgres, ACA, AppGW.
-#      AppGW will be unhealthy until certs are uploaded.
-#   2. Upload certs to KV (see outputs for commands), then apply again to
-#      let AppGW pick them up.
+# Pilot environment — simplified. Just ACA (external) + Postgres.
+# No AppGW, no KV, no mTLS, no VNet complexity.
+# Cloudflare handles TLS termination at the edge.
 ###############################################################################
 
 terraform {
@@ -19,24 +15,14 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 3.0"
     }
-    azapi = {
-      source  = "Azure/azapi"
-      version = "~> 2.0"
-    }
   }
 }
 
 provider "azurerm" {
-  features {
-    key_vault {
-      purge_soft_deleted_secrets_on_destroy      = false
-      purge_soft_deleted_certificates_on_destroy = false
-    }
-  }
+  features {}
 }
 
 provider "azuread" {}
-provider "azapi" {}
 
 data "azurerm_client_config" "current" {}
 
@@ -45,7 +31,7 @@ data "azurerm_client_config" "current" {}
 # ---------------------------------------------------------------------------
 
 resource "azurerm_resource_group" "pilot" {
-  name     = "rg-cmtraceopen-pilot-cus"
+  name     = "rg-cmtrace-pilot"
   location = "centralus"
   tags = {
     System      = "cmtraceopen"
@@ -55,60 +41,218 @@ resource "azurerm_resource_group" "pilot" {
 }
 
 # ---------------------------------------------------------------------------
-# Entra Security Groups
+# Log Analytics (required by ACA)
 # ---------------------------------------------------------------------------
 
-resource "azuread_group" "kv_admins" {
-  display_name     = "cmtraceopen-pilot-kv-admins"
-  security_enabled = true
-  description      = "Key Vault admin access for cmtraceopen pilot (cert + secret upload)"
-  members          = [data.azurerm_client_config.current.object_id]
-}
-
-resource "azuread_group" "pg_admins" {
-  display_name     = "cmtraceopen-pilot-pg-admins"
-  security_enabled = true
-  description      = "Postgres AAD admin for cmtraceopen pilot"
-  members          = [data.azurerm_client_config.current.object_id]
-}
-
-# ---------------------------------------------------------------------------
-# CMTrace API Module
-# ---------------------------------------------------------------------------
-
-module "cmtrace_api" {
-  source = "../../"
-
-  environment         = "pilot"
-  location            = "centralus"
+resource "azurerm_log_analytics_workspace" "law" {
+  name                = "cmtrace-pilot-law"
+  location            = azurerm_resource_group.pilot.location
   resource_group_name = azurerm_resource_group.pilot.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
   tags                = azurerm_resource_group.pilot.tags
+}
 
-  image = var.api_image
+# ---------------------------------------------------------------------------
+# Postgres Flexible Server (public access for pilot simplicity)
+# ---------------------------------------------------------------------------
 
-  entra_tenant_id = var.entra_tenant_id
-  entra_audience  = var.entra_audience
-  cors_origins    = var.cors_origins
+resource "random_password" "pg" {
+  length  = 32
+  special = true
+}
 
-  postgres_sku_name            = "B_Standard_B1ms"
-  postgres_storage_mb          = 32768
-  postgres_aad_admin_object_id = azuread_group.pg_admins.object_id
+resource "azurerm_postgresql_flexible_server" "pg" {
+  name                          = "cmtrace-pilot-pg"
+  resource_group_name           = azurerm_resource_group.pilot.name
+  location                      = azurerm_resource_group.pilot.location
+  version                       = "16"
+  administrator_login           = "cmtraceadmin"
+  administrator_password        = random_password.pg.result
+  sku_name                      = "B_Standard_B1ms"
+  storage_mb                    = 32768
+  zone                          = "1"
+  public_network_access_enabled = true
+  tags                          = azurerm_resource_group.pilot.tags
 
-  aca_use_workload_profile = false
-  aca_min_replicas         = 1
-  aca_max_replicas         = 3
-  aca_cpu                  = 0.5
-  aca_memory               = "1Gi"
+  authentication {
+    active_directory_auth_enabled = false
+    password_auth_enabled         = true
+  }
+}
 
-  appgw_capacity_min = 1
-  appgw_capacity_max = 3
-  frontend_fqdn      = var.frontend_fqdn
+resource "azurerm_postgresql_flexible_server_database" "db" {
+  name      = "cmtrace"
+  server_id = azurerm_postgresql_flexible_server.pg.id
+  charset   = "UTF8"
+  collation = "en_US.utf8"
+}
 
-  kv_admin_object_id     = azuread_group.kv_admins.object_id
-  kv_allow_public_access = true
+resource "azurerm_postgresql_flexible_server_firewall_rule" "allow_azure" {
+  name             = "AllowAzureServices"
+  server_id        = azurerm_postgresql_flexible_server.pg.id
+  start_ip_address = "0.0.0.0"
+  end_ip_address   = "0.0.0.0"
+}
 
-  mtls_require_ingest = false
-  certs_uploaded      = var.certs_uploaded
+# ---------------------------------------------------------------------------
+# Storage Account (for blob bundles)
+# ---------------------------------------------------------------------------
+
+resource "azurerm_storage_account" "sa" {
+  name                     = "cmtracepilotsa"
+  resource_group_name      = azurerm_resource_group.pilot.name
+  location                 = azurerm_resource_group.pilot.location
+  account_tier             = "Standard"
+  account_replication_type = "LRS"
+  tags                     = azurerm_resource_group.pilot.tags
+}
+
+resource "azurerm_storage_container" "bundles" {
+  name                  = "bundles"
+  storage_account_id    = azurerm_storage_account.sa.id
+  container_access_type = "private"
+}
+
+# ---------------------------------------------------------------------------
+# Container Apps Environment + App (external ingress)
+# ---------------------------------------------------------------------------
+
+resource "azurerm_container_app_environment" "env" {
+  name                       = "cmtrace-pilot-env"
+  location                   = azurerm_resource_group.pilot.location
+  resource_group_name        = azurerm_resource_group.pilot.name
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
+  tags                       = azurerm_resource_group.pilot.tags
+}
+
+resource "azurerm_container_app" "api" {
+  name                         = "cmtrace-pilot-api"
+  container_app_environment_id = azurerm_container_app_environment.env.id
+  resource_group_name          = azurerm_resource_group.pilot.name
+  revision_mode                = "Single"
+  tags                         = azurerm_resource_group.pilot.tags
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  ingress {
+    external_enabled = true
+    target_port      = 8080
+    transport        = "auto"
+    traffic_weight {
+      latest_revision = true
+      percentage      = 100
+    }
+  }
+
+  template {
+    min_replicas = 1
+    max_replicas = 3
+
+    volume {
+      name         = "data-dir"
+      storage_type = "EmptyDir"
+    }
+
+    container {
+      name   = "api"
+      image  = var.api_image
+      cpu    = 0.5
+      memory = "1Gi"
+
+      env {
+        name  = "CMTRACE_LISTEN_ADDR"
+        value = "0.0.0.0:8080"
+      }
+      env {
+        name  = "CMTRACE_AUTH_MODE"
+        value = "entra"
+      }
+      env {
+        name  = "CMTRACE_ENTRA_TENANT_ID"
+        value = var.entra_tenant_id
+      }
+      env {
+        name  = "CMTRACE_ENTRA_AUDIENCE"
+        value = var.entra_audience
+      }
+      env {
+        name  = "CMTRACE_ENTRA_JWKS_URI"
+        value = "https://login.microsoftonline.com/${var.entra_tenant_id}/discovery/v2.0/keys"
+      }
+      env {
+        name  = "CMTRACE_DATABASE_URL"
+        value = "postgres://cmtraceadmin:${urlencode(random_password.pg.result)}@${azurerm_postgresql_flexible_server.pg.fqdn}:5432/cmtrace?sslmode=require"
+      }
+      env {
+        name  = "CMTRACE_BLOB_BACKEND"
+        value = "azure"
+      }
+      env {
+        name  = "CMTRACE_AZURE_STORAGE_ACCOUNT"
+        value = azurerm_storage_account.sa.name
+      }
+      env {
+        name  = "CMTRACE_AZURE_STORAGE_CONTAINER"
+        value = "bundles"
+      }
+      env {
+        name  = "CMTRACE_AZURE_USE_MANAGED_IDENTITY"
+        value = "true"
+      }
+      env {
+        name  = "CMTRACE_TLS_ENABLED"
+        value = "false"
+      }
+      env {
+        name  = "CMTRACE_MTLS_REQUIRE_INGEST"
+        value = "false"
+      }
+      env {
+        name  = "CMTRACE_DEV_UNAUTH_READS"
+        value = "1"
+      }
+      env {
+        name  = "CMTRACE_DATA_DIR"
+        value = "/var/lib/cmtrace"
+      }
+      env {
+        name  = "RUST_LOG"
+        value = "info"
+      }
+
+      volume_mounts {
+        name = "data-dir"
+        path = "/var/lib/cmtrace"
+      }
+
+      liveness_probe {
+        transport               = "HTTP"
+        port                    = 8080
+        path                    = "/healthz"
+        initial_delay           = 10
+        interval_seconds        = 30
+        failure_count_threshold = 3
+      }
+
+      readiness_probe {
+        transport               = "HTTP"
+        port                    = 8080
+        path                    = "/readyz"
+        interval_seconds        = 10
+        failure_count_threshold = 3
+      }
+    }
+  }
+}
+
+# RBAC: ACA MI -> Storage Blob Data Contributor
+resource "azurerm_role_assignment" "blob_writer" {
+  scope                = azurerm_storage_account.sa.id
+  role_definition_name = "Storage Blob Data Contributor"
+  principal_id         = azurerm_container_app.api.identity[0].principal_id
 }
 
 # ---------------------------------------------------------------------------
@@ -125,71 +269,25 @@ variable "entra_audience" {
   default = "b2990298-7cdd-4426-b311-2df0221b6eca"
 }
 
-variable "frontend_fqdn" {
-  description = "Public FQDN for the pilot API (point DNS A record at the AppGW IP after apply)."
-  type        = string
-}
-
 variable "api_image" {
   type    = string
-  default = "ghcr.io/adamgell/cmtraceopen-api:v0.1.0"
-}
-
-variable "cors_origins" {
-  type    = list(string)
-  default = []
-}
-
-variable "certs_uploaded" {
-  description = "Set true after uploading frontend cert + CA bundle to KV. Creates AppGW on second apply."
-  type        = bool
-  default     = false
+  default = "ghcr.io/adamgell/cmtraceopen-api:0.1.0"
 }
 
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
 
-output "appgw_public_ip" {
-  description = "Point your DNS A record here."
-  value       = module.cmtrace_api.appgw_public_ip
+output "api_url" {
+  value = "https://${azurerm_container_app.api.ingress[0].fqdn}"
 }
 
-output "appgw_test_fqdn" {
-  description = "Azure-assigned *.cloudapp.azure.com name (works before DNS cutover)."
-  value       = module.cmtrace_api.appgw_public_fqdn
+output "api_fqdn" {
+  description = "Point pilot.cmtrace.net CNAME at this"
+  value       = azurerm_container_app.api.ingress[0].fqdn
 }
 
-output "ingress_url" {
-  value = module.cmtrace_api.ingress_url
-}
-
-output "key_vault_uri" {
-  value = module.cmtrace_api.key_vault_uri
-}
-
-output "key_vault_id" {
-  value = module.cmtrace_api.key_vault_id
-}
-
-output "cert_upload_commands" {
-  description = "Run these after the first apply to upload certs to KV."
-  value       = <<-EOT
-    # 1. Upload the frontend TLS cert (PFX with private key):
-    az keyvault secret set \
-      --vault-name $(terraform output -raw key_vault_uri | sed 's|https://||;s|.vault.*||') \
-      --name appgw-frontend-cert \
-      --file /path/to/frontend-cert.pfx \
-      --encoding base64
-
-    # 2. Upload the Cloud PKI CA bundle (Root + Issuing PEM concatenated):
-    cat gell-pki-root.pem gell-pki-issuing.pem > ca-bundle.pem
-    az keyvault secret set \
-      --vault-name $(terraform output -raw key_vault_uri | sed 's|https://||;s|.vault.*||') \
-      --name appgw-client-root-ca \
-      --file ca-bundle.pem \
-      --encoding utf-8
-
-    # 3. Re-run terraform apply so AppGW picks up the certs.
-  EOT
+output "postgres_fqdn" {
+  value     = azurerm_postgresql_flexible_server.pg.fqdn
+  sensitive = true
 }
