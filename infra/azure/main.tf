@@ -13,10 +13,6 @@
 #     passed in. Submodules don't reconstruct names.
 ###############################################################################
 
-data "azurerm_resource_group" "rg" {
-  name = var.resource_group_name
-}
-
 data "azurerm_client_config" "current" {}
 
 # ---------------------------------------------------------------------------
@@ -27,7 +23,7 @@ data "azurerm_client_config" "current" {}
 resource "azurerm_log_analytics_workspace" "law" {
   name                = local.naming.law
   location            = var.location
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   sku                 = "PerGB2018"
   retention_in_days   = 30
   tags                = local.default_tags
@@ -40,7 +36,7 @@ resource "azurerm_log_analytics_workspace" "law" {
 module "network" {
   source = "./modules/network"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -55,7 +51,7 @@ module "network" {
 module "keyvault" {
   source = "./modules/keyvault"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -71,7 +67,7 @@ module "keyvault" {
 module "postgres" {
   source = "./modules/postgres"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -90,7 +86,7 @@ module "postgres" {
 module "storage" {
   source = "./modules/storage"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -111,7 +107,7 @@ data "azurerm_key_vault_secret" "client_ca_bundle" {
 module "containerapp" {
   source = "./modules/containerapp"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -147,7 +143,7 @@ module "containerapp" {
 module "appgw" {
   source = "./modules/appgw"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
