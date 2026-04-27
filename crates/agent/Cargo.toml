@@ -110,7 +110,7 @@ axum = "0.8"
 # modules only as concrete collectors / service code actually need them.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_EventLog", "Win32_System_SystemInformation"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_EventLog", "Win32_System_SystemInformation"] }
 
 [features]
 # The `redaction` feature gates the integration test suite in
