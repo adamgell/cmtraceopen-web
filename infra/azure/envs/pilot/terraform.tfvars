@@ -1,6 +1,6 @@
 # Pilot environment values.
 # frontend_fqdn is the only required override — set it to a domain you control.
-frontend_fqdn = "pilot-api.cmtraceopen.com"
+frontend_fqdn = "pilot.cmtrace.net"
 
 # Override these if the viewer is hosted on a different origin:
 # cors_origins = ["https://pilot.cmtraceopen.com"]
