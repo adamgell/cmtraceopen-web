@@ -75,15 +75,6 @@ resource "azurerm_container_app" "api" {
     identity            = "System"
   }
 
-  # KV-backed secret: client CA bundle PEM (Root + Issuing CAs).
-  # The init container reads this and writes it to the shared volume at
-  # /var/lib/cmtrace/ca-bundle.pem so the api-server can validate certs
-  # forwarded by AppGW in the X-ARR-ClientCert header.
-  secret {
-    name                = "cmtrace-client-ca-bundle"
-    key_vault_secret_id = var.client_ca_bundle_secret_id
-    identity            = "System"
-  }
 
   ingress {
     external_enabled = false # AppGW reaches us internally; no public ingress
@@ -98,6 +89,11 @@ resource "azurerm_container_app" "api" {
   template {
     min_replicas = var.min_replicas
     max_replicas = var.max_replicas
+
+    volume {
+      name         = "data-dir"
+      storage_type = "EmptyDir"
+    }
 
     container {
       name   = "api"
@@ -128,6 +124,11 @@ resource "azurerm_container_app" "api" {
       env {
         name  = "CMTRACE_AZURE_STORAGE_ACCOUNT"
         value = var.storage_account_name
+      }
+
+      volume_mounts {
+        name = "data-dir"
+        path = "/var/lib/cmtrace"
       }
 
       liveness_probe {
