@@ -17,6 +17,7 @@ export const theme = {
   textFainter: "#3d4a5a",
   accent: "#5ee3c5",
   accentBg: "#0e2d22",
+  hoverBg: "#151c25",
   pill: {
     ok:          { fg: "#5ee3c5", bg: "#0e2d22", dot: "#5ee3c5" },
     okFallbacks: { fg: "#f3c37f", bg: "#3d2e12", dot: "#f3c37f" },
