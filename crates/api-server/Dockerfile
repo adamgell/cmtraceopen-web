@@ -23,7 +23,7 @@
 # Pin matches rust-toolchain.toml at the repo root. Without this match,
 # rustup auto-installs the channel inside the image on every `cargo`
 # invocation — silent slowdown of every build step.
-FROM rust:1.90-slim-bookworm AS builder
+FROM rust:1.95-slim-bookworm AS builder
 
 WORKDIR /workspace
 
