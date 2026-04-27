@@ -100,6 +100,14 @@ module "storage" {
   log_analytics_id = azurerm_log_analytics_workspace.law.id
 }
 
+# Operator-uploaded CA bundle secret (Root + Issuing CA PEM). Referenced by
+# the containerapp init container to write /var/lib/cmtrace/ca-bundle.pem.
+# The operator uploads this before `terraform apply` — see runbook §6.
+data "azurerm_key_vault_secret" "client_ca_bundle" {
+  name         = var.client_root_ca_kv_secret_name
+  key_vault_id = module.keyvault.key_vault_id
+}
+
 module "containerapp" {
   source = "./modules/containerapp"
 
@@ -132,6 +140,8 @@ module "containerapp" {
 
   postgres_server_fqdn   = module.postgres.server_fqdn
   postgres_database_name = module.postgres.database_name
+
+  client_ca_bundle_secret_id = data.azurerm_key_vault_secret.client_ca_bundle.versionless_id
 }
 
 module "appgw" {
