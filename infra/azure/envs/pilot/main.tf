@@ -108,6 +108,7 @@ module "cmtrace_api" {
   kv_allow_public_access = true
 
   mtls_require_ingest = false
+  certs_uploaded      = var.certs_uploaded
 }
 
 # ---------------------------------------------------------------------------
@@ -137,6 +138,12 @@ variable "api_image" {
 variable "cors_origins" {
   type    = list(string)
   default = []
+}
+
+variable "certs_uploaded" {
+  description = "Set true after uploading frontend cert + CA bundle to KV. Creates AppGW on second apply."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------------------------

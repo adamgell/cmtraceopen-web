@@ -163,23 +163,15 @@ resource "azurerm_application_gateway" "appgw" {
   }
 
   # ---------------------------------------------------------------------
-  # SSL profiles — TWO of them, one per mTLS posture.
+  # SSL profile — single profile with optional mTLS. The api-server
+  # handles enforcement via CMTRACE_MTLS_REQUIRE_INGEST at the app layer.
+  # A future dual-listener design (separate hostnames for ingest vs query)
+  # can re-introduce the split; Azure AppGW doesn't allow two listeners
+  # on the same port+hostname+IP with different SSL profiles.
   # ---------------------------------------------------------------------
-
-  ssl_profile {
-    name                                = local.ssl_profile_mtls
-    verify_client_certificate_issuer_dn = true
-    trusted_client_certificate_names    = [local.trusted_ca_name]
-    ssl_policy {
-      policy_type = "Predefined"
-      policy_name = "AppGwSslPolicy20220101"
-    }
-  }
 
   ssl_profile {
     name = local.ssl_profile_open
-    # No verify_client_certificate_issuer_dn + no trusted_client_certificate_names
-    # = no mTLS enforcement on this profile.
     ssl_policy {
       policy_type = "Predefined"
       policy_name = "AppGwSslPolicy20220101"
@@ -187,19 +179,8 @@ resource "azurerm_application_gateway" "appgw" {
   }
 
   # ---------------------------------------------------------------------
-  # Listeners — share IP+port+hostname; differ only in SSL profile.
+  # Single listener — all traffic through one HTTPS listener.
   # ---------------------------------------------------------------------
-
-  http_listener {
-    name                           = local.fe_listener_mtls
-    frontend_ip_configuration_name = local.fe_ip_name
-    frontend_port_name             = local.fe_port_https
-    protocol                       = "Https"
-    ssl_certificate_name           = local.ssl_cert_name
-    ssl_profile_name               = local.ssl_profile_mtls
-    host_name                      = var.frontend_fqdn
-    require_sni                    = true
-  }
 
   http_listener {
     name                           = local.fe_listener_open
@@ -249,34 +230,9 @@ resource "azurerm_application_gateway" "appgw" {
   }
 
   # ---------------------------------------------------------------------
-  # Routing — path-based rule on the mTLS-required listener handles
-  # /v1/ingest/* (mTLS enforced); a separate basic rule on the open
-  # listener handles everything else (operator query routes via bearer).
-  #
-  # Rule priorities: ingest must come first (lowest priority number) so
-  # AppGW prefers the mTLS-required listener for ingest hostnames.
+  # Routing — single basic rule sends all traffic to the ACA backend.
+  # mTLS enforcement is handled at the api-server layer, not AppGW.
   # ---------------------------------------------------------------------
-
-  url_path_map {
-    name                               = local.pathmap_name
-    default_backend_address_pool_name  = local.backend_pool_name
-    default_backend_http_settings_name = local.backend_settings
-
-    path_rule {
-      name                       = "ingest"
-      paths                      = ["/v1/ingest/*"]
-      backend_address_pool_name  = local.backend_pool_name
-      backend_http_settings_name = local.backend_settings
-    }
-  }
-
-  request_routing_rule {
-    name               = local.rule_ingest
-    rule_type          = "PathBasedRouting"
-    http_listener_name = local.fe_listener_mtls
-    url_path_map_name  = local.pathmap_name
-    priority           = 100
-  }
 
   request_routing_rule {
     name                       = local.rule_default
@@ -284,7 +240,7 @@ resource "azurerm_application_gateway" "appgw" {
     http_listener_name         = local.fe_listener_open
     backend_address_pool_name  = local.backend_pool_name
     backend_http_settings_name = local.backend_settings
-    priority                   = 200
+    priority                   = 100
   }
 
   lifecycle {
