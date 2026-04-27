@@ -14,8 +14,9 @@
 // - Running is a no-op for blank / whitespace-only input.
 // - id="kql-input" is required by Task 16's ⌘/ focus shortcut — don't drop it.
 
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useRef, useMemo, useState, type KeyboardEvent } from "react";
 import { useBridgeState } from "../../lib/bridge-state";
+import { suggest, type Suggestion } from "../../lib/kql-autocomplete";
 import { tokenize, type Token } from "../../lib/kql-lexer";
 import { theme } from "../../lib/theme";
 import { readSavedViews, writeSavedViews } from "../rail/SavedViews";
@@ -63,7 +64,10 @@ export function KqlBar({ onRun }: Props) {
   const { state } = useBridgeState();
   const [query, setQuery] = useState(state.fleetQuery);
   const [focused, setFocused] = useState(false);
+  const [cursor, setCursor] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
   const tokens = useMemo(() => tokenize(query), [query]);
+  const suggestions = useMemo(() => suggest(query, cursor), [query, cursor]);
 
   function runNow() {
     if (!query.trim()) return;
@@ -111,9 +115,14 @@ export function KqlBar({ onRun }: Props) {
       </span>
       <div style={{ flex: 1, position: "relative" }}>
         <input
+          ref={inputRef}
           id="kql-input"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setCursor(e.target.selectionStart ?? e.target.value.length);
+          }}
+          onSelect={(e) => setCursor((e.target as HTMLInputElement).selectionStart ?? cursor)}
           onFocus={() => setFocused(true)}
           onBlur={() => setTimeout(() => setFocused(false), 150)}
           onKeyDown={onKey}
@@ -133,9 +142,27 @@ export function KqlBar({ onRun }: Props) {
         <HighlightOverlay tokens={tokens} />
         {focused && (
           <Dropdown
+            suggestions={suggestions}
             onPick={(q) => {
               setQuery(q);
               onRun(q);
+            }}
+            onAccept={(s) => {
+              const before = query.slice(0, cursor);
+              const after = query.slice(cursor);
+              const tokens = tokenize(before);
+              const meaningful = tokens.filter((t) => t.kind !== "whitespace");
+              const last = meaningful[meaningful.length - 1];
+              const replaceFrom = last && last.kind !== "pipe" && last.kind !== "operator"
+                ? last.start : cursor;
+              const next = query.slice(0, replaceFrom) + s.insert + " " + after.trimStart();
+              setQuery(next);
+              const newCursor = replaceFrom + s.insert.length + 1;
+              setCursor(newCursor);
+              setTimeout(() => {
+                inputRef.current?.focus();
+                inputRef.current?.setSelectionRange(newCursor, newCursor);
+              }, 0);
             }}
           />
         )}
@@ -211,10 +238,27 @@ function HighlightOverlay({ tokens }: { tokens: Token[] }) {
   );
 }
 
-function Dropdown({ onPick }: { onPick: (q: string) => void }) {
+const SUGGESTION_KIND_COLORS: Record<Suggestion["kind"], string> = {
+  table: theme.pill.okFallbacks.fg,
+  keyword: "#9a7ef8",
+  field: theme.textDim,
+  operator: theme.accent,
+  function: theme.accent,
+  value: theme.pill.partial.fg,
+};
+
+function Dropdown({
+  suggestions,
+  onPick,
+  onAccept,
+}: {
+  suggestions: Suggestion[];
+  onPick: (q: string) => void;
+  onAccept: (s: Suggestion) => void;
+}) {
   const recent = readRecent();
   const saved = readSavedViews();
-  if (recent.length === 0 && saved.length === 0) return null;
+  if (suggestions.length === 0 && recent.length === 0 && saved.length === 0) return null;
   return (
     <div
       style={{
@@ -230,8 +274,50 @@ function Dropdown({ onPick }: { onPick: (q: string) => void }) {
         fontFamily: theme.font.mono,
         fontSize: "0.68rem",
         zIndex: 10,
+        maxHeight: "260px",
+        overflow: "auto",
       }}
     >
+      {suggestions.length > 0 && (
+        <>
+          <div
+            style={{
+              padding: "0.2rem 0.75rem",
+              color: theme.textDim,
+              fontSize: "0.55rem",
+              letterSpacing: "0.1em",
+              textTransform: "uppercase",
+            }}
+          >
+            Schema
+          </div>
+          {suggestions.map((s) => (
+            <button
+              key={`${s.kind}-${s.label}`}
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                onAccept(s);
+              }}
+              style={{
+                all: "unset",
+                display: "flex",
+                width: "100%",
+                padding: "0.25rem 0.75rem",
+                gap: "0.6rem",
+                alignItems: "center",
+                color: theme.text,
+                cursor: "pointer",
+              }}
+            >
+              <span style={{ color: SUGGESTION_KIND_COLORS[s.kind], minWidth: "3.5rem", fontSize: "0.55rem", textTransform: "uppercase" }}>
+                {s.kind}
+              </span>
+              <span>{s.label}</span>
+            </button>
+          ))}
+        </>
+      )}
       {recent.length > 0 && (
         <>
           <div
@@ -241,6 +327,7 @@ function Dropdown({ onPick }: { onPick: (q: string) => void }) {
               fontSize: "0.55rem",
               letterSpacing: "0.1em",
               textTransform: "uppercase",
+              marginTop: suggestions.length > 0 ? "0.3rem" : 0,
             }}
           >
             Recent
