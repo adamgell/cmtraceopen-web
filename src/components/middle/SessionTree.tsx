@@ -15,7 +15,7 @@
 //
 // Filter input scopes across all expanded sessions' files by substring.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listFiles, listSessions } from "../../lib/api-client";
 import type { SessionFile, SessionSummary } from "../../lib/log-types";
 import { useBridgeState } from "../../lib/bridge-state";
@@ -49,7 +49,10 @@ export function SessionTree({ deviceId }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filesBySession, setFilesBySession] = useState<Record<string, SessionFile[]>>({});
   const [filter, setFilter] = useState("");
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
   const cancelledRef = useRef(false);
+  const retry = useCallback(() => setReloadNonce((n) => n + 1), []);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -70,7 +73,7 @@ export function SessionTree({ deviceId }: Props) {
       }
     })();
     return () => { cancelledRef.current = true; };
-  }, [deviceId]);
+  }, [deviceId, reloadNonce]);
 
   async function toggleSession(sessionId: string) {
     // Decide synchronously from the current render whether this click expands
@@ -103,14 +106,31 @@ export function SessionTree({ deviceId }: Props) {
 
   if (error) {
     return (
-      <div style={{ padding: "0.7rem", color: theme.pill.failed.fg, fontFamily: theme.font.mono, fontSize: "0.7rem" }}>
-        sessions unreachable: {error}
+      <div style={{ padding: "0.7rem", fontFamily: theme.font.mono, fontSize: "0.7rem" }}>
+        <div style={{ color: theme.pill.failed.fg }}>sessions unreachable: {error}</div>
+        <button
+          type="button"
+          onClick={retry}
+          style={{
+            marginTop: "0.5rem",
+            padding: "0.25rem 0.6rem",
+            background: theme.surface,
+            border: `1px solid ${theme.border}`,
+            color: theme.accent,
+            fontFamily: theme.font.mono,
+            fontSize: "0.65rem",
+            cursor: "pointer",
+          }}
+        >
+          retry
+        </button>
       </div>
     );
   }
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <style>{`@keyframes cmtrace-spin { to { transform: rotate(360deg) } }`}</style>
       <div style={{ padding: "0.3rem 0.5rem", borderBottom: `1px solid ${theme.border}` }}>
         <input
           value={filter}
@@ -130,7 +150,8 @@ export function SessionTree({ deviceId }: Props) {
       </div>
       <div style={{ flex: 1, overflow: "auto" }}>
         {loading && (
-          <div style={{ padding: "0.7rem", color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.65rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.7rem", color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.65rem" }}>
+            <span style={{ display: "inline-block", width: 12, height: 12, border: `2px solid ${theme.border}`, borderTopColor: theme.accent, borderRadius: "50%", animation: "cmtrace-spin 0.8s linear infinite" }} />
             loading sessions…
           </div>
         )}
@@ -148,6 +169,8 @@ export function SessionTree({ deviceId }: Props) {
               <button
                 type="button"
                 onClick={() => toggleSession(s.sessionId)}
+                onMouseEnter={() => setHoveredId(s.sessionId)}
+                onMouseLeave={() => setHoveredId(null)}
                 style={{
                   all: "unset",
                   display: "flex",
@@ -158,6 +181,7 @@ export function SessionTree({ deviceId }: Props) {
                   fontFamily: theme.font.mono,
                   fontSize: "0.68rem",
                   color: theme.text,
+                  background: hoveredId === s.sessionId ? theme.hoverBg : "transparent",
                   borderBottom: `1px solid ${theme.surfaceAlt}`,
                   cursor: "pointer",
                 }}
@@ -186,6 +210,8 @@ export function SessionTree({ deviceId }: Props) {
                     key={f.fileId}
                     type="button"
                     onClick={() => dispatch({ type: "select-file", sessionId: s.sessionId, fileId: f.fileId })}
+                    onMouseEnter={() => setHoveredId(f.fileId)}
+                    onMouseLeave={() => setHoveredId(null)}
                     style={{
                       all: "unset",
                       display: "flex",
@@ -196,7 +222,7 @@ export function SessionTree({ deviceId }: Props) {
                       fontFamily: theme.font.mono,
                       fontSize: "0.65rem",
                       color: active ? theme.accent : theme.text,
-                      background: active ? theme.accentBg : "transparent",
+                      background: active ? theme.accentBg : hoveredId === f.fileId ? theme.hoverBg : "transparent",
                       borderLeft: active ? `2px solid ${theme.accent}` : "2px solid transparent",
                       cursor: "pointer",
                     }}

@@ -163,7 +163,7 @@ function SignedInMenu({
             fontFamily: theme.font.mono,
             fontSize: "0.68rem",
             zIndex: 120,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.4)",
+            boxShadow: theme.shadow.dropdown,
           }}
         >
           <div style={{ padding: "0.25rem 0.75rem 0.4rem", borderBottom: `1px solid ${theme.border}` }}>

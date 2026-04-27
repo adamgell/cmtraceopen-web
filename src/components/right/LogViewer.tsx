@@ -10,7 +10,7 @@
 // A future task can thread `file.entryCount` from the middle pane for a
 // tighter number; the UI tolerates the approximation gracefully.
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { listEntries } from "../../lib/api-client";
 import { dtoToEntry } from "../../lib/dto-to-entry";
 import type { LogEntry } from "../../lib/log-types";
@@ -37,6 +37,8 @@ export function LogViewer() {
   const [status, setStatus] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [detailEntry, setDetailEntry] = useState<LogEntry | null>(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const retry = useCallback(() => setReloadNonce((n) => n + 1), []);
 
   useEffect(() => {
     setFilters(DEFAULT_FILTERS);
@@ -75,7 +77,7 @@ export function LogViewer() {
     return () => {
       cancelled = true;
     };
-  }, [state.selectedSessionId, state.selectedFileId]);
+  }, [state.selectedSessionId, state.selectedFileId, reloadNonce]);
 
   const visible = useMemo(() => {
     const q = filters.search.toLowerCase();
@@ -107,17 +109,34 @@ export function LogViewer() {
       </div>
     );
   }
+  if (status === "loading") {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", padding: "1rem", fontFamily: theme.font.mono, fontSize: "0.7rem", color: theme.textDim }}>
+        <Spinner />
+        loading entries…
+      </div>
+    );
+  }
   if (status === "error") {
     return (
-      <div
-        style={{
-          padding: "0.7rem",
-          color: theme.pill.failed.fg,
-          fontFamily: theme.font.mono,
-          fontSize: "0.7rem",
-        }}
-      >
-        entries unreachable: {error}
+      <div style={{ padding: "0.7rem", fontFamily: theme.font.mono, fontSize: "0.7rem" }}>
+        <div style={{ color: theme.pill.failed.fg }}>entries unreachable: {error}</div>
+        <button
+          type="button"
+          onClick={retry}
+          style={{
+            marginTop: "0.5rem",
+            padding: "0.25rem 0.6rem",
+            background: theme.surface,
+            border: `1px solid ${theme.border}`,
+            color: theme.accent,
+            fontFamily: theme.font.mono,
+            fontSize: "0.65rem",
+            cursor: "pointer",
+          }}
+        >
+          retry
+        </button>
       </div>
     );
   }
@@ -147,6 +166,15 @@ export function LogViewer() {
       />
       <RowDetail entry={detailEntry} onClose={() => setDetailEntry(null)} />
     </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <>
+      <style>{`@keyframes cmtrace-spin { to { transform: rotate(360deg) } }`}</style>
+      <span style={{ display: "inline-block", width: 14, height: 14, border: `2px solid ${theme.border}`, borderTopColor: theme.accent, borderRadius: "50%", animation: "cmtrace-spin 0.8s linear infinite" }} />
+    </>
   );
 }
 

@@ -4,7 +4,7 @@
 // Virtualization: @tanstack/react-virtual. Target row height is ~18px at
 // font-size 0.7rem + line-height 1.28 + padding 0.12rem top/bottom.
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { LogEntry } from "../../lib/log-types";
 import { theme } from "../../lib/theme";
@@ -37,8 +37,8 @@ function severityColor(sev: string): string {
 }
 
 function rowBackground(sev: string, zebra: boolean): string {
-  if (sev === "Error") return "rgba(243,140,140,.08)";
-  if (sev === "Warning") return "rgba(243,195,127,.06)";
+  if (sev === "Error") return theme.rowTint.error;
+  if (sev === "Warning") return theme.rowTint.warning;
   return zebra ? theme.surfaceAlt : "transparent";
 }
 
@@ -49,6 +49,7 @@ interface Props {
 
 export function EntryGrid({ entries, onOpenRow }: Props) {
   const parentRef = useRef<HTMLDivElement | null>(null);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const virt = useVirtualizer({
     count: entries.length,
     getScrollElement: () => parentRef.current,
@@ -58,6 +59,7 @@ export function EntryGrid({ entries, onOpenRow }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <style>{`[data-grid-row]:focus-visible { outline: 1px solid ${theme.accent}; outline-offset: -1px; }`}</style>
       <div
         style={{
           display: "grid",
@@ -102,16 +104,20 @@ export function EntryGrid({ entries, onOpenRow }: Props) {
             const glyph = severityGlyph(e.severity);
             const label = severityLabel(e.severity);
             const color = severityColor(e.severity);
-            const bg = rowBackground(e.severity, v.index % 2 === 1);
+            const isHovered = hoveredIndex === v.index;
+            const bg = isHovered ? theme.hoverBg : rowBackground(e.severity, v.index % 2 === 1);
             return (
               <div
                 key={e.id}
+                data-grid-row=""
                 role="button"
                 tabIndex={0}
                 onClick={() => onOpenRow?.(e)}
                 onKeyDown={(ev) => {
                   if (ev.key === "Enter") onOpenRow?.(e);
                 }}
+                onMouseEnter={() => setHoveredIndex(v.index)}
+                onMouseLeave={() => setHoveredIndex(null)}
                 style={{
                   position: "absolute",
                   top: 0,
@@ -128,6 +134,7 @@ export function EntryGrid({ entries, onOpenRow }: Props) {
                   whiteSpace: "nowrap",
                   overflow: "hidden",
                   cursor: onOpenRow ? "pointer" : "default",
+                  outline: "none",
                 }}
               >
                 <span style={{ color }}>{glyph}</span>

@@ -8,7 +8,6 @@ import {
   useState,
 } from "react";
 import { Button, Tooltip, tokens } from "@fluentui/react-components";
-import { theme } from "../lib/theme";
 import { initWasm, parse } from "../lib/wasm-bridge";
 import type { ParseResult } from "../lib/log-types";
 import { useWorkspace } from "../lib/workspace-context";
@@ -216,7 +215,7 @@ export const LocalMode = forwardRef<LocalModeHandle, LocalModeProps>(
                 style={{
                   marginTop: 16,
                   textAlign: "center",
-                  color: theme.text,
+                  color: tokens.colorNeutralForeground1,
                   fontSize: 14,
                 }}
               >
@@ -290,9 +289,9 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
         alignItems: "flex-start",
         gap: 12,
         padding: "10px 14px",
-        background: theme.pill.failed.bg,
-        border: `1px solid ${theme.pill.failed.fg}`,
-        color: theme.pill.failed.fg,
+        background: tokens.colorStatusDangerBackground1,
+        border: `1px solid ${tokens.colorStatusDangerBorder1}`,
+        color: tokens.colorStatusDangerForeground1,
         borderRadius: tokens.borderRadiusMedium,
         whiteSpace: "pre-wrap",
       }}
@@ -304,9 +303,9 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
         style={{
           padding: "4px 10px",
           fontSize: 12,
-          border: `1px solid ${theme.pill.failed.fg}`,
-          background: theme.bg,
-          color: theme.pill.failed.fg,
+          border: `1px solid ${tokens.colorStatusDangerBorder1}`,
+          background: tokens.colorNeutralBackground1,
+          color: tokens.colorStatusDangerForeground1,
           borderRadius: tokens.borderRadiusMedium,
           cursor: "pointer",
         }}
@@ -325,7 +324,7 @@ function CenteredMessage({ text }: { text: string }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        color: theme.text,
+        color: tokens.colorNeutralForeground1,
       }}
     >
       {text}

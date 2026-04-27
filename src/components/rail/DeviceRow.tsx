@@ -4,6 +4,7 @@
 // behave the same. The `RailDevice` interface is exported because DeviceRail
 // (and its test) builds arrays of these before passing them down.
 
+import { useState } from "react";
 import { theme, type PillState } from "../../lib/theme";
 
 export interface RailDevice {
@@ -20,12 +21,10 @@ interface Props {
 }
 
 export function DeviceRow({ device, expanded, active, onSelect }: Props) {
-  // Collapsed mode shows a 4-char slug built from the first A-Z0-9 run of the
-  // deviceId (typically the hostname prefix). Pad with `·` so rows line up
-  // visually when a device has a very short id.
+  const [hovered, setHovered] = useState(false);
   const slug = device.deviceId.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4).padEnd(4, "·");
   const dotColor = theme.pill[device.health].dot;
-  const bg = active ? theme.accentBg : "transparent";
+  const bg = active ? theme.accentBg : hovered ? theme.hoverBg : "transparent";
   const textColor = active ? theme.accent : theme.text;
   const borderLeft = active ? `2px solid ${theme.accent}` : "2px solid transparent";
 
@@ -34,6 +33,8 @@ export function DeviceRow({ device, expanded, active, onSelect }: Props) {
       <button
         type="button"
         onClick={() => onSelect(device.deviceId)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
         title={`${device.deviceId} · ${device.lastSeenLabel}`}
         style={{
           all: "unset",
@@ -62,6 +63,8 @@ export function DeviceRow({ device, expanded, active, onSelect }: Props) {
     <button
       type="button"
       onClick={() => onSelect(device.deviceId)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{
         all: "unset",
         display: "flex",

@@ -131,6 +131,7 @@ export function DeviceRail() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <style>{`@keyframes cmtrace-spin { to { transform: rotate(360deg) } }`}</style>
       {state.railExpanded && (
         <div style={{ padding: "0.55rem 0.7rem", borderBottom: `1px solid ${theme.border}` }}>
           <input
@@ -166,7 +167,8 @@ export function DeviceRail() {
       </div>
       <div style={{ flex: 1, overflow: "auto", padding: state.railExpanded ? 0 : "0.35rem 0" }}>
         {fetchState.status === "loading" && (
-          <div style={{ padding: "0.7rem", color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.65rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", padding: "0.7rem", color: theme.textDim, fontFamily: theme.font.mono, fontSize: "0.65rem" }}>
+            <span style={{ display: "inline-block", width: 12, height: 12, border: `2px solid ${theme.border}`, borderTopColor: theme.accent, borderRadius: "50%", animation: "cmtrace-spin 0.8s linear infinite" }} />
             loading devices…
           </div>
         )}
