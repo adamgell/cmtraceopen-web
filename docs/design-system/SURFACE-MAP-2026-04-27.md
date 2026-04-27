@@ -10,10 +10,10 @@ Classification of every `.tsx` component by design surface.
 | File | Surface | Notes |
 |------|---------|-------|
 | `components/DropZone.tsx` | [A] | Fluent tokens + components |
-| `components/EntryList.tsx` | [MIXED] | Fluent `tokens` + `useTheme()` from theme-context |
-| `components/FilterBar.tsx` | [MIXED] | Fluent `tokens` + `useTheme()` from theme-context |
+| `components/EntryList.tsx` | [A] | Fluent `tokens` + `useTheme()` (Fluent theme switcher) |
+| `components/FilterBar.tsx` | [A] | Fluent `tokens` + `useTheme()` (Fluent theme switcher) |
 | `components/FindBar.tsx` | [A] | Fluent tokens, Button, Input, Tooltip |
-| `components/LocalMode.tsx` | [MIXED] | Fluent `tokens` + `theme` from src/lib/theme |
+| `components/LocalMode.tsx` | [A] | Fluent `tokens` (shell `theme` import removed) |
 | `components/log-view/DiffHeader.tsx` | [B] | Shell theme only |
 | `components/log-view/DiffView.tsx` | [B] | Shell theme only |
 | `components/log-view/DnsWorkspaceBanner.tsx` | [B] | Shell theme + Fluent `Button` component (not tokens) |
@@ -40,7 +40,7 @@ Classification of every `.tsx` component by design surface.
 
 ## Summary
 
-- **Surface A (Fluent):** 2 pure + 3 mixed = 5
+- **Surface A (Fluent):** 5 pure (DropZone, EntryList, FilterBar, FindBar, LocalMode)
 - **Surface B (Shell):** 20 pure
-- **Mixed (violation):** 3 — EntryList, FilterBar (root), LocalMode
+- **Mixed (violation):** 0
 - **Neither:** 0
