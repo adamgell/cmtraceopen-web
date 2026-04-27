@@ -250,6 +250,12 @@ variable "client_root_ca_kv_secret_name" {
   default     = "appgw-client-root-ca"
 }
 
+variable "certs_uploaded" {
+  description = "Set to true after uploading frontend cert + CA bundle to KV. When false, AppGW creation is skipped (two-phase apply pattern)."
+  type        = bool
+  default     = false
+}
+
 variable "kv_admin_object_id" {
   description = "Object ID of the Entra group that gets Key Vault admin access (cert + secret upload, lifecycle). Module grants the AppGW + ACA managed identities read-only."
   type        = string

@@ -1,11 +1,11 @@
 output "appgw_public_ip" {
-  description = "Static public IP of the Application Gateway. Caller points the frontend FQDN A record at this."
-  value       = module.appgw.public_ip
+  description = "Static public IP of the Application Gateway. Caller points the frontend FQDN A record at this. Null until certs_uploaded = true."
+  value       = var.certs_uploaded ? module.appgw[0].public_ip : null
 }
 
 output "appgw_public_fqdn" {
-  description = "AppGW's *.cloudapp.azure.com convenience name (useful for testing before DNS is cut over)."
-  value       = module.appgw.public_dns_name
+  description = "AppGW's *.cloudapp.azure.com convenience name (useful for testing before DNS is cut over). Null until certs_uploaded = true."
+  value       = var.certs_uploaded ? module.appgw[0].public_dns_name : null
 }
 
 output "ingress_url" {

@@ -23,8 +23,8 @@ resource "azurerm_storage_account" "sa" {
   https_traffic_only_enabled      = true
   min_tls_version                 = "TLS1_2"
   allow_nested_items_to_be_public = false
-  shared_access_key_enabled       = false # ACA uses managed identity; no shared keys
-  public_network_access_enabled   = false
+  shared_access_key_enabled       = true  # Terraform needs key auth to create containers; ACA uses MI at runtime
+  public_network_access_enabled   = true  # Terraform needs data-plane access during apply; lock down post-deploy
   default_to_oauth_authentication = true
   tags                            = var.tags
 
