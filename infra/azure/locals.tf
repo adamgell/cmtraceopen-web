@@ -86,11 +86,14 @@ locals {
     CMTRACE_AZURE_USE_MANAGED_IDENTITY = "true"
     # AppGW terminates TLS; the api-server must NOT also try to terminate.
     CMTRACE_TLS_ENABLED = "false"
-    # NEW env var the api-server needs to learn — see runbook §10.
-    # Set unconditionally so the moment the code change lands, no infra change
-    # is required to start consuming it.
-    CMTRACE_PEER_CERT_HEADER = "X-ARR-ClientCert"
-    CMTRACE_CRL_REFRESH_SECS = tostring(var.crl_refresh_secs)
+    # AppGW-terminated mTLS: the api-server reads the forwarded client cert
+    # from X-ARR-ClientCert, validates the chain against the CA bundle, and
+    # only honours the header when the request originates from TRUSTED_PROXY_CIDR.
+    CMTRACE_PEER_CERT_HEADER    = "X-ARR-ClientCert"
+    CMTRACE_TRUSTED_PROXY_CIDR  = var.appgw_subnet_cidr
+    CMTRACE_CLIENT_CA_BUNDLE    = "/var/lib/cmtrace/ca-bundle.pem"
+    CMTRACE_MTLS_REQUIRE_INGEST = var.mtls_require_ingest ? "true" : "false"
+    CMTRACE_CRL_REFRESH_SECS    = tostring(var.crl_refresh_secs)
     CMTRACE_CRL_FAIL_OPEN    = var.crl_fail_open ? "true" : "false"
     CMTRACE_CRL_URLS         = join(",", var.crl_urls)
     CMTRACE_CORS_ORIGINS     = join(",", var.cors_origins)

@@ -89,3 +89,8 @@ variable "postgres_server_fqdn" {
 variable "postgres_database_name" {
   type = string
 }
+
+variable "client_ca_bundle_secret_id" {
+  description = "Resource ID of the KV secret holding the client CA bundle PEM (Root + Issuing). Used by the init container to write /var/lib/cmtrace/ca-bundle.pem."
+  type        = string
+}

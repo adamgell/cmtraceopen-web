@@ -138,6 +138,12 @@ variable "crl_refresh_secs" {
   default     = 3600
 }
 
+variable "mtls_require_ingest" {
+  description = "When true, ingest routes reject requests that arrive without a verified client cert (CMTRACE_MTLS_REQUIRE_INGEST). Set false during pilot to allow the X-Device-Id header fallback while devices roll over to PKCS-issued certs."
+  type        = bool
+  default     = false
+}
+
 variable "crl_fail_open" {
   description = "If true, accept certs whose revocation status is unknown when the CRL CDN is unreachable. Defaults to false (fail-closed). Only enable for air-gapped lab deploys."
   type        = bool
