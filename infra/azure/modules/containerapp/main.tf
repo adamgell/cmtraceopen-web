@@ -99,30 +99,6 @@ resource "azurerm_container_app" "api" {
     min_replicas = var.min_replicas
     max_replicas = var.max_replicas
 
-    volume {
-      name         = "ca-bundle"
-      storage_type = "EmptyDir"
-    }
-
-    init_container {
-      name   = "write-ca-bundle"
-      image  = "mcr.microsoft.com/cbl-mariner/busybox:2.0"
-      cpu    = 0.25
-      memory = "0.5Gi"
-
-      env {
-        name        = "CA_PEM"
-        secret_name = "cmtrace-client-ca-bundle"
-      }
-
-      command = ["/bin/sh", "-c", "mkdir -p /var/lib/cmtrace && printf '%s' \"$CA_PEM\" > /var/lib/cmtrace/ca-bundle.pem"]
-
-      volume_mounts {
-        name = "ca-bundle"
-        path = "/var/lib/cmtrace"
-      }
-    }
-
     container {
       name   = "api"
       image  = var.image
@@ -152,11 +128,6 @@ resource "azurerm_container_app" "api" {
       env {
         name  = "CMTRACE_AZURE_STORAGE_ACCOUNT"
         value = var.storage_account_name
-      }
-
-      volume_mounts {
-        name = "ca-bundle"
-        path = "/var/lib/cmtrace"
       }
 
       liveness_probe {
