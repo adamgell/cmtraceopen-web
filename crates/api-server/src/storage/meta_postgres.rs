@@ -662,27 +662,40 @@ impl MetadataStore for PgMetadataStore {
         if entries.is_empty() {
             return Ok(());
         }
+        // Bulk insert in chunks of 500 rows using multi-row VALUES to
+        // minimize round-trips. Postgres param limit is 65535; 9 params
+        // per row × 500 = 4500, well within budget.
+        const CHUNK: usize = 500;
         let mut tx = self.pool.begin().await?;
-        for e in entries {
-            sqlx::query(
-                r#"
-                INSERT INTO entries
-                  (session_id, file_id, line_number, ts_ms,
-                   severity, component, thread, message, extras_json)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                "#,
-            )
-            .bind(e.session_id.to_string())
-            .bind(e.file_id.to_string())
-            .bind(e.line_number as i64)
-            .bind(e.ts_ms)
-            .bind(e.severity as i64)
-            .bind(e.component.as_deref())
-            .bind(e.thread.as_deref())
-            .bind(&e.message)
-            .bind(e.extras_json.as_deref())
-            .execute(&mut *tx)
-            .await?;
+        for batch in entries.chunks(CHUNK) {
+            let mut sql = String::from(
+                "INSERT INTO entries \
+                 (session_id, file_id, line_number, ts_ms, \
+                  severity, component, thread, message, extras_json) VALUES ",
+            );
+            let mut args = sqlx::postgres::PgArguments::default();
+            for (i, e) in batch.iter().enumerate() {
+                if i > 0 { sql.push(','); }
+                let base = i * 9;
+                sql.push_str(&format!(
+                    "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                    base+1, base+2, base+3, base+4, base+5,
+                    base+6, base+7, base+8, base+9,
+                ));
+                use sqlx::Arguments;
+                args.add(e.session_id.to_string()).ok();
+                args.add(e.file_id.to_string()).ok();
+                args.add(e.line_number as i64).ok();
+                args.add(e.ts_ms).ok();
+                args.add(e.severity as i64).ok();
+                args.add(e.component.as_deref().map(|s| s.to_string())).ok();
+                args.add(e.thread.as_deref().map(|s| s.to_string())).ok();
+                args.add(e.message.clone()).ok();
+                args.add(e.extras_json.as_deref().map(|s| s.to_string())).ok();
+            }
+            sqlx::query_with(&sql, args)
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(())
