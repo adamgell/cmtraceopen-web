@@ -13,10 +13,6 @@
 #     passed in. Submodules don't reconstruct names.
 ###############################################################################
 
-data "azurerm_resource_group" "rg" {
-  name = var.resource_group_name
-}
-
 data "azurerm_client_config" "current" {}
 
 # ---------------------------------------------------------------------------
@@ -27,7 +23,7 @@ data "azurerm_client_config" "current" {}
 resource "azurerm_log_analytics_workspace" "law" {
   name                = local.naming.law
   location            = var.location
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   sku                 = "PerGB2018"
   retention_in_days   = 30
   tags                = local.default_tags
@@ -40,7 +36,7 @@ resource "azurerm_log_analytics_workspace" "law" {
 module "network" {
   source = "./modules/network"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -55,7 +51,7 @@ module "network" {
 module "keyvault" {
   source = "./modules/keyvault"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -71,7 +67,7 @@ module "keyvault" {
 module "postgres" {
   source = "./modules/postgres"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -90,7 +86,7 @@ module "postgres" {
 module "storage" {
   source = "./modules/storage"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -100,10 +96,10 @@ module "storage" {
   log_analytics_id = azurerm_log_analytics_workspace.law.id
 }
 
-# Operator-uploaded CA bundle secret (Root + Issuing CA PEM). Referenced by
-# the containerapp init container to write /var/lib/cmtrace/ca-bundle.pem.
-# The operator uploads this before `terraform apply` — see runbook §6.
+# Operator-uploaded CA bundle secret. Only read when certs_uploaded = true
+# (two-phase apply: first apply creates infra, operator uploads certs, second apply wires them).
 data "azurerm_key_vault_secret" "client_ca_bundle" {
+  count        = var.certs_uploaded ? 1 : 0
   name         = var.client_root_ca_kv_secret_name
   key_vault_id = module.keyvault.key_vault_id
 }
@@ -111,7 +107,7 @@ data "azurerm_key_vault_secret" "client_ca_bundle" {
 module "containerapp" {
   source = "./modules/containerapp"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
@@ -141,13 +137,14 @@ module "containerapp" {
   postgres_server_fqdn   = module.postgres.server_fqdn
   postgres_database_name = module.postgres.database_name
 
-  client_ca_bundle_secret_id = data.azurerm_key_vault_secret.client_ca_bundle.versionless_id
+  client_ca_bundle_secret_id = var.certs_uploaded ? data.azurerm_key_vault_secret.client_ca_bundle[0].versionless_id : "${module.keyvault.key_vault_uri}secrets/${var.client_root_ca_kv_secret_name}"
 }
 
 module "appgw" {
+  count  = var.certs_uploaded ? 1 : 0
   source = "./modules/appgw"
 
-  resource_group_name = data.azurerm_resource_group.rg.name
+  resource_group_name = var.resource_group_name
   location            = var.location
   tags                = local.default_tags
   naming              = local.naming
