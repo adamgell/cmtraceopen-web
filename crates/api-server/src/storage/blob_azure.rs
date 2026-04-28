@@ -87,12 +87,19 @@ pub async fn build(config: AzureBlobConfig) -> Result<ObjectStoreBlobStore, Stor
 
     builder = match &config.auth {
         AzureAuth::AccountKey(key) => builder.with_access_key(key),
-        AzureAuth::ManagedIdentity => builder.with_use_azure_cli(false),
-        // ^ the builder picks up managed identity automatically when no
-        //   explicit credential is provided AND the IMDS endpoint is
-        //   reachable. We disable the azure-cli fallback so a misconfigured
-        //   prod host doesn't accidentally pick up developer creds from a
-        //   leftover `az login` cache file.
+        AzureAuth::ManagedIdentity => {
+            let b = builder
+                .with_use_azure_cli(false)
+                .with_use_managed_identity(true);
+            // ACA / App Service expose IDENTITY_ENDPOINT instead of the
+            // VM-style IMDS at 169.254.169.254. Pass it through so
+            // object_store hits the right token endpoint.
+            if let Ok(endpoint) = std::env::var("IDENTITY_ENDPOINT") {
+                b.with_msi_endpoint(endpoint)
+            } else {
+                b
+            }
+        }
     };
 
     let store = builder
