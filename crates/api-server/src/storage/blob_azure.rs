@@ -88,9 +88,7 @@ pub async fn build(config: AzureBlobConfig) -> Result<ObjectStoreBlobStore, Stor
     builder = match &config.auth {
         AzureAuth::AccountKey(key) => builder.with_access_key(key),
         AzureAuth::ManagedIdentity => {
-            let b = builder
-                .with_use_azure_cli(false)
-                .with_use_managed_identity(true);
+            let b = builder.with_use_azure_cli(false);
             // ACA / App Service expose IDENTITY_ENDPOINT instead of the
             // VM-style IMDS at 169.254.169.254. Pass it through so
             // object_store hits the right token endpoint.
