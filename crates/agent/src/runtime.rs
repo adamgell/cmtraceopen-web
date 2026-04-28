@@ -43,8 +43,9 @@ pub const COLLECT_INTERVAL: Duration = Duration::from_secs(60 * 15);
 /// How often to drain the upload queue.
 pub const DRAIN_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Queue-level backoff when an upload fails.
-pub const QUEUE_FAIL_BACKOFF: Duration = Duration::from_secs(300);
+/// Queue-level backoff when an upload fails. 10 min gives the server
+/// time to recover from rate-limit windows or transient outages.
+pub const QUEUE_FAIL_BACKOFF: Duration = Duration::from_secs(600);
 
 /// Maximum time the shutdown path waits for an in-flight drain to complete.
 pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);

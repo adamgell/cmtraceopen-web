@@ -50,11 +50,13 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 3,
+            max_attempts: 5,
             delays: vec![
-                Duration::from_secs(1),
-                Duration::from_secs(5),
+                Duration::from_secs(2),
+                Duration::from_secs(10),
                 Duration::from_secs(30),
+                Duration::from_secs(60),
+                Duration::from_secs(120),
             ],
         }
     }
@@ -446,6 +448,14 @@ mod tests {
 
         assert!(matches!(result, Err(UploaderError::Transient { .. })));
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn default_retry_policy_has_5_attempts() {
+        let p = RetryPolicy::default();
+        assert_eq!(p.max_attempts, 5);
+        assert_eq!(p.delays.len(), 5);
+        assert_eq!(p.delay_for(5), Duration::from_secs(120));
     }
 
     #[tokio::test(start_paused = true)]
