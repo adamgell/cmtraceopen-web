@@ -11,6 +11,9 @@ pkg-node/
 # Rust
 target/
 crates/**/target/
+# Negation: parse-load-harness has a `src/target/` Rust module (target adapter
+# abstraction) that must NOT be ignored by the build-output rule above.
+!crates/parse-load-harness/src/target/
 
 # Editor / OS
 .vscode/
