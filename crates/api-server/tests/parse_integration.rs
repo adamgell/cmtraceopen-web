@@ -326,3 +326,126 @@ async fn raw_file_content_kind_marks_parse_failed() {
     }
     assert_eq!(final_state, "failed");
 }
+
+/// Smoke test: two parallel finalizes complete without deadlocking when the
+/// parse-worker semaphore caps concurrency. Guards against a regression
+/// where the acquire-before-spawn pattern in `routes/ingest.rs::finalize`
+/// gets reordered (e.g. moved inside the spawned task or dropped entirely)
+/// and concurrent traffic stops draining.
+///
+/// We don't try to assert "exactly one parse runs at a time" — that's
+/// timing-dependent and racy in test. We just assert both finalizes
+/// observe `parse_state = "ok"` within a generous deadline. With the cap
+/// (default 4) > the test's two-bundle workload, both should run promptly
+/// in either serial-or-parallel order. With a degenerate cap of 1 they'd
+/// run strictly serially but should still both finish.
+#[tokio::test]
+async fn two_concurrent_finalizes_do_not_deadlock() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+
+    async fn ingest_one(
+        base: &str,
+        client: &reqwest::Client,
+        device_id: &str,
+    ) -> BundleFinalizeResponse {
+        let payload = build_evidence_zip();
+        let sha = sha256_hex(&payload);
+        let bundle_id = Uuid::now_v7();
+        let init: BundleInitResponse = client
+            .post(format!("{base}/v1/ingest/bundles"))
+            .header("x-device-id", device_id)
+            .json(&BundleInitRequest {
+                bundle_id,
+                device_hint: None,
+                sha256: sha.clone(),
+                size_bytes: payload.len() as u64,
+                content_kind: content_kind::EVIDENCE_ZIP.into(),
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+
+        client
+            .put(format!(
+                "{base}/v1/ingest/bundles/{}/chunks?offset=0",
+                init.upload_id
+            ))
+            .header("x-device-id", device_id)
+            .body(payload.clone())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+
+        client
+            .post(format!(
+                "{base}/v1/ingest/bundles/{}/finalize",
+                init.upload_id
+            ))
+            .header("x-device-id", device_id)
+            .json(&BundleFinalizeRequest {
+                final_sha256: sha,
+            })
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap()
+    }
+
+    // Fire two finalizes back to back from distinct devices. They both
+    // need to acquire a parse-worker permit before the spawn returns.
+    let (fin_a, fin_b) = tokio::join!(
+        ingest_one(&server.base, &client, "WIN-PARSE-CONC-A"),
+        ingest_one(&server.base, &client, "WIN-PARSE-CONC-B"),
+    );
+
+    // Both finalizes must return "pending" — parse is background.
+    assert_eq!(fin_a.parse_state, "pending");
+    assert_eq!(fin_b.parse_state, "pending");
+
+    // Poll both to terminal state. With the default semaphore cap (4) and
+    // only two bundles in flight, both should land at "ok" well within
+    // the deadline; if the semaphore wiring deadlocks at least one stays
+    // pending and the assert fires.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut state_a = String::new();
+    let mut state_b = String::new();
+    while Instant::now() < deadline && (state_a.is_empty() || state_b.is_empty()) {
+        for (sid, slot) in
+            [(fin_a.session_id, &mut state_a), (fin_b.session_id, &mut state_b)]
+        {
+            if !slot.is_empty() {
+                continue;
+            }
+            let one: SessionSummary = client
+                .get(format!("{}/v1/sessions/{}", server.base, sid))
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if one.parse_state != "pending" {
+                *slot = one.parse_state;
+            }
+        }
+        if state_a.is_empty() || state_b.is_empty() {
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+    assert_eq!(state_a, "ok", "session A did not reach terminal state");
+    assert_eq!(state_b, "ok", "session B did not reach terminal state");
+}

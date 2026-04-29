@@ -472,10 +472,38 @@ async fn finalize_inner(
     }
 
     // Spawn the parse worker as a fire-and-forget background task. We
-    // intentionally don't block finalize on parsing — the response goes
-    // back to the agent immediately with parse_state = "pending", and the
-    // worker flips it to "ok" / "partial" / "failed" once it finishes.
-    // Errors are logged via tracing in the worker; nothing to await here.
+    // intentionally don't block finalize on parsing beyond the permit-
+    // acquisition wait below — the response goes back to the agent
+    // immediately (with parse_state = "pending") once a permit is held,
+    // and the worker flips it to "ok" / "partial" / "failed" once it
+    // finishes. Errors are logged via tracing in the worker; nothing to
+    // await here.
+    //
+    // Concurrency cap: `state.parse_semaphore` bounds in-flight parses
+    // per replica. We acquire the permit *here* (before `tokio::spawn`)
+    // rather than inside the spawned task so that a traffic spike causes
+    // the finalize HTTP response to wait — which provides backpressure
+    // to the agent — instead of letting N spawned tasks all contend on
+    // the semaphore inside the runtime, which would still let memory
+    // balloon during the queue. Acquire-failure (semaphore closed) is
+    // surfaced as a 503; the only path that closes the semaphore is
+    // graceful shutdown, which is currently never invoked, but plumbing
+    // it through means a future shutdown handler doesn't have to remember
+    // to revisit this site.
+    let parse_permit = match state
+        .parse_semaphore
+        .clone()
+        .acquire_owned()
+        .await
+    {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(AppError::Internal(
+                "parse worker semaphore closed; api-server is shutting down".into(),
+            ));
+        }
+    };
+
     let parse_deps = ParseDeps {
         meta: state.meta.clone(),
         blobs: state.blobs.clone(),
@@ -484,6 +512,11 @@ async fn finalize_inner(
     let parse_content_kind = row.content_kind.clone();
     let parse_session_id = row.session_id;
     tokio::spawn(async move {
+        // Permit drops when this block ends (after `parse_session`
+        // returns), freeing a slot for the next finalize that's queued
+        // on `acquire_owned()` above.
+        let _permit = parse_permit;
+        metrics::gauge!("cmtrace_parse_worker_inflight").increment(1.0);
         parse_worker::parse_session(
             parse_session_id,
             parse_blob_uri,
@@ -491,6 +524,7 @@ async fn finalize_inner(
             parse_deps,
         )
         .await;
+        metrics::gauge!("cmtrace_parse_worker_inflight").decrement(1.0);
     });
 
     info!(
