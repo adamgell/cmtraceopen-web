@@ -182,32 +182,33 @@ async fn parse_evidence_zip(
         .await
         .map_err(|e| format!("read {blob_uri}: {e}"))?;
 
-    // Hand the actual zip walk + parse off to spawn_blocking so the parser
-    // (CPU-heavy, fully sync) doesn't block the runtime. The DB writes
-    // stay on the async runtime — collect parsed work first, then await
-    // the inserts.
-    let parsed = tokio::task::spawn_blocking(move || extract_and_parse(bytes))
-        .await
-        .map_err(|e| format!("parse task panicked: {e}"))??;
+    // Producer/consumer pipeline: the zip walk + per-file parse runs on a
+    // blocking thread (CPU-bound), pushing each ParsedFile into a bounded
+    // mpsc channel as it completes. The consumer (this async task) drains
+    // the channel and fires `insert_file` + `insert_entries_batch` for each
+    // file. The two phases overlap: while file N's INSERTs are committing,
+    // file N+1 is already being parsed.
+    //
+    // Buffer size is intentionally small — the goal is overlap, not
+    // queueing. A small bounded channel applies natural backpressure to the
+    // parser if the DB falls behind, keeping memory bounded for bundles with
+    // many small files.
+    const PIPELINE_BUFFER: usize = 4;
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ParsedFile>(PIPELINE_BUFFER);
 
-    if parsed.is_empty() {
-        // No log files in the bundle isn't strictly a failure — the agent
-        // might have shipped a manifest-only debug zip — but it leaves
-        // nothing for the viewer. Mark partial so the operator can spot it.
-        info!(%session_id, "no parseable log files found in bundle");
-        return Ok(ParseOutcome::Partial);
-    }
+    // Producer: zip walk + parse on a blocking thread, push results via
+    // `blocking_send` (the idiomatic tokio bridge from sync code into an
+    // async channel).
+    let producer = tokio::task::spawn_blocking(move || extract_and_parse_streaming(bytes, tx));
 
-    // Track the two error signals separately so we can distinguish "noisy
-    // but usable" (fallback errors on some lines of otherwise-parsing files)
-    // from "actually broken" (a file the parser TRIED to extract from and
-    // failed). Legitimately-empty files (setup_stderr.log on success runs,
-    // etc.) have entries=0 AND errors=0 and must not trigger partial — only
-    // the combination entries=0 + errors>0 means "parser saw content and
-    // couldn't match any of it." See ParseOutcome variants for the mapping.
+    // Consumer: pull ParsedFiles, insert, accumulate flags. Mirrors the
+    // pre-refactor loop body 1:1 so classify_outcome semantics stay intact.
     let mut any_file_had_fallbacks = false;
     let mut any_file_produced_nothing = false;
-    for file in parsed {
+    let mut any_files_at_all = false;
+    let mut consumer_err: Option<String> = None;
+    while let Some(file) = rx.recv().await {
+        any_files_at_all = true;
         if file.parse_error_count > 0 {
             any_file_had_fallbacks = true;
         }
@@ -227,11 +228,12 @@ async fn parse_evidence_zip(
             parse_error_count: file.parse_error_count,
         };
 
-        deps.meta
-            .insert_file(new_file)
-            .await
-            .map_err(|e| format!("insert_file({}): {e}", file.relative_path))?;
+        if let Err(e) = deps.meta.insert_file(new_file).await {
+            consumer_err = Some(format!("insert_file({}): {e}", file.relative_path));
+            break;
+        }
 
+        let relative_path = file.relative_path.clone();
         let new_entries: Vec<NewEntry> = file
             .entries
             .into_iter()
@@ -240,16 +242,43 @@ async fn parse_evidence_zip(
             .collect();
 
         let n = new_entries.len();
-        deps.meta
-            .insert_entries_batch(new_entries)
-            .await
-            .map_err(|e| format!("insert_entries_batch({}): {e}", file.relative_path))?;
+        if let Err(e) = deps.meta.insert_entries_batch(new_entries).await {
+            consumer_err = Some(format!("insert_entries_batch({relative_path}): {e}"));
+            break;
+        }
         debug!(
             %session_id,
-            relative_path = %file.relative_path,
+            relative_path = %relative_path,
             entries = n,
             "wrote parsed entries"
         );
+    }
+
+    // If the consumer broke out early on a DB error, the receiver is about
+    // to be dropped at scope-end. The producer's next `blocking_send` will
+    // return Err and it will exit. Drain any remaining items so the channel
+    // closes promptly without leaking work.
+    drop(rx);
+
+    // Always join the producer so its result is observed: its errors
+    // (panic, zip-open failure, send failure after consumer dropped)
+    // surface here. Consumer errors take precedence — they are the
+    // actionable signal.
+    let producer_result = producer
+        .await
+        .map_err(|e| format!("parse task panicked: {e}"))?;
+
+    if let Some(e) = consumer_err {
+        return Err(e);
+    }
+    producer_result?;
+
+    if !any_files_at_all {
+        // No log files in the bundle isn't strictly a failure — the agent
+        // might have shipped a manifest-only debug zip — but it leaves
+        // nothing for the viewer. Mark partial so the operator can spot it.
+        info!(%session_id, "no parseable log files found in bundle");
+        return Ok(ParseOutcome::Partial);
     }
 
     Ok(classify_outcome(
@@ -286,6 +315,90 @@ struct ParsedFile {
     entries: Vec<LogEntry>,
 }
 
+/// Streaming variant of [`extract_and_parse`] that pushes each [`ParsedFile`]
+/// into a bounded tokio mpsc as soon as it finishes parsing, instead of
+/// accumulating into a Vec. Designed to be called from `spawn_blocking`,
+/// using `blocking_send` to hand off into the async runtime — that's the
+/// idiomatic bridge for sync→async on a tokio mpsc.
+///
+/// Returns the number of files pushed on success. Treats a `blocking_send`
+/// failure (consumer dropped the receiver — typically because the DB write
+/// errored and broke the consumer loop) as a fatal stream error and aborts
+/// further work. The caller decides whether the *consumer's* error is the
+/// real cause; this function just stops cleanly.
+///
+/// Note: kept as a sibling of `extract_and_parse` rather than refactoring it
+/// in place. The non-streaming entry point may still be useful for tests or
+/// for a future "parse files in parallel within one bundle" pass; sharing
+/// the inner per-entry logic via a small helper would create an awkward
+/// closure type, and the duplication is mechanical.
+fn extract_and_parse_streaming(
+    zip_bytes: Vec<u8>,
+    tx: tokio::sync::mpsc::Sender<ParsedFile>,
+) -> Result<usize, String> {
+    let cursor = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("open zip: {e}"))?;
+
+    let mut sent = 0usize;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        if !is_log_path(&name) {
+            debug!(path = %name, "skipping non-log entry");
+            continue;
+        }
+
+        let size = entry.size();
+        let mut buf = Vec::with_capacity(size as usize);
+        std::io::copy(&mut entry, &mut buf).map_err(|e| format!("read {name}: {e}"))?;
+
+        let encoding = detect_encoding(&buf);
+        let content = match decode_bytes(&buf, encoding) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(path = %name, error = %e, "failed to decode log file; skipping");
+                continue;
+            }
+        };
+
+        let (result, selection) = parse_content(&content, &name, size);
+        let parser_kind = parser_kind_label(&selection);
+        let format_detected = format!("{:?}", result.format_detected);
+
+        let parsed = ParsedFile {
+            relative_path: name,
+            size_bytes: size,
+            format_detected,
+            parser_kind,
+            parse_error_count: result.parse_errors,
+            entries: result.entries,
+        };
+
+        // `blocking_send` is the canonical sync→async tokio bridge. It
+        // returns Err iff the receiver has been dropped — meaning the
+        // consumer task already exited (DB error, panic, or normal scope
+        // exit). We propagate as a fatal stream error and stop walking.
+        if tx.blocking_send(parsed).is_err() {
+            return Err("parse pipeline consumer dropped receiver".to_string());
+        }
+        sent += 1;
+    }
+
+    // Dropping `tx` (via scope end) closes the channel; the consumer's
+    // `recv()` returns None and its loop exits cleanly.
+    Ok(sent)
+}
+
+/// Non-streaming variant retained for reference / future reuse (e.g. a
+/// hypothetical "parse files in parallel within one bundle" pass that wants
+/// to collect into a Vec before fanning out). The hot path now goes through
+/// [`extract_and_parse_streaming`] so parse and DB I/O can overlap.
+#[allow(dead_code)]
 fn extract_and_parse(zip_bytes: Vec<u8>) -> Result<Vec<ParsedFile>, String> {
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("open zip: {e}"))?;
@@ -617,5 +730,100 @@ mod tests {
             classify_outcome(false, false, false),
             ParseOutcome::Ok
         ));
+    }
+
+    /// Build a tiny in-memory evidence zip with a couple of trivial .log
+    /// files so we can drive `extract_and_parse_streaming` end-to-end without
+    /// touching the filesystem or DB. Used by the channel smoke tests below.
+    fn build_test_zip(entries: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, body) in entries {
+                zw.start_file(*name, opts).unwrap();
+                zw.write_all(body.as_bytes()).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        buf
+    }
+
+    /// Smoke test: producer pushes via `blocking_send`, consumer receives via
+    /// `recv().await`, channel closes cleanly when producer scope ends.
+    /// Asserts no deadlock even when the consumer is slower than the
+    /// producer (channel must apply backpressure correctly).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_pipeline_drains_without_deadlock() {
+        let zip_bytes = build_test_zip(&[
+            ("a.log", "hello world\nline two\n"),
+            ("b.log", "another file\n"),
+            ("c.log", "third file\nwith two lines\n"),
+            ("manifest.json", "{}"), // should be skipped by is_log_path
+        ]);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ParsedFile>(2);
+        let producer =
+            tokio::task::spawn_blocking(move || extract_and_parse_streaming(zip_bytes, tx));
+
+        let mut received = 0usize;
+        let mut paths = Vec::new();
+        while let Some(f) = rx.recv().await {
+            // Simulate slow DB I/O so backpressure actually kicks in: with a
+            // buffer of 2 and 3 log files, the producer must block on send
+            // for the third one until we consume.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            paths.push(f.relative_path);
+            received += 1;
+        }
+
+        let sent = producer
+            .await
+            .expect("producer task did not panic")
+            .expect("streaming parse succeeded");
+
+        assert_eq!(received, 3, "consumer saw all 3 .log files");
+        assert_eq!(sent, 3, "producer reported 3 sends");
+        assert!(paths.contains(&"a.log".to_string()));
+        assert!(paths.contains(&"b.log".to_string()));
+        assert!(paths.contains(&"c.log".to_string()));
+    }
+
+    /// If the consumer drops the receiver mid-stream (e.g. DB error), the
+    /// producer's next `blocking_send` returns Err and the streaming
+    /// function surfaces a fatal error rather than hanging.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_pipeline_errors_when_consumer_drops() {
+        // Many small files so the producer is guaranteed to still have work
+        // to push after the consumer drops the receiver.
+        let entries: Vec<(String, String)> = (0..20)
+            .map(|i| (format!("f{i}.log"), format!("line {i}\n")))
+            .collect();
+        let entry_refs: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_str()))
+            .collect();
+        let zip_bytes = build_test_zip(&entry_refs);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ParsedFile>(1);
+        let producer =
+            tokio::task::spawn_blocking(move || extract_and_parse_streaming(zip_bytes, tx));
+
+        // Consume one item, then drop the receiver to simulate a consumer
+        // that bailed early on a DB error.
+        let _first = rx.recv().await.expect("at least one item");
+        drop(rx);
+
+        let result = producer.await.expect("producer task did not panic");
+        match result {
+            Err(msg) => assert!(
+                msg.contains("dropped receiver"),
+                "expected receiver-dropped error, got: {msg}"
+            ),
+            Ok(n) => panic!("expected error from dropped receiver, but producer reported {n} sends"),
+        }
     }
 }
