@@ -259,6 +259,19 @@ pub struct Config {
     /// Per-device and per-IP rate-limit thresholds. See [`RateLimitConfig`]
     /// for the per-field env-var contract and defaults.
     pub rate_limit: RateLimitConfig,
+
+    /// Maximum number of concurrent background parse workers per replica.
+    /// Env: `CMTRACE_PARSE_CONCURRENCY`. Default:
+    /// [`crate::state::DEFAULT_PARSE_CONCURRENCY`] (4 — matches a 4-vCPU
+    /// pod with one parse-in-flight per core, leaving headroom for the
+    /// async runtime + DB pool).
+    ///
+    /// Each parse holds up to ~50 MiB of in-memory unzip buffer plus
+    /// parser overhead, so this directly bounds steady-state memory
+    /// pressure under traffic spikes (`N * ~50 MiB` worst case). Setting
+    /// this above the vCPU count rarely helps because the parse path is
+    /// CPU-bound; setting it below 1 is rejected at startup.
+    pub parse_concurrency: u32,
 }
 
 /// TLS-termination + mTLS client-cert verification. Populated from
@@ -429,6 +442,9 @@ pub enum ConfigError {
 
     #[error("invalid {0}: expected a non-negative integer")]
     InvalidRateLimit(&'static str),
+
+    #[error("invalid CMTRACE_PARSE_CONCURRENCY: {0} (expected positive integer)")]
+    InvalidParseConcurrency(String),
 }
 
 impl Config {
@@ -590,6 +606,15 @@ impl Config {
             Err(_) => 100,
         };
 
+        let parse_concurrency = match env::var("CMTRACE_PARSE_CONCURRENCY") {
+            Ok(v) => v
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| n > 0)
+                .ok_or(ConfigError::InvalidParseConcurrency(v))?,
+            Err(_) => crate::state::DEFAULT_PARSE_CONCURRENCY as u32,
+        };
+
         Ok(Self {
             listen_addr,
             data_dir,
@@ -635,6 +660,7 @@ impl Config {
                     })
                     .unwrap_or_default(),
             },
+            parse_concurrency,
         })
     }
 }

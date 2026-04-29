@@ -273,6 +273,19 @@ async fn main() -> ExitCode {
         "rate limiting configured (0 = disabled)",
     );
 
+    // Bounded permit pool for the background parse workers (see
+    // `routes/ingest.rs` for the acquire site). Cap is read from
+    // `CMTRACE_PARSE_CONCURRENCY` (default = DEFAULT_PARSE_CONCURRENCY) and
+    // wrapped in `Arc<Semaphore>` so the ingest finalize handler can clone
+    // it and call `acquire_owned()` per request.
+    let parse_semaphore = Arc::new(tokio::sync::Semaphore::new(
+        config.parse_concurrency as usize,
+    ));
+    info!(
+        parse_concurrency = config.parse_concurrency,
+        "parse worker concurrency cap (CMTRACE_PARSE_CONCURRENCY)",
+    );
+
     // Spawn a background GC task that sweeps expired entries from every
     // active rate-limiter once per minute. This bounds the DashMap footprint
     // to the number of distinct keys seen in a single window rather than
@@ -339,7 +352,7 @@ async fn main() -> ExitCode {
     };
 
     #[cfg(feature = "crl")]
-    let state = AppState::with_cors_crl_and_audit(
+    let state = AppState::with_cors_crl_audit_and_parse_semaphore(
         meta,
         blobs,
         configs,
@@ -350,9 +363,10 @@ async fn main() -> ExitCode {
         crl_cache,
         rate_limit,
         audit,
+        parse_semaphore,
     );
     #[cfg(not(feature = "crl"))]
-    let state = AppState::full_with_audit(
+    let state = AppState::full_with_audit_and_parse_semaphore(
         meta,
         blobs,
         configs,
@@ -362,6 +376,7 @@ async fn main() -> ExitCode {
         mtls,
         rate_limit,
         audit,
+        parse_semaphore,
     );
 
     let app = router(state).layer(TraceLayer::new_for_http());
@@ -455,6 +470,12 @@ fn describe_metrics() {
     describe_gauge!(
         "cmtrace_db_connections_in_use",
         "Metadata-store pool connections currently checked out (size - idle)."
+    );
+    describe_gauge!(
+        "cmtrace_parse_worker_inflight",
+        "Background parse workers currently holding a permit. Bounded by \
+         CMTRACE_PARSE_CONCURRENCY; sustained equality with the cap means \
+         finalize requests are queueing on the semaphore."
     );
     #[cfg(feature = "crl")]
     describe_counter!(

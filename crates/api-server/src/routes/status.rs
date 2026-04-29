@@ -763,6 +763,9 @@ mod tests {
             // install (the metrics-rs recorder is global + install-once).
             metrics: crate::state::install_metrics_recorder(),
             rate_limit: Arc::new(crate::state::RateLimitState::disabled()),
+            parse_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                crate::state::DEFAULT_PARSE_CONCURRENCY,
+            )),
         }
     }
 

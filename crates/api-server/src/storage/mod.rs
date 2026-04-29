@@ -325,6 +325,7 @@ mod build_blob_store_tests {
             retention_scan_interval_secs: 21_600,
             retention_batch_size: 100,
             rate_limit: Default::default(),
+            parse_concurrency: crate::state::DEFAULT_PARSE_CONCURRENCY as u32,
         }
     }
 

@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use ipnet::IpNet;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use tokio::sync::Semaphore;
 
 use crate::auth::{AuthMode, AuthState, EntraConfig, JwksCache};
 #[cfg(feature = "crl")]
@@ -364,6 +365,23 @@ pub const DEFAULT_CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 /// runtime check in the chunk handler.
 pub const MAX_CHUNK_SIZE: u64 = 32 * 1024 * 1024;
 
+/// Default concurrent parse-worker permits per replica.
+///
+/// The parse worker performs an in-memory unzip of the bundle (capped at
+/// [`crate::pipeline::parse_worker::MAX_EVIDENCE_ZIP_BYTES`] = 50 MiB) plus
+/// per-line parser work. With `N` parses in flight per replica the worst-
+/// case heap residency is `N * 50 MiB` plus parser overhead. `4` is the
+/// production default: 4 vCPU * one parse each, leaving headroom for the
+/// async runtime + DB pool. Override at startup with
+/// `CMTRACE_PARSE_CONCURRENCY` (see [`crate::config::Config::parse_concurrency`]).
+///
+/// Tests construct `AppState` via [`AppState::new`] / [`AppState::new_auth_disabled`]
+/// / [`AppState::full`] without specifying a cap, which routes through
+/// [`AppState::full_with_audit`] and gets this default. Production goes
+/// through [`AppState::full_with_audit_and_parse_semaphore`] (and the CRL
+/// twin) to plug in an explicit env-derived cap.
+pub const DEFAULT_PARSE_CONCURRENCY: usize = 4;
+
 pub struct AppState {
     pub meta: Arc<dyn MetadataStore>,
     pub blobs: Arc<dyn BlobStore>,
@@ -413,6 +431,18 @@ pub struct AppState {
     /// Per-device and per-IP rate-limit state. Shared across the middleware
     /// functions; individual scopes are `None` when that limit is disabled.
     pub rate_limit: Arc<RateLimitState>,
+    /// Bounded permit pool for the background parse workers. Each ingest
+    /// finalize acquires one owned permit *before* spawning the parse task
+    /// and the spawned task holds the permit for the parse duration; the
+    /// permit drops when the task ends. This caps in-flight parses per
+    /// replica at the configured concurrency (default
+    /// [`DEFAULT_PARSE_CONCURRENCY`]) so the in-memory unzip + parser
+    /// allocations don't blow the RAM budget when traffic spikes.
+    ///
+    /// Configured via `CMTRACE_PARSE_CONCURRENCY` in production; tests use
+    /// the default. See `routes/ingest.rs` for the acquire-before-spawn
+    /// site that turns this into actual backpressure on the agent.
+    pub parse_semaphore: Arc<Semaphore>,
 }
 
 /// Process-wide Prometheus recorder + handle.
@@ -526,6 +556,10 @@ impl AppState {
 
     /// Like [`AppState::full`] but with an explicit [`AuditStore`] backend.
     /// Used by `main.rs` and audit integration tests to wire in a real store.
+    ///
+    /// Defaults the parse-worker semaphore to [`DEFAULT_PARSE_CONCURRENCY`].
+    /// Production callers that need to honour `CMTRACE_PARSE_CONCURRENCY`
+    /// should call [`AppState::full_with_audit_and_parse_semaphore`] instead.
     #[allow(clippy::too_many_arguments)]
     pub fn full_with_audit(
         meta: Arc<dyn MetadataStore>,
@@ -537,6 +571,43 @@ impl AppState {
         mtls: MtlsRuntimeConfig,
         rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
+    ) -> Arc<Self> {
+        Self::full_with_audit_and_parse_semaphore(
+            meta,
+            blobs,
+            configs,
+            listen_addr,
+            auth,
+            cors,
+            mtls,
+            rate_limit,
+            audit,
+            Arc::new(Semaphore::new(DEFAULT_PARSE_CONCURRENCY)),
+        )
+    }
+
+    /// Canonical full constructor: explicit audit store **and** an
+    /// explicit parse-worker semaphore. `main.rs` calls this with an
+    /// env-derived semaphore so production replicas honour
+    /// `CMTRACE_PARSE_CONCURRENCY`; test helpers fall through
+    /// [`AppState::full_with_audit`] which plugs in
+    /// [`DEFAULT_PARSE_CONCURRENCY`].
+    ///
+    /// Ten positional args is over clippy's `too-many-arguments`
+    /// threshold; the lint is silenced locally rather than refactoring
+    /// every existing call site to a builder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn full_with_audit_and_parse_semaphore(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
+        listen_addr: String,
+        auth: AuthState,
+        cors: CorsConfig,
+        mtls: MtlsRuntimeConfig,
+        rate_limit: Arc<RateLimitState>,
+        audit: Arc<dyn AuditStore>,
+        parse_semaphore: Arc<Semaphore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             meta,
@@ -554,6 +625,7 @@ impl AppState {
             crl_cache: None,
             metrics: metrics_handle(),
             rate_limit,
+            parse_semaphore,
         })
     }
 
@@ -615,6 +687,39 @@ impl AppState {
         rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
     ) -> Arc<Self> {
+        Self::with_cors_crl_audit_and_parse_semaphore(
+            meta,
+            blobs,
+            configs,
+            listen_addr,
+            auth,
+            cors,
+            mtls,
+            crl_cache,
+            rate_limit,
+            audit,
+            Arc::new(Semaphore::new(DEFAULT_PARSE_CONCURRENCY)),
+        )
+    }
+
+    /// `with_cors_crl_and_audit` plus an explicit parse-worker semaphore.
+    /// Production `main.rs` (CRL feature on) calls this so the
+    /// `CMTRACE_PARSE_CONCURRENCY` env var actually shapes the runtime cap.
+    #[cfg(feature = "crl")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_cors_crl_audit_and_parse_semaphore(
+        meta: Arc<dyn MetadataStore>,
+        blobs: Arc<dyn BlobStore>,
+        configs: Arc<dyn ConfigStore>,
+        listen_addr: String,
+        auth: AuthState,
+        cors: CorsConfig,
+        mtls: MtlsRuntimeConfig,
+        crl_cache: Option<Arc<CrlCache>>,
+        rate_limit: Arc<RateLimitState>,
+        audit: Arc<dyn AuditStore>,
+        parse_semaphore: Arc<Semaphore>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             meta,
             blobs,
@@ -630,6 +735,7 @@ impl AppState {
             crl_cache,
             metrics: metrics_handle(),
             rate_limit,
+            parse_semaphore,
         })
     }
 
