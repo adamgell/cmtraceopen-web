@@ -6,6 +6,7 @@ members = [
     "crates/api-server",
     "crates/common-wire",
     "crates/agent",
+    "crates/parse-load-harness",
 ]
 
 # cmtrace-wasm is excluded from this workspace because it path-depends on
