@@ -225,6 +225,16 @@ impl MetadataStore for PgMetadataStore {
         Ok(())
     }
 
+    async fn touch_connection(&self, device_id: &str) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE connections SET last_heartbeat_at = now() WHERE device_id = $1"
+        )
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn sessions_older_than(
         &self,
         ttl_days: u32,

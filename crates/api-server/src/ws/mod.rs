@@ -4,6 +4,8 @@
 pub mod auth;
 pub mod handler;
 pub mod persister;
+#[cfg(feature = "postgres")]
+pub mod sweeper;
 
 use common_wire::ws::ServerFrame;
 use std::collections::HashMap;

@@ -406,6 +406,15 @@ async fn main() -> ExitCode {
         hb_rx,
     ));
 
+    // Spawn the stale-connection sweeper (Postgres only). Marks rows whose
+    // last_heartbeat_at is >90 s old as disconnected, then GC-deletes rows
+    // that have been disconnected for >5 minutes. Idempotent: runs on every
+    // replica with no coordination needed.
+    #[cfg(feature = "postgres")]
+    if let Some(pool) = state.meta.pg_pool().cloned() {
+        tokio::spawn(api_server::ws::sweeper::run(pool));
+    }
+
     let app = router(state).layer(TraceLayer::new_for_http());
 
     // Serve path: TLS-terminating axum-server when `tls_enabled` is true and

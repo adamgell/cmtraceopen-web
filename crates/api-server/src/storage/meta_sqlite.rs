@@ -883,6 +883,12 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn touch_connection(&self, _device_id: &str) -> Result<(), StorageError> {
+        // The `connections` table only exists in migrations-pg/. No-op here so
+        // the trait is satisfied for SQLite / test builds.
+        Ok(())
+    }
+
     async fn sessions_older_than(
         &self,
         ttl_days: u32,

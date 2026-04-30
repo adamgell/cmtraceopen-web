@@ -19,6 +19,9 @@ pub async fn run(meta: Arc<dyn MetadataStore>, mut rx: mpsc::Receiver<Heartbeat>
             warn!(device_id = %hb.device_id, error = %e, "heartbeat persist failed");
             metrics::counter!("cmtrace_heartbeat_persist_errors_total").increment(1);
         }
+        if let Err(e) = meta.touch_connection(&hb.device_id).await {
+            tracing::debug!(device_id = %hb.device_id, error = %e, "touch_connection failed");
+        }
     }
 }
 

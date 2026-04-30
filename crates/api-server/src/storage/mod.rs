@@ -1007,6 +1007,10 @@ pub trait MetadataStore: Send + Sync + 'static {
         hb: &common_wire::ws::Heartbeat,
     ) -> Result<(), StorageError>;
 
+    /// Bump `connections.last_heartbeat_at` for the given device. No-op (Ok)
+    /// on backends that don't track the `connections` table (SQLite / mocks).
+    async fn touch_connection(&self, device_id: &str) -> Result<(), StorageError>;
+
     // ----- retention -----
 
     /// Return up to `batch_size` sessions whose `ingested_utc` is older than
