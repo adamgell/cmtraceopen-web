@@ -18,7 +18,7 @@ common-wire = { path = "../common-wire" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "process", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots-no-provider", "multipart", "stream"] }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rcgen = "0.13"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "chrono", "uuid"] }
@@ -29,8 +29,8 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rand = "0.8"
-rand_chacha = "0.3"
+rand = "0.9"
+rand_chacha = "0.9"
 anyhow = "1"
 thiserror = "1"
 futures = "0.3"
