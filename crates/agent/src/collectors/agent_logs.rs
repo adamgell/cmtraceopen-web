@@ -239,8 +239,12 @@ fn default_log_dir() -> PathBuf {
 ///
 /// Recognised patterns:
 ///   * `agent.log` (if someone were to switch the service to `Rotation::never`)
-///   * `agent.log.YYYY-MM-DD` (what `Rotation::daily` with prefix `agent.log`
-///     actually produces — the common case in production)
+///   * `agent.log.YYYY-MM-DD` — legacy pre-0.2.1 layout. Windows treated the
+///     date as the file extension and refused to open the file in default
+///     viewers; recognised here so on-box files from older agents still
+///     ship in evidence bundles during the upgrade window.
+///   * `agent.YYYY-MM-DD.log` — current layout (0.2.1+). Date is the middle
+///     segment; `.log` stays the actual extension.
 ///   * `agent-YYYY-MM-DD.log` (the layout the evidence bundle itself uses;
 ///     harmless to recognise in case an operator hand-copies or an alternate
 ///     appender ever writes it)
@@ -250,6 +254,12 @@ fn is_agent_log_name(name: &str) -> bool {
     }
     if let Some(rest) = name.strip_prefix("agent.log.") {
         return looks_like_iso_date(rest);
+    }
+    if let Some(date_part) = name
+        .strip_prefix("agent.")
+        .and_then(|s| s.strip_suffix(".log"))
+    {
+        return looks_like_iso_date(date_part);
     }
     if let Some(date_part) = name
         .strip_prefix("agent-")
@@ -281,19 +291,29 @@ fn looks_like_iso_date(s: &str) -> bool {
 fn bundle_dest_name(src: &Path) -> Option<String> {
     let name = src.file_name()?.to_str()?;
 
-    // Pattern 1: `agent.log.YYYY-MM-DD` → date is the suffix.
+    // Pattern 1: `agent.log.YYYY-MM-DD` (legacy pre-0.2.1) → date is the suffix.
     if let Some(date) = name.strip_prefix("agent.log.") {
         if looks_like_iso_date(date) {
             return Some(format!("agent-{date}.log"));
         }
     }
 
-    // Pattern 2: `agent-YYYY-MM-DD.log` → already in dest format.
+    // Pattern 2: `agent.YYYY-MM-DD.log` (current 0.2.1+ layout).
+    if let Some(date) = name
+        .strip_prefix("agent.")
+        .and_then(|s| s.strip_suffix(".log"))
+    {
+        if looks_like_iso_date(date) {
+            return Some(format!("agent-{date}.log"));
+        }
+    }
+
+    // Pattern 3: `agent-YYYY-MM-DD.log` → already in dest format.
     if name.starts_with("agent-") && name.ends_with(".log") {
         return Some(name.to_string());
     }
 
-    // Pattern 3: legacy `agent.log` — stamp with today's date.
+    // Pattern 4: legacy `agent.log` — stamp with today's date.
     if name == "agent.log" {
         let today = current_date_stamp();
         return Some(format!("agent-{today}.log"));

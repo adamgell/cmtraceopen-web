@@ -30,13 +30,16 @@ pub fn spawn(
     base_url: String,
     device_id: String,
 ) -> WsClientHandles {
+    info!(%base_url, %device_id, "ws subsystem: spawning client task");
     let (out_tx, mut out_rx) = mpsc::channel::<AgentFrame>(32);
     let (in_tx, in_rx) = mpsc::channel::<ServerFrame>(32);
     let handles = WsClientHandles { outbound_tx: out_tx.clone(), inbound_rx: in_rx };
 
     tokio::spawn(async move {
+        info!("ws subsystem: client task running, entering connect loop");
         let mut backoff_idx = 0;
         loop {
+            info!(attempt = backoff_idx + 1, "ws: attempting connect");
             match connect_and_run(&base_url, &device_id, &mut out_rx, &in_tx).await {
                 Ok(()) => {
                     info!("ws closed cleanly; reconnecting");
@@ -53,6 +56,7 @@ pub fn spawn(
             }
         }
     });
+    info!("ws subsystem: spawn returned; handles ready");
     handles
 }
 

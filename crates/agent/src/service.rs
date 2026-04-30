@@ -258,7 +258,18 @@ fn init_service_tracing(log_level: &str) -> Option<WorkerGuard> {
     let dir_ok = std::fs::create_dir_all(&log_dir).is_ok();
 
     let (file_writer, guard) = if dir_ok {
-        let appender = tracing_appender::rolling::daily(&log_dir, "agent.log");
+        // Files are named `agent.YYYY-MM-DD.log` — the `.log` extension stays
+        // last so Windows associates them with text editors. The previous
+        // shape was `agent.log.YYYY-MM-DD` (from the convenience helper
+        // `tracing_appender::rolling::daily(.., "agent.log")`), which makes
+        // Windows treat `.YYYY-MM-DD` as the extension and refuse to open
+        // the file in a default text viewer.
+        let appender = tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("agent")
+            .filename_suffix("log")
+            .build(&log_dir)
+            .expect("build rolling appender");
         let (nb, g) = tracing_appender::non_blocking(appender);
         (Some(nb), Some(g))
     } else {
