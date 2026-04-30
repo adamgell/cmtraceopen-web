@@ -13,6 +13,7 @@ pub mod extract;
 pub mod middleware;
 pub mod pipeline;
 pub mod routes;
+pub mod schedule;
 pub mod state;
 pub mod storage;
 pub mod ws;
