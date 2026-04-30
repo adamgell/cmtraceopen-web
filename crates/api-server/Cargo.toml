@@ -90,6 +90,10 @@ crl = ["dep:x509-parser"]
 # since the test needs the TLS server bring-up code.
 test-mtls = ["mtls", "dep:rcgen", "dep:tokio-rustls"]
 
+# Exposes in-process helpers (e.g. ConnectionRegistry::device_ids) for
+# integration / load-test harnesses that link directly against api-server.
+test-helpers = []
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "fs", "io-util", "sync"] }

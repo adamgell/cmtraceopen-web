@@ -15,6 +15,7 @@ pub mod pipeline;
 pub mod routes;
 pub mod state;
 pub mod storage;
+pub mod ws;
 
 #[cfg(feature = "mtls")]
 pub mod tls;
