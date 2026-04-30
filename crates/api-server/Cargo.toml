@@ -156,7 +156,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # their TLS stacks) get pulled in — the only one we want today is `azure`,
 # and that one inherits reqwest's `native-tls` path the api-server already
 # uses (no `ring`, no `openssl-sys` should appear in `cargo tree`).
-object_store = { version = "0.11", default-features = false }
+object_store = { version = "0.13", default-features = false }
 futures = "0.3"
 # --- Wave 3 mTLS termination ---------------------------------------------
 # axum-server is the TLS-terminating wrapper around hyper that gives us
