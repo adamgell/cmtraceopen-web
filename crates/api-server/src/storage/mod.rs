@@ -990,6 +990,16 @@ pub trait MetadataStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<EntryRow>, StorageError>;
 
+    /// Return a reference to the underlying `sqlx::PgPool` if this store is
+    /// backed by Postgres. Returns `None` for all other backends (SQLite,
+    /// mocks). Used by the WebSocket upgrade route to issue direct SQL against
+    /// the `connections` table without widening the `MetadataStore` interface
+    /// with WS-specific methods.
+    #[cfg(feature = "postgres")]
+    fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        None
+    }
+
     // ----- heartbeat -----
 
     async fn upsert_agent_and_heartbeat(

@@ -443,6 +443,14 @@ pub struct AppState {
     /// the default. See `routes/ingest.rs` for the acquire-before-spawn
     /// site that turns this into actual backpressure on the agent.
     pub parse_semaphore: Arc<Semaphore>,
+    /// Per-replica WebSocket connection registry. Empty until agents connect.
+    pub ws_registry: crate::ws::ConnectionRegistry,
+    /// Sender for heartbeats observed on this replica's WS connections.
+    pub heartbeat_tx: tokio::sync::mpsc::Sender<common_wire::ws::Heartbeat>,
+    /// Sender for RequestAck / RequestComplete frames. Drained by Task 13's worker.
+    pub request_ack_tx: tokio::sync::mpsc::Sender<common_wire::ws::AgentFrame>,
+    /// This replica's stable identifier, populated from `CMTRACE_REPLICA_ID`.
+    pub replica_id: String,
 }
 
 /// Process-wide Prometheus recorder + handle.
@@ -572,6 +580,7 @@ impl AppState {
         rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
     ) -> Arc<Self> {
+        let (hb_tx, _hb_rx) = crate::ws::persister::channel();
         Self::full_with_audit_and_parse_semaphore(
             meta,
             blobs,
@@ -583,6 +592,10 @@ impl AppState {
             rate_limit,
             audit,
             Arc::new(Semaphore::new(DEFAULT_PARSE_CONCURRENCY)),
+            crate::ws::ConnectionRegistry::new(),
+            hb_tx,
+            tokio::sync::mpsc::channel(16).0,
+            "test-replica".to_string(),
         )
     }
 
@@ -593,7 +606,7 @@ impl AppState {
     /// [`AppState::full_with_audit`] which plugs in
     /// [`DEFAULT_PARSE_CONCURRENCY`].
     ///
-    /// Ten positional args is over clippy's `too-many-arguments`
+    /// Positional args is over clippy's `too-many-arguments`
     /// threshold; the lint is silenced locally rather than refactoring
     /// every existing call site to a builder.
     #[allow(clippy::too_many_arguments)]
@@ -608,6 +621,10 @@ impl AppState {
         rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
         parse_semaphore: Arc<Semaphore>,
+        ws_registry: crate::ws::ConnectionRegistry,
+        heartbeat_tx: tokio::sync::mpsc::Sender<common_wire::ws::Heartbeat>,
+        request_ack_tx: tokio::sync::mpsc::Sender<common_wire::ws::AgentFrame>,
+        replica_id: String,
     ) -> Arc<Self> {
         Arc::new(Self {
             meta,
@@ -626,6 +643,10 @@ impl AppState {
             metrics: metrics_handle(),
             rate_limit,
             parse_semaphore,
+            ws_registry,
+            heartbeat_tx,
+            request_ack_tx,
+            replica_id,
         })
     }
 
@@ -687,6 +708,7 @@ impl AppState {
         rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
     ) -> Arc<Self> {
+        let (hb_tx, _hb_rx) = crate::ws::persister::channel();
         Self::with_cors_crl_audit_and_parse_semaphore(
             meta,
             blobs,
@@ -699,6 +721,10 @@ impl AppState {
             rate_limit,
             audit,
             Arc::new(Semaphore::new(DEFAULT_PARSE_CONCURRENCY)),
+            crate::ws::ConnectionRegistry::new(),
+            hb_tx,
+            tokio::sync::mpsc::channel(16).0,
+            "test-replica".to_string(),
         )
     }
 
@@ -719,6 +745,10 @@ impl AppState {
         rate_limit: Arc<RateLimitState>,
         audit: Arc<dyn AuditStore>,
         parse_semaphore: Arc<Semaphore>,
+        ws_registry: crate::ws::ConnectionRegistry,
+        heartbeat_tx: tokio::sync::mpsc::Sender<common_wire::ws::Heartbeat>,
+        request_ack_tx: tokio::sync::mpsc::Sender<common_wire::ws::AgentFrame>,
+        replica_id: String,
     ) -> Arc<Self> {
         Arc::new(Self {
             meta,
@@ -736,6 +766,10 @@ impl AppState {
             metrics: metrics_handle(),
             rate_limit,
             parse_semaphore,
+            ws_registry,
+            heartbeat_tx,
+            request_ack_tx,
+            replica_id,
         })
     }
 

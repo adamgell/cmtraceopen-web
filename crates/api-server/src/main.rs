@@ -286,6 +286,16 @@ async fn main() -> ExitCode {
         "parse worker concurrency cap (CMTRACE_PARSE_CONCURRENCY)",
     );
 
+    // Build the WebSocket channels. The heartbeat persister is spawned below
+    // (after AppState is constructed). The ack receiver is kept alive until
+    // Task 13 wires in a real consumer — dropping it would close the channel.
+    let (hb_tx, hb_rx) = api_server::ws::persister::channel();
+    let (ack_tx, _ack_rx) = tokio::sync::mpsc::channel::<common_wire::ws::AgentFrame>(64);
+    let ws_registry = api_server::ws::ConnectionRegistry::new();
+    let replica_id = std::env::var("CMTRACE_REPLICA_ID")
+        .unwrap_or_else(|_| format!("replica-{}", uuid::Uuid::now_v7().simple()));
+    info!(%replica_id, "replica identity");
+
     // Spawn a background GC task that sweeps expired entries from every
     // active rate-limiter once per minute. This bounds the DashMap footprint
     // to the number of distinct keys seen in a single window rather than
@@ -364,6 +374,10 @@ async fn main() -> ExitCode {
         rate_limit,
         audit,
         parse_semaphore,
+        ws_registry,
+        hb_tx,
+        ack_tx,
+        replica_id,
     );
     #[cfg(not(feature = "crl"))]
     let state = AppState::full_with_audit_and_parse_semaphore(
@@ -377,7 +391,20 @@ async fn main() -> ExitCode {
         rate_limit,
         audit,
         parse_semaphore,
+        ws_registry,
+        hb_tx,
+        ack_tx,
+        replica_id,
     );
+
+    // Spawn the heartbeat persister. Runs for the life of the process and
+    // drains the hb_rx channel, writing each heartbeat to the metadata store.
+    // The task has no shutdown handshake (same rationale as the retention
+    // sweeper); it will exit naturally when hb_tx is dropped (AppState drop).
+    tokio::spawn(api_server::ws::persister::run(
+        Arc::clone(&state.meta),
+        hb_rx,
+    ));
 
     let app = router(state).layer(TraceLayer::new_for_http());
 

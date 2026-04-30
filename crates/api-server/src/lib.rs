@@ -93,6 +93,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(routes::metrics::router(state.clone()))
         .merge(ingest_router)
         .merge(query_router)
+        .merge(routes::ws::router(state.clone()))
         .layer(from_fn_with_state(
             state,
             routes::status::request_counter_middleware,

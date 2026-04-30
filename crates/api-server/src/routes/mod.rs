@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod metrics;
 pub mod sessions;
 pub mod status;
+pub mod ws;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;

@@ -741,6 +741,7 @@ mod tests {
         );
         use crate::auth::{AuthMode, AuthState, JwksCache};
         let configs: Arc<dyn crate::storage::ConfigStore> = meta.clone();
+        let (hb_tx, _hb_rx) = crate::ws::persister::channel();
         AppState {
             meta,
             blobs,
@@ -766,6 +767,10 @@ mod tests {
             parse_semaphore: Arc::new(tokio::sync::Semaphore::new(
                 crate::state::DEFAULT_PARSE_CONCURRENCY,
             )),
+            ws_registry: crate::ws::ConnectionRegistry::new(),
+            heartbeat_tx: hb_tx,
+            request_ack_tx: tokio::sync::mpsc::channel(16).0,
+            replica_id: "test-replica".to_string(),
         }
     }
 

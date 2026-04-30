@@ -163,6 +163,10 @@ impl MetadataStore for PgMetadataStore {
         )
     }
 
+    fn pg_pool(&self) -> Option<&sqlx::PgPool> {
+        Some(&self.pool)
+    }
+
     async fn upsert_agent_and_heartbeat(
         &self,
         hb: &common_wire::ws::Heartbeat,
