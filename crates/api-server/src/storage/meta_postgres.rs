@@ -92,11 +92,16 @@ impl PgMetadataStore {
     }
 }
 
-/// Append `s` to `buf`, escaping the four characters PG's COPY text format
-/// treats specially: backslash, tab, newline, carriage return.
+/// Append `s` to `buf`, escaping characters PG's COPY text format treats
+/// specially (backslash, tab, newline, carriage return) and stripping NUL
+/// bytes (`\0`). Postgres `text` columns reject NUL because the type is
+/// not allowed to contain `\u{0000}`; real-world Windows log lines
+/// occasionally embed them (mid-rotation truncation, malformed CCM
+/// records). Drop them rather than fail the whole bundle.
 fn push_text(buf: &mut String, s: &str) {
     for ch in s.chars() {
         match ch {
+            '\0' => {} // skip — PG text type cannot store NUL
             '\\' => buf.push_str("\\\\"),
             '\t' => buf.push_str("\\t"),
             '\n' => buf.push_str("\\n"),

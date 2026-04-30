@@ -63,7 +63,14 @@ async fn connect_and_run(
     in_tx: &mpsc::Sender<ServerFrame>,
 ) -> anyhow::Result<()> {
     use futures::{SinkExt, StreamExt};
-    let url = Url::parse(base_url)?.join("/v1/agent/ws")?;
+    let mut url = Url::parse(base_url)?.join("/v1/agent/ws")?;
+    // tokio-tungstenite requires the WebSocket URL scheme. Same endpoint
+    // exposed under ws/wss; we just rewrite the scheme that came from the
+    // agent's `api_endpoint` (which uses http/https for the ingest path).
+    let _ = url.set_scheme(match url.scheme() {
+        "https" => "wss",
+        _ => "ws",
+    });
     let mut req = url.as_str().into_client_request()?;
     req.headers_mut().insert(
         "x-device-id",

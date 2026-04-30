@@ -6,10 +6,9 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
-use cron::Schedule as CronSchedule;
+use croner::Cron;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -44,10 +43,10 @@ pub async fn create(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateBody>,
 ) -> Result<(StatusCode, Json<ScheduleView>), (StatusCode, String)> {
-    let cron = CronSchedule::from_str(&body.cron)
+    let cron = Cron::new(&body.cron).parse()
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid cron: {e}")))?;
-    let next_fire = cron.upcoming(Utc).next()
-        .ok_or((StatusCode::BAD_REQUEST, "cron yields no next time".into()))?;
+    let next_fire = cron.find_next_occurrence(&Utc::now(), false)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("cron yields no next time: {e}")))?;
     selector::render(&body.selector)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid selector: {e}")))?;
     if !(1..=100).contains(&body.rate_pct) {

@@ -4,10 +4,9 @@ use crate::schedule::{leader, rotation, selector};
 use crate::state::AppState;
 use crate::storage::{BundleRequestSource, NewBundleRequest};
 use chrono::{DateTime, Utc};
-use cron::Schedule as CronSchedule;
+use croner::Cron;
 use serde_json::Value;
 use sqlx::{Pool, Postgres};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -159,11 +158,8 @@ async fn update_next_fire(
     conn: &mut sqlx::pool::PoolConnection<Postgres>,
     s: &ScheduleRow,
 ) -> anyhow::Result<()> {
-    let cron = CronSchedule::from_str(&s.cron)?;
-    let next = cron
-        .upcoming(Utc)
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("cron yielded no next time"))?;
+    let cron = Cron::new(&s.cron).parse()?;
+    let next = cron.find_next_occurrence(&Utc::now(), false)?;
     sqlx::query("UPDATE schedules SET last_fired_at = now(), next_fire_at = $1 WHERE name = $2")
         .bind(next)
         .bind(&s.name)

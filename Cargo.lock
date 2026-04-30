@@ -74,7 +74,7 @@ dependencies = [
  "axum",
  "chrono",
  "common-wire",
- "croner",
+ "croner 3.0.1",
  "filetime",
  "futures",
  "glob",
@@ -212,7 +212,7 @@ dependencies = [
  "chrono",
  "cmtraceopen-parser",
  "common-wire",
- "cron",
+ "croner 2.2.0",
  "dashmap",
  "futures",
  "hex",
@@ -777,14 +777,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "cron"
-version = "0.12.1"
+name = "croner"
+version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f8c3e73077b4b4a6ab1ea5047c37c57aee77657bc8ecd6f29b0af082d0b0c07"
+checksum = "c344b0690c1ad1c7176fe18eb173e0c927008fdaaa256e40dfd43ddd149c0843"
 dependencies = [
  "chrono",
- "nom",
- "once_cell",
 ]
 
 [[package]]

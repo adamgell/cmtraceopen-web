@@ -1,0 +1,56 @@
+# Local Mac test stack: PG + api-server, both containerized, api bound on
+# 0.0.0.0:8080 so LAN agents can repoint their CMTRACE_API_ENDPOINT to
+# http://<mac-lan-ip>:8080. Auth and rate limits disabled — for dev use only.
+#
+# Run from the repo root:
+#   docker compose -f dev/mac-test/docker-compose.yml up -d
+#   docker compose -f dev/mac-test/docker-compose.yml logs -f api
+#
+# Stop / wipe:
+#   docker compose -f dev/mac-test/docker-compose.yml down -v
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cmtrace
+      POSTGRES_PASSWORD: cmtrace
+      POSTGRES_DB: cmtrace
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmtrace"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  api:
+    image: cmtraceopen-api:mac-test
+    user: "0:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CMTRACE_LISTEN_ADDR: "0.0.0.0:8080"
+      CMTRACE_DATABASE_URL: "postgres://cmtrace:cmtrace@postgres:5432/cmtrace"
+      CMTRACE_BLOB_BACKEND: "Local"
+      CMTRACE_DATA_DIR: "/var/lib/cmtrace"
+      CMTRACE_AUTH_MODE: "disabled"
+      CMTRACE_TLS_ENABLED: "false"
+      CMTRACE_MTLS_REQUIRE_INGEST: "false"
+      CMTRACE_DEV_UNAUTH_READS: "1"
+      CMTRACE_RATE_LIMIT_INGEST_PER_DEVICE_HOUR: "0"
+      CMTRACE_RATE_LIMIT_INGEST_PER_IP_MINUTE: "0"
+      CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE: "0"
+      CMTRACE_PG_POOL_MAX_CONNECTIONS: "64"
+      CMTRACE_PARSE_CONCURRENCY: "8"
+      CMTRACE_REPLICA_ID: "mac-test-1"
+      RUST_LOG: "info"
+    volumes:
+      - api-blobs:/var/lib/cmtrace
+    # Bind to all interfaces on the host so LAN agents can reach it.
+    ports:
+      - "0.0.0.0:8080:8080"
+
+volumes:
+  api-blobs:
