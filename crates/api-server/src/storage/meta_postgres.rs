@@ -279,6 +279,17 @@ impl MetadataStore for PgMetadataStore {
         Ok(())
     }
 
+    async fn bump_forward_attempts(&self, request_id: Uuid) -> Result<i32, StorageError> {
+        let row: (i32,) = sqlx::query_as(
+            "UPDATE bundle_requests SET forward_attempts = forward_attempts + 1 \
+             WHERE request_id = $1 RETURNING forward_attempts::int",
+        )
+        .bind(request_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0)
+    }
+
     async fn agent_exists(&self, device_id: &str) -> Result<bool, StorageError> {
         let row: Option<(i64,)> = sqlx::query_as(
             "SELECT 1::bigint FROM agents WHERE device_id = $1",

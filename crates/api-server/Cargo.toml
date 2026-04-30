@@ -141,6 +141,7 @@ dashmap = "6"
 # `rustls::crypto::aws_lc_rs::default_provider().install_default()`).
 jwt-simple = { version = "0.12", default-features = false, features = ["pure-rust"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots-no-provider"] }
+anyhow = "1"
 # Operator-auth JWKS cache needs non-blocking read-heavy access.
 parking_lot = "0.12"
 # Parse-on-ingest pipeline. Path-dep on the sibling cmtraceopen submodule;

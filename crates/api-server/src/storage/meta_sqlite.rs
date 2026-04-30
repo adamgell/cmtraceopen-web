@@ -913,6 +913,11 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(())
     }
 
+    async fn bump_forward_attempts(&self, _request_id: Uuid) -> Result<i32, StorageError> {
+        // TODO: forward_attempts tracking is PG-only.
+        Ok(0)
+    }
+
     async fn agent_exists(&self, _device_id: &str) -> Result<bool, StorageError> {
         // TODO: heartbeat / bundle-request features are PG-only.
         Ok(false)

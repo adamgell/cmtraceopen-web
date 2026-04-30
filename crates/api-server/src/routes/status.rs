@@ -771,6 +771,7 @@ mod tests {
             heartbeat_tx: hb_tx,
             request_ack_tx: tokio::sync::mpsc::channel(16).0,
             replica_id: "test-replica".to_string(),
+            http_client: reqwest::Client::new(),
         }
     }
 

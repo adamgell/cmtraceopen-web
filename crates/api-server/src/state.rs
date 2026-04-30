@@ -451,6 +451,10 @@ pub struct AppState {
     pub request_ack_tx: tokio::sync::mpsc::Sender<common_wire::ws::AgentFrame>,
     /// This replica's stable identifier, populated from `CMTRACE_REPLICA_ID`.
     pub replica_id: String,
+    /// Shared HTTP client for cross-replica forward requests. Kept on
+    /// `AppState` so connection pools are reused across calls and tests can
+    /// inject a pre-built client if needed.
+    pub http_client: reqwest::Client,
 }
 
 /// Process-wide Prometheus recorder + handle.
@@ -647,6 +651,7 @@ impl AppState {
             heartbeat_tx,
             request_ack_tx,
             replica_id,
+            http_client: reqwest::Client::new(),
         })
     }
 
@@ -770,6 +775,7 @@ impl AppState {
             heartbeat_tx,
             request_ack_tx,
             replica_id,
+            http_client: reqwest::Client::new(),
         })
     }
 

@@ -1040,6 +1040,12 @@ pub trait MetadataStore: Send + Sync + 'static {
     /// reachable at dispatch time.
     async fn mark_bundle_request_offline(&self, request_id: uuid::Uuid) -> Result<(), StorageError>;
 
+    /// Atomically increment `bundle_requests.forward_attempts` by one and
+    /// return the new value. Used by the cross-replica forward sender to
+    /// track retry count for observability. No-op (returns `Ok(0)`) on
+    /// backends that don't track this column (SQLite / mocks).
+    async fn bump_forward_attempts(&self, request_id: uuid::Uuid) -> Result<i32, StorageError>;
+
     /// Return `true` if a row with `device_id` exists in the `agents` table.
     async fn agent_exists(&self, device_id: &str) -> Result<bool, StorageError>;
 

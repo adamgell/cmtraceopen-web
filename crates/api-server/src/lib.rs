@@ -88,6 +88,10 @@ pub fn router(state: Arc<AppState>) -> Router {
                     "/v1/devices/{device_id}/request-bundle",
                     axum::routing::post(routes::request_bundle::handler),
                 )
+                .route(
+                    "/v1/internal/forward",
+                    axum::routing::post(routes::internal::handler),
+                )
                 .with_state(state.clone()),
         )
         .layer(from_fn_with_state(
