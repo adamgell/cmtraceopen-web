@@ -376,6 +376,8 @@ pub mod config {
     }
 }
 
+pub mod ws;
+
 pub use config::AgentConfigOverride;
 
 /// Generic keyset-paginated envelope. `next_cursor` is an opaque, base64 token
