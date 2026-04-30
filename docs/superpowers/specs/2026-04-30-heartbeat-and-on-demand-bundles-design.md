@@ -165,13 +165,15 @@ JSON over WebSocket text frames. Schema lives in `common-wire` so agent + server
 2. Server accepts, UPSERTs `connections(device_id, replica_id, ...)`.
 3. Agent immediately sends a `heartbeat` (acts as "hello").
 4. Loop: every 45s send `heartbeat`, expect `heartbeat_ack` within 30s. If 2 consecutive ACKs missed → close + reconnect with backoff (1s → 2s → 5s → 15s → 30s, capped + jittered).
-5. When `request_bundle` arrives: agent sends `request_ack` immediately, runs collection, calls existing `/v1/ingest/bundles` with `X-Bundle-Request-Id` header so the server can correlate the resulting session with the originating request.
+5. When `request_bundle` arrives: agent sends `request_ack` immediately, runs collection, calls existing `/v1/ingest/bundles` with the `X-Bundle-Request-Id: <uuid>` header so the server can correlate the resulting session with the originating request.
+
+   **Existing-endpoint change required:** today's `POST /v1/ingest/bundles` (open-bundle) handler ignores the `X-Bundle-Request-Id` header. As part of this work, the handler reads it (when present and a valid UUID), and the ingest finalize step writes it to `sessions.request_id`. A separate worker (or the finalize handler itself) UPDATEs `bundle_requests SET bundle_id = <session_id>, completed_at = now(), outcome = 'ok'` for the matching `request_id`. Agents that are not yet 0.2.0 simply omit the header — `sessions.request_id` stays NULL and the existing flow is unchanged.
 6. On graceful shutdown (server SIGTERM): server sends WS close 1001 (going away); agent reconnects to whichever replica picks it up next.
 
 ### Server-side timeouts
 
 - No heartbeat for 90s (2 missed cycles + grace) → close WS, set `connections.disconnected_at = now()`. Row GC'd 5 min later.
-- Idle ping/pong every 30s (WS sub-protocol) keeps NAT/proxy state warm in addition to the app-level heartbeat.
+- **WS protocol-level ping/pong:** axum's `WebSocket` does not auto-send pings. Each connection's per-task explicitly runs `tokio::time::interval(Duration::from_secs(30))` to send `Message::Ping(b"")`. The matching `Message::Pong(...)` resets a `last_pong_at` timer. Two missed pong frames (60s) → server closes the connection independent of the app-level heartbeat. Keeps NAT/proxy state warm and detects dead TCP that hasn't yet failed the heartbeat schedule.
 
 ### Cross-replica forwarding
 
@@ -182,6 +184,8 @@ JSON over WebSocket text frames. Schema lives in `common-wire` so agent + server
 ```
 
 Receiving replica looks up its in-memory registry and drops the frame onto the device's mpsc. Returns 202 immediately; actual WS send is fire-and-forget.
+
+**Retry policy:** the dispatching replica retries the forward POST **once** with 500ms backoff before giving up. Increment `bundle_requests.forward_attempts` on each attempt. If both attempts fail, mark `outcome='offline'`. Two attempts catches the common transient case (intra-cluster network blip, receiving replica restarting) without storming a genuinely-down replica.
 
 ### Header-bound auth check
 
@@ -212,7 +216,7 @@ CREATE INDEX agents_ninjaone_idx ON agents (ninjaone_device_id) WHERE ninjaone_d
 CREATE INDEX agents_last_seen_idx ON agents (last_seen_at);
 
 CREATE TABLE connections (
-  device_id          text PRIMARY KEY REFERENCES agents(device_id),
+  device_id          text PRIMARY KEY REFERENCES agents(device_id) ON DELETE CASCADE,
   replica_id         text NOT NULL,            -- env CMTRACE_REPLICA_ID
   connected_at       timestamptz NOT NULL,
   last_heartbeat_at  timestamptz NOT NULL,
@@ -222,7 +226,7 @@ CREATE INDEX connections_replica_idx ON connections (replica_id) WHERE disconnec
 
 CREATE TABLE heartbeats (
   id             bigserial PRIMARY KEY,
-  device_id      text NOT NULL REFERENCES agents(device_id),
+  device_id      text NOT NULL REFERENCES agents(device_id) ON DELETE CASCADE,
   ts             timestamptz NOT NULL,
   queue_depth    int NOT NULL,
   errors_24h     int NOT NULL,
@@ -251,21 +255,37 @@ CREATE INDEX schedules_due_idx ON schedules (next_fire_at) WHERE enabled = true;
 -- operator POST returns it in the 202 body; the schedule worker generates
 -- it before dispatching the frame.
 CREATE TABLE bundle_requests (
-  request_id      uuid PRIMARY KEY,
-  device_id       text NOT NULL REFERENCES agents(device_id),
-  source          text NOT NULL CHECK (source IN ('operator', 'scheduled')),
-  schedule_name   text NULL REFERENCES schedules(name) ON DELETE SET NULL,
-  operator_email  text NULL,
-  requested_at    timestamptz NOT NULL,
-  acked_at        timestamptz NULL,
-  completed_at    timestamptz NULL,
-  bundle_id       uuid NULL,
-  outcome         text NULL CHECK (outcome IN ('ok','error','timeout','offline')),
-  error           text NULL
+  request_id        uuid PRIMARY KEY,
+  device_id         text NOT NULL REFERENCES agents(device_id) ON DELETE CASCADE,
+  source            text NOT NULL CHECK (source IN ('operator', 'scheduled')),
+  schedule_name     text NULL REFERENCES schedules(name) ON DELETE SET NULL,
+  operator_email    text NULL,
+  requested_at      timestamptz NOT NULL,
+  acked_at          timestamptz NULL,
+  completed_at      timestamptz NULL,
+  bundle_id         uuid NULL,
+  outcome           text NULL CHECK (outcome IN ('ok','error','timeout','offline')),
+  error             text NULL,
+  forward_attempts  smallint NOT NULL DEFAULT 0   -- cross-replica forward retry count
 );
 CREATE INDEX bundle_requests_device_idx ON bundle_requests (device_id, requested_at DESC);
 CREATE INDEX bundle_requests_schedule_idx ON bundle_requests (schedule_name, requested_at DESC);
+
+-- Existing table extension (ingest path) — adds correlation back to the
+-- bundle_requests row that triggered this session. The ingest open-bundle
+-- handler reads `X-Bundle-Request-Id` header and stores it here.
+ALTER TABLE sessions ADD COLUMN request_id uuid NULL;
+CREATE INDEX sessions_request_id_idx ON sessions (request_id) WHERE request_id IS NOT NULL;
 ```
+
+### Agent GC / orphan cleanup
+
+A device's `agents` row stays forever by default. Two cleanup paths:
+
+1. **Operator-triggered:** `POST /v1/agents/{device_id}/forget` — deletes the row. `ON DELETE CASCADE` removes the matching `connections`, `heartbeats`, and `bundle_requests` rows automatically.
+2. **Stale-detection dashboard view:** the operator UI surfaces agents with `last_seen_at < now() - 30d` so the operator can decide what to forget. No automatic deletion in v1 — automatic GC deferred until operators have signal about whether a long-silent device is decommissioned vs. just powered off.
+
+Two agents claiming the same `intune_device_id` is allowed (no UNIQUE constraint) — operator search by MDM ID may return multiple `device_id`s. This is documented behavior, not a bug; it covers cases where an Intune ID is re-issued to a replacement machine before the old `agents` row is forgotten.
 
 ## Schedule engine
 
@@ -286,51 +306,101 @@ Multiple fields combine with logical AND. Lists within a single field combine wi
 
 ### Worker loop (one leader per cluster)
 
+Postgres advisory locks are *session-scoped*. With sqlx's pool, a `pg_try_advisory_lock(...)` call holds the lock only as long as that specific connection is checked out. The leader therefore acquires a **dedicated long-lived `PgConnection`** off the pool, holds it for its entire leader lifetime, and runs all leader work on that one connection.
+
 ```rust
-loop {
-    let _lock = pg_try_advisory_lock(SCHEDULE_LEADER_KEY).await?;  // standby retries every 30s
-
+// Acquired once at startup; never returned to the pool while leader.
+async fn run_schedule_leader(pool: &PgPool) -> anyhow::Result<()> {
     loop {
-        let due: Vec<Schedule> = sqlx::query_as(
-            "SELECT * FROM schedules
-             WHERE enabled AND next_fire_at <= now()
-             ORDER BY next_fire_at ASC LIMIT 16"
-        ).fetch_all(&pool).await?;
+        let mut conn = pool.acquire().await?;
+        let acquired: (bool,) = sqlx::query_as("SELECT pg_try_advisory_lock($1)")
+            .bind(SCHEDULE_LEADER_KEY)
+            .fetch_one(&mut *conn)
+            .await?;
 
-        for s in due {
-            fire_schedule(&pool, &s).await;
-            let next = compute_next_fire(&s.cron, now);
-            sqlx::query("UPDATE schedules SET last_fired_at = now(), next_fire_at = $1 WHERE name = $2")
-                .bind(next).bind(&s.name).execute(&pool).await?;
+        if !acquired.0 {
+            drop(conn);                                       // release immediately
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            continue;                                         // try again as standby
         }
 
-        sleep(30s).await;
+        // We're the leader. Hold `conn` for the duration of the loop so the
+        // advisory lock stays held. All leader work uses this same conn.
+        loop {
+            let due: Vec<Schedule> = sqlx::query_as(
+                "SELECT * FROM schedules
+                 WHERE enabled AND next_fire_at <= now()
+                 ORDER BY next_fire_at ASC LIMIT 16"
+            )
+            .fetch_all(&mut *conn)
+            .await?;
+
+            for s in due {
+                // fire_schedule is allowed to use the pool for its inserts;
+                // it must NOT touch `conn` (which would release the lock if
+                // any nested query checked the conn back in).
+                fire_schedule(pool, &s).await;
+                let next = compute_next_fire(&s.cron, Utc::now());
+                sqlx::query(
+                    "UPDATE schedules SET last_fired_at = now(), next_fire_at = $1 \
+                     WHERE name = $2"
+                )
+                .bind(next)
+                .bind(&s.name)
+                .execute(&mut *conn)
+                .await?;
+            }
+
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        // If the inner loop ever errors out, `conn` drops, the lock releases,
+        // and another replica picks up within ~30s.
     }
 }
 ```
 
+**Operational note on pool sizing:** the leader holds 1 connection for its lifetime. With `CMTRACE_PG_POOL_MAX_CONNECTIONS=64` (set by the load-harness work), that leaves 63 for heartbeat persister, WS handlers, ingest path, and ad-hoc queries. Size the pool with this in mind on replicas that may be elected leader.
+
+**Failover latency:** if the leader replica dies, the advisory lock auto-releases when the connection's underlying TCP closes. Standby replicas detect on their next 30s tick. Worst-case schedule-fire delay: 30s + TCP timeout (typically 10-60s on TCP keepalive). During that window, schedules don't fire; on recovery, all schedules with `next_fire_at <= now()` fire immediately on the first tick.
+
 ### `fire_schedule(s)` — deterministic rotation
 
-1. Resolve selector → list of matching `device_id`s from `agents`.
+1. Resolve selector → list of matching `device_id`s from `agents` (see "Selector SQL generation" below).
 2. Total = matched count, K = `ceil(total * rate_pct / 100)`.
-3. Compute today's UTC epoch-day as the rotation salt.
-4. For each device d, compute `hash = sha256(d.device_id || epoch_day)` as a u64.
+3. **Rotation salt** is `s.last_fired_at.unwrap_or(s.created_at).timestamp() / 60` (the fire's start-minute). This guarantees rotation between successive fires regardless of cadence — daily, hourly, or every-5-minutes.
+4. For each device d, compute `hash = sha256(d.device_id || salt)` as a u64.
 5. Take the K devices with the lowest hash values (sort ascending, take top K).
-6. Filter out any device with a `bundle_requests` row newer than `(now - cooldown_seconds)`.
+6. Filter out any device with a `bundle_requests` row (any source, any schedule) newer than `(now - cooldown_seconds)`. The cooldown is per-device-per-schedule for *scheduled* selection only; operator-source requests are NEVER cooldown-blocked.
 7. For each remaining device:
-   - Insert `bundle_requests` row with `source='scheduled'`, `schedule_name=s.name`.
-   - Compute `jitter_delay = random(0, jitter_seconds)`.
+   - Generate a fresh `request_id` (UUID v4) and INSERT the `bundle_requests` row (`source='scheduled'`, `schedule_name=s.name`).
+   - Compute `jitter_delay = random(0, jitter_seconds)` (uniform).
    - Spawn a task that sleeps `jitter_delay` then dispatches the `request_bundle` frame via the connection registry or `/v1/internal/forward`.
+8. If cooldown filtering eliminates ALL K candidates, log a `cmtrace_schedule_noop_total{schedule=...}` metric and proceed (this is normal under heavy operator-request traffic).
 
 **Properties:**
-- Deterministic same-day: re-running picks the same K devices (epoch-day salt is stable). Idempotent.
-- Different across days: epoch-day rotates the hash → tomorrow's K is mostly different.
-- No state to maintain — the hash is the rotation primitive.
-- Fairness: sha256 over device_id space gives uniform-ish picks.
+- Deterministic *within a single fire*: the salt is fixed at fire-start; re-running the same fire would pick the same K. (Used for retry resilience if the dispatch is interrupted.)
+- Different across fires: even an hourly schedule rotates because the start-minute changes.
+- No persistent state to maintain — the hash + last_fired_at are the rotation primitives.
+- Fairness: over a window of N fires, every device has ~equal probability of being picked (sha256 is uniform over the device_id space; minute-level salt cycles every fire).
+
+### Selector SQL generation
+
+Selector JSON is *parsed* into a typed AST, then *rendered* into a SQL `WHERE` clause with all values **bound as sqlx parameters** — values from JSON are NEVER concatenated into SQL strings. Each operator generates a fragment:
+
+| Operator | SQL fragment | Notes |
+|---|---|---|
+| `device_name: "exact"` | `device_name = $n` | bound |
+| `device_name: "prefix:LAB-"` | `device_name LIKE $n || '%'` | bound; `%` is appended in Rust |
+| `intune_device_id: "is_set"` | `intune_device_id IS NOT NULL` | no value |
+| `os_version: "Windows 10"` | `os_version LIKE $n || '%'` | bound |
+| `agent_version: ">=0.2.0"` | `agent_version >= $n` | bound (semver string compare; 5-digit zero-pad each segment for correctness) |
+| `last_seen_within: "1h"` | `last_seen_at >= now() - $n::interval` | duration parsed in Rust, bound as text |
+
+A small unit-test suite covers every operator for SQL-injection: each value can be `'; DROP TABLE agents; --` and the generated query rejects or escapes it. The generator is allow-list — unknown operators or fields return `400` from the schedule POST handler before any SQL runs.
 
 ### Cron handling
 
-Use the `cron` Rust crate. Standard 5-field syntax (`min hour dom mon dow`). Validated at INSERT time; invalid expressions return 400 from `POST /v1/schedules`. `compute_next_fire` is `cron::Schedule::upcoming(Utc).next()`.
+Use the `cron` Rust crate. Standard 5-field syntax (`min hour dom mon dow`) **only** — the macros `@daily`, `@hourly`, `@reboot`, etc., are not supported (the `cron` crate does not parse them). Validated at INSERT time; invalid or unsupported expressions return 400 from `POST /v1/schedules` with a clear error pointing at the unsupported syntax. `compute_next_fire` is `cron::Schedule::upcoming(Utc).next()`.
 
 ## Operator request path
 
@@ -344,8 +414,10 @@ POST /v1/devices/{device_id}/request-bundle
 3. Look up `connections.replica_id WHERE device_id=? AND disconnected_at IS NULL`.
    - Null → 409 `"device offline"`. Request row stays with `outcome=NULL` (operator may retry when device returns).
    - Self → push to local connection registry's mpsc.
-   - Other replica → POST `/v1/internal/forward` to that replica.
+   - Other replica → POST `/v1/internal/forward` to that replica (with the retry policy described in "Cross-replica forwarding").
 4. Return 202 `{ "request_id": "...", "device": "...", "status": "dispatched" }`.
+
+**Operator duplicates are allowed.** A double-click sends two requests; the agent ships two bundles. Backend does not deduplicate operator-source requests — the cooldown applies to scheduled selection only. Frontend is responsible for click-debouncing (button disable on submit, confirm dialog on rapid re-click). Cooldown is for *scheduled* fairness, not for protecting agents from operator intent.
 
 The viewer's Device page polls `GET /v1/devices/{id}/bundle-requests?limit=50` to show request history (operator + scheduled mixed) with outcome and bundle link.
 
@@ -358,6 +430,14 @@ Hard cutover via Intune + NinjaOne; no legacy compatibility window.
 3. **Rollout:** Intune + NinjaOne push 0.2.0 to fleet. Operator monitors `/v1/agents` for `last_seen_at` rising as agents reconnect.
 4. **Old agents:** any agent < 0.2.0 stops shipping bundles after its existing schedule is removed locally; goes silent. Server marks `last_seen_at < now() - 24h` and a dashboard surfaces "stragglers needing update". MDM version-pin forces upgrade.
 5. **Deprecate `CMTRACE_SCHEDULE_INTERVAL_HOURS`** — agent still parses it but logs deprecation; ignored once WS connects successfully.
+
+### Infrastructure changes required
+
+This spec depends on infra changes that must land alongside the code:
+
+- **File-descriptor ulimit on the api-server container.** Each WS = one TCP socket = one FD. The default container ulimit on Linux/Azure is typically 1024 — far below the spec's claimed 50–100K idle WS per replica. The api-server `Dockerfile` must set `ulimit -n 65536` (or pass it through), and `infra/azure/envs/pilot/` Terraform must set the matching `containerSize` / `resources` / `securityContext.sysctls` so the host honors it. **Without this change, replicas cap at ~1000 connected agents regardless of CPU/RAM.**
+- **WebSocket Upgrade pass-through.** Pilot's external HTTPS ingress (Azure Container Apps, no Application Gateway in front) supports WS natively per the previous mTLS-removal work. No new ingress config needed; verify with a quick `wscat wss://pilot.cmtrace.net/v1/agent/ws` post-deploy.
+- **`CMTRACE_REPLICA_ID` env var.** ACA injects a stable per-replica identifier (e.g., revision name + ordinal). The api-server reads this at startup and uses it as the value for `connections.replica_id`.
 
 ## Error handling
 
@@ -372,6 +452,7 @@ Hard cutover via Intune + NinjaOne; no legacy compatibility window.
 | Agent receives malformed `request_bundle` frame | WS close 1003 (unsupported data), reconnect. Server logs the event. |
 | Device sends `device_id` mismatching its WS auth header | WS close 1008 (policy violation), security log event, no reconnect grace. |
 | Schedule worker advisory lock contention | Replica that loses the race becomes a standby; no work lost. |
+| Server restart / leader replica restart | All connected agents reconnect-storm the surviving replicas in seconds. Surge tolerance comes from the heartbeat persister's bounded mpsc + drop-oldest semantics. WS accept rate-limit deferred to v2 unless measured to be a problem. |
 
 ## Testing
 
@@ -388,9 +469,14 @@ Hard cutover via Intune + NinjaOne; no legacy compatibility window.
 - WS connect → send heartbeat → assert UPSERT into `agents`.
 - Send `request_bundle` from operator endpoint → verify it lands on the WS receiver task → verify `bundle_requests` row.
 - Schedule fire end-to-end: insert schedule, insert N agents, set `next_fire_at = now()`, run worker tick, assert `N×rate_pct%` rows in `bundle_requests` with correct `schedule_name`.
-- Cross-replica forwarding: spin up two axum instances with different `replica_id`s, connect a WS to one, dispatch from the other, verify forwarded frame arrives.
+- Cross-replica forwarding: spin up two axum instances with different `replica_id`s, connect a WS to one, dispatch from the other, verify forwarded frame arrives. Also verify single-retry policy by failing the receiving replica's first response (HTTP 503) and asserting `bundle_requests.forward_attempts = 2` on success or final-offline outcome.
 - Reconnect: kill the agent's WS, wait 90s, verify `connections.disconnected_at` set; reconnect, verify a new row replaces the stale one.
 - `device_id`/header mismatch → WS close 1008.
+- **Heartbeat persister drop semantics:** fill the bounded mpsc (set buffer to 4 in test), send 100 heartbeats rapidly, assert the in-memory `cmtrace_heartbeat_drops_total` counter increments by ≥ 90 and the persister continues to make progress (no stall, no panic).
+- **`X-Bundle-Request-Id` correlation:** open-bundle with the header set, finalize, assert `sessions.request_id` is populated and `bundle_requests.bundle_id` / `completed_at` / `outcome='ok'` are updated.
+- **Operator double-submit:** call the operator endpoint twice in quick succession for the same device, assert two `bundle_requests` rows with two distinct `request_id`s and the agent receives two `request_bundle` frames.
+- **Schedule cooldown vs. operator override:** with a schedule cooldown of 1h, fire the schedule, then call the operator endpoint immediately — assert the operator request is NOT cooldown-blocked.
+- **Selector SQL-injection:** for each operator (`exact`, `prefix`, `is_set`, …) submit a value containing `'; DROP TABLE agents; --` and assert (a) no syntax error reaches PG, (b) no rows are deleted, (c) the resulting query parameter-binds the literal string.
 
 ### Load tests (parse-load-harness)
 
