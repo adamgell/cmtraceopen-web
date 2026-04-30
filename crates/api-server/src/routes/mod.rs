@@ -1,4 +1,6 @@
 pub mod admin;
+pub mod agents;
+pub mod bundle_requests;
 pub mod config;
 pub mod devices;
 pub mod entries;

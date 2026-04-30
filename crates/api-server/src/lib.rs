@@ -102,6 +102,15 @@ pub fn router(state: Arc<AppState>) -> Router {
                     "/v1/schedules/{name}",
                     axum::routing::delete(routes::schedules::delete),
                 )
+                .route("/v1/agents", axum::routing::get(routes::agents::list))
+                .route(
+                    "/v1/agents/{device_id}/forget",
+                    axum::routing::post(routes::agents::forget),
+                )
+                .route(
+                    "/v1/devices/{device_id}/bundle-requests",
+                    axum::routing::get(routes::bundle_requests::list),
+                )
                 .with_state(state.clone()),
         )
         .layer(from_fn_with_state(
