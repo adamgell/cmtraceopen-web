@@ -8,6 +8,7 @@ pub mod ingest;
 pub mod internal;
 pub mod metrics;
 pub mod request_bundle;
+pub mod schedules;
 pub mod sessions;
 pub mod status;
 pub mod ws;

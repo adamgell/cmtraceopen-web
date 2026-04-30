@@ -93,6 +93,15 @@ pub fn router(state: Arc<AppState>) -> Router {
                     "/v1/internal/forward",
                     axum::routing::post(routes::internal::handler),
                 )
+                .route(
+                    "/v1/schedules",
+                    axum::routing::post(routes::schedules::create)
+                        .get(routes::schedules::list),
+                )
+                .route(
+                    "/v1/schedules/{name}",
+                    axum::routing::delete(routes::schedules::delete),
+                )
                 .with_state(state.clone()),
         )
         .layer(from_fn_with_state(
