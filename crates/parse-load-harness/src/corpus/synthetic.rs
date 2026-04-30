@@ -95,9 +95,9 @@ impl SyntheticCorpus {
                 }
             }
             zw.finish()?;
-            // The encoding dist is sampled to keep its draw stream stable
-            // even though we don't yet vary encoding. Future work: emit
-            // UTF-16LE bodies when sampled "Utf16Le".
+            // Keep RNG stream stable for future encoding variants. The drawn value
+            // is currently unused (UTF-16LE/Other emission is future work); see
+            // spec doc § "encoding variation" hooks.
             let _ = self.encoding_dist.sample(&mut self.rng);
             let _ = &self.encoding_keys;
             let _ = emitted;

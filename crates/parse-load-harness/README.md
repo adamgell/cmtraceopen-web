@@ -91,6 +91,8 @@ When `--compare-to` is given, also `comparison.md`.
 
 ## Mining a shape from a Postgres dump
 
+**Prerequisite:** `psql` must be on PATH — the binary shells out to it to load the dump. On macOS: `brew install libpq && brew link --force libpq`.
+
 ```sh
 cargo run --release -p parse-load-harness --bin mine-dump -- \
   ./pilot-2026-04-28.sql \

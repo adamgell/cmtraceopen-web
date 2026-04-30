@@ -163,6 +163,28 @@ async fn run_command(args: Args) -> anyhow::Result<()> {
     tracing::info!(?summary, "run complete");
 
     let mut exit_code = 0;
+    if let Some(threshold) = cfg.args.max_rss_mb {
+        let path = cfg.out_dir.join("system.jsonl");
+        let mut max_rss: u64 = 0;
+        if let Ok(body) = tokio::fs::read_to_string(&path).await {
+            for line in body.lines() {
+                let v: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let Some(rss) = v.get("rss_mb").and_then(|r| r.as_u64()) {
+                    max_rss = max_rss.max(rss);
+                }
+            }
+        }
+        if max_rss > threshold {
+            tracing::warn!(max_rss, threshold, "RSS exceeded --max-rss-mb threshold");
+            exit_code = 1;
+        } else {
+            tracing::info!(max_rss, threshold, "max observed RSS within threshold");
+        }
+    }
+
     if let Some(prev) = &cfg.args.compare_to {
         let cmp = Comparison::build(prev, &cfg.out_dir, cfg.args.regression_threshold)?;
         let md = cmp.render_markdown();

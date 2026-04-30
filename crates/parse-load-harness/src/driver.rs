@@ -114,6 +114,7 @@ fn spawn_ramp(gate: Arc<Semaphore>, concurrency: u32, ramp: Duration) {
         gate.add_permits(Semaphore::MAX_PERMITS);
         return;
     }
+    // Intentionally detached: this task runs for the lifetime of the run; the driver loop only reads permits.
     tokio::spawn(async move {
         let step = ramp / concurrency.max(1);
         loop {

@@ -103,7 +103,9 @@ impl Target for InProcessTarget {
         let n_files = bundle.n_files;
         let bundle_bytes = bundle.zip_bytes.len() as u64;
 
-        let parse_start = Instant::now();
+        // Outer timer: error-arm fallback only. On success, parse_ms returned
+        // from send_inner is the parse-phase duration after staging.
+        let total_start = Instant::now();
 
         match self.send_inner(bundle).await {
             Ok((parse_state, parse_ms)) => BundleResult {
@@ -124,7 +126,7 @@ impl Target for InProcessTarget {
                 n_files,
                 bundle_bytes,
                 finalize_ms: None,
-                parse_ms: parse_start.elapsed().as_millis() as u64,
+                parse_ms: total_start.elapsed().as_millis() as u64,
                 parse_state: "failed".to_string(),
                 files_with_fallbacks: None,
                 http_status: None,
