@@ -15,8 +15,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use super::{
-    ConfigStore, DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile,
-    NewUpload, PoolStats, SessionRow, StorageError, UploadRow,
+    ConfigStore, DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewBundleRequest,
+    NewEntry, NewFile, NewUpload, PoolStats, SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the migration directory into the binary. Path is relative to this
@@ -887,6 +887,35 @@ impl MetadataStore for SqliteMetadataStore {
         // The `connections` table only exists in migrations-pg/. No-op here so
         // the trait is satisfied for SQLite / test builds.
         Ok(())
+    }
+
+    async fn lookup_connection(
+        &self,
+        _device_id: &str,
+    ) -> Result<Option<String>, StorageError> {
+        // TODO: heartbeat / bundle-request features are PG-only.
+        Ok(None)
+    }
+
+    async fn insert_bundle_request(
+        &self,
+        _row: NewBundleRequest,
+    ) -> Result<(), StorageError> {
+        // TODO: heartbeat / bundle-request features are PG-only.
+        Ok(())
+    }
+
+    async fn mark_bundle_request_offline(
+        &self,
+        _request_id: Uuid,
+    ) -> Result<(), StorageError> {
+        // TODO: heartbeat / bundle-request features are PG-only.
+        Ok(())
+    }
+
+    async fn agent_exists(&self, _device_id: &str) -> Result<bool, StorageError> {
+        // TODO: heartbeat / bundle-request features are PG-only.
+        Ok(false)
     }
 
     async fn sessions_older_than(

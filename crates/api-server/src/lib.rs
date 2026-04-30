@@ -82,6 +82,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(routes::entries::router(state.clone()))
         .merge(routes::admin::router(state.clone()))
         .merge(routes::config::router(state.clone()))
+        .merge(
+            Router::new()
+                .route(
+                    "/v1/devices/{device_id}/request-bundle",
+                    axum::routing::post(routes::request_bundle::handler),
+                )
+                .with_state(state.clone()),
+        )
         .layer(from_fn_with_state(
             state.clone(),
             crate::middleware::rate_limit::ip_query_middleware,

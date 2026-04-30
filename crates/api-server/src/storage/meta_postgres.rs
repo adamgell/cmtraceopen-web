@@ -38,8 +38,8 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use super::{
-    AuditStore, DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewEntry, NewFile,
-    NewUpload, PoolStats, SessionRow, StorageError, UploadRow,
+    AuditStore, DeviceRow, EntryFilters, EntryRow, FileRow, MetadataStore, NewBundleRequest,
+    NewEntry, NewFile, NewUpload, PoolStats, SessionRow, StorageError, UploadRow,
 };
 
 /// Bake the Postgres migration directory into the binary. Path is relative to
@@ -233,6 +233,60 @@ impl MetadataStore for PgMetadataStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    async fn lookup_connection(&self, device_id: &str) -> Result<Option<String>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT replica_id FROM connections \
+             WHERE device_id = $1 AND disconnected_at IS NULL",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(r,)| r))
+    }
+
+    async fn insert_bundle_request(
+        &self,
+        row: NewBundleRequest,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO bundle_requests \
+               (request_id, device_id, source, schedule_name, operator_email, requested_at) \
+             VALUES ($1,$2,$3,$4,$5,$6)",
+        )
+        .bind(row.request_id)
+        .bind(&row.device_id)
+        .bind(row.source.as_str())
+        .bind(row.schedule_name.as_deref())
+        .bind(row.operator_email.as_deref())
+        .bind(row.requested_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn mark_bundle_request_offline(
+        &self,
+        request_id: Uuid,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE bundle_requests SET outcome = 'offline' WHERE request_id = $1",
+        )
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn agent_exists(&self, device_id: &str) -> Result<bool, StorageError> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT 1::bigint FROM agents WHERE device_id = $1",
+        )
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.is_some())
     }
 
     async fn sessions_older_than(

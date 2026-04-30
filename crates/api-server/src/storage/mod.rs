@@ -669,6 +669,33 @@ pub struct EntryCursor {
     pub entry_id: i64,
 }
 
+/// Parameters for creating a new on-demand bundle request row.
+#[derive(Debug, Clone)]
+pub struct NewBundleRequest {
+    pub request_id: uuid::Uuid,
+    pub device_id: String,
+    pub source: BundleRequestSource,
+    pub schedule_name: Option<String>,
+    pub operator_email: Option<String>,
+    pub requested_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Who triggered a bundle request.
+#[derive(Copy, Clone, Debug)]
+pub enum BundleRequestSource {
+    Operator,
+    Scheduled,
+}
+
+impl BundleRequestSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::Scheduled => "scheduled",
+        }
+    }
+}
+
 /// Parameters for creating a new upload session.
 #[derive(Debug, Clone)]
 pub struct NewUpload {
@@ -999,6 +1026,22 @@ pub trait MetadataStore: Send + Sync + 'static {
     fn pg_pool(&self) -> Option<&sqlx::PgPool> {
         None
     }
+
+    // ----- bundle requests -----
+
+    /// Return the `replica_id` of the replica that currently holds the live
+    /// WS connection for `device_id`, or `None` if no live connection exists.
+    async fn lookup_connection(&self, device_id: &str) -> Result<Option<String>, StorageError>;
+
+    /// Insert a new `bundle_requests` row.
+    async fn insert_bundle_request(&self, row: NewBundleRequest) -> Result<(), StorageError>;
+
+    /// Flip a bundle request's outcome to `'offline'` when the device was not
+    /// reachable at dispatch time.
+    async fn mark_bundle_request_offline(&self, request_id: uuid::Uuid) -> Result<(), StorageError>;
+
+    /// Return `true` if a row with `device_id` exists in the `agents` table.
+    async fn agent_exists(&self, device_id: &str) -> Result<bool, StorageError>;
 
     // ----- heartbeat -----
 
