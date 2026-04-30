@@ -38,9 +38,27 @@
     <!--
       MajorUpgrade policy — see design §7.
 
-      Schedule="afterInstallExecute": lay down the new files first, then remove
-      the old version. Avoids a service-down gap during in-place upgrades and
-      lets MSI skip unchanged files.
+      Schedule="afterInstallInitialize": fully remove the old product (which
+      stops + unregisters the old service and deletes its files) BEFORE the
+      new install's InstallFiles phase. This is the only MajorUpgrade
+      schedule that avoids the running-service file-lock trap on
+      `cmtraceopen-agent.exe`.
+
+      Why not `afterInstallExecute` (the prior choice)? That schedule lays
+      down the new files first, then removes the old product. During an
+      in-place upgrade the old service is still running while InstallFiles
+      tries to overwrite the .exe — Windows holds an exclusive lock on
+      executables of running processes, and InstallFiles silently skips
+      the lay-down. Result: Add/Remove Programs reports the new version
+      (registry-only) but the actual binary on disk is still the old one.
+      Discovered the hard way during the 0.1.4 → 0.2.0 cutover.
+
+      Tradeoff: ~3-5 second service-down window during the uninstall →
+      reinstall transition. Acceptable because:
+        - 0.2.0+ is pull-only (WS reconnect handles momentary gap)
+        - 0.1.x had a persistent queue that survives restarts
+        - The Stop="both" ServiceControl in Service.wxs is preserved as a
+          belt-and-suspenders safety for edge cases.
 
       AllowSameVersionUpgrades="yes": re-running the same MSI version does a
       repair-style reinstall rather than erroring. Useful for CI smoke tests
@@ -50,7 +68,7 @@
       one. Operators who need to roll back should uninstall first.
     -->
     <MajorUpgrade
-        Schedule="afterInstallExecute"
+        Schedule="afterInstallInitialize"
         AllowSameVersionUpgrades="yes"
         AllowDowngrades="no"
         DowngradeErrorMessage="A newer version of CMTrace Open Agent is already installed. Uninstall the current version before installing an older one." />
