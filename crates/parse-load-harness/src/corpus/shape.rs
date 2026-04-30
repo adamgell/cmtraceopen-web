@@ -74,3 +74,43 @@ mod tests {
         assert!((total - 1.0).abs() < 0.01, "weights should sum to ~1.0, got {total}");
     }
 }
+
+const PROFILE_MANY_SMALL: &str = include_str!("profiles/many-small.json");
+const PROFILE_GIANT_FILE: &str = include_str!("profiles/giant-file.json");
+const PROFILE_UNICODE_HEAVY: &str = include_str!("profiles/unicode-heavy.json");
+const PROFILE_BROKEN_BINARY: &str = include_str!("profiles/broken-binary.json");
+const PROFILE_NEAR_CAP: &str = include_str!("profiles/near-cap.json");
+
+impl Shape {
+    /// Resolve a `--shape` argument:
+    /// - `None` → `load_default()`
+    /// - a known profile name → its bundled JSON
+    /// - any other string → treat as a filesystem path
+    pub fn resolve(spec: Option<&str>) -> anyhow::Result<Self> {
+        match spec {
+            None => Self::load_default(),
+            Some("many-small") => Ok(serde_json::from_str(PROFILE_MANY_SMALL)?),
+            Some("giant-file") => Ok(serde_json::from_str(PROFILE_GIANT_FILE)?),
+            Some("unicode-heavy") => Ok(serde_json::from_str(PROFILE_UNICODE_HEAVY)?),
+            Some("broken-binary") => Ok(serde_json::from_str(PROFILE_BROKEN_BINARY)?),
+            Some("near-cap") => Ok(serde_json::from_str(PROFILE_NEAR_CAP)?),
+            Some(path) => Self::load_from(std::path::Path::new(path)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+
+    #[test]
+    fn each_profile_loads_and_is_valid() {
+        for name in ["many-small", "giant-file", "unicode-heavy", "broken-binary", "near-cap"] {
+            let s = Shape::resolve(Some(name)).unwrap_or_else(|e| {
+                panic!("profile {name} failed to load: {e}")
+            });
+            let total: f64 = s.parser_kind_weights.values().sum();
+            assert!((total - 1.0).abs() < 0.01, "profile {name} weights = {total}");
+        }
+    }
+}

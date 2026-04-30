@@ -1,0 +1,7 @@
+{
+  "files_per_bundle": { "p50": 1, "p90": 1, "p99": 1, "max_observed": 1 },
+  "bytes_per_file": { "p50": 49000000, "p90": 49000000, "p99": 49000000, "max_observed": 49000000 },
+  "parser_kind_weights": { "IisW3c": 1.0 },
+  "fallback_rate_per_kb": { "IisW3c": 0.0 },
+  "encoding_weights": { "Utf8": 1.0 }
+}

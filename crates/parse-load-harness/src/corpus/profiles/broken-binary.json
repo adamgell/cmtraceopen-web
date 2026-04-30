@@ -1,0 +1,7 @@
+{
+  "files_per_bundle": { "p50": 6, "p90": 10, "p99": 12, "max_observed": 16 },
+  "bytes_per_file": { "p50": 1024, "p90": 8192, "p99": 32768, "max_observed": 131072 },
+  "parser_kind_weights": { "Plain": 1.0 },
+  "fallback_rate_per_kb": { "Plain": 1.0 },
+  "encoding_weights": { "Other": 1.0 }
+}
