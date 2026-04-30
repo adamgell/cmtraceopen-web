@@ -1,29 +1,43 @@
 //! Shared agent runtime: the collect + drain task loop.
 //!
 //! Both CLI (`main.rs`) and service (`service.rs`) modes need the same
-//! long-lived work: periodic evidence collection, periodic queue drain,
-//! ctrl-c/stop handling, and a final bounded drain on shutdown. That
-//! code used to be duplicated between the two entry points; it now
-//! lives here so a future change to (say) the upload-retry contract
-//! can't silently diverge between CLI and service modes.
+//! long-lived work: periodic queue drain, ctrl-c/stop handling, and a
+//! final bounded drain on shutdown. That code used to be duplicated
+//! between the two entry points; it now lives here so a future change
+//! to (say) the upload-retry contract can't silently diverge between
+//! CLI and service modes.
+//!
+//! **Agent 0.2.0 is pull-only.** The periodic `collect_tick` is removed.
+//! Collection is now triggered exclusively by the server via a
+//! `ServerFrame::RequestBundle` WS message handled by
+//! [`crate::ws::request_handler`]. The `--oneshot` flag and the
+//! [`collect_and_enqueue`] / [`drain`] helpers are kept so existing
+//! operator tooling continues to work.
 //!
 //! ## Entry points
 //!
 //! * [`build_components`] — one-shot constructor for `Queue`,
 //!   `EvidenceOrchestrator`, `Uploader`, and the `work_root` path. Used
 //!   by both oneshot and daemon flows.
-//! * [`run_task_loop`] — drives the collect + drain loop until a stop
-//!   signal arrives, then runs one final bounded drain.
+//! * [`run_task_loop`] — drives the drain loop (no collect tick) until a
+//!   stop signal arrives, then runs one final bounded drain.
 //! * [`collect_and_enqueue`] / [`drain`] — the actual work fns. `pub`
 //!   because the oneshot path calls them directly from `main.rs`.
+//! * [`RuntimeSnapshot`] — concrete [`crate::ws::heartbeat::Snapshot`]
+//!   implementation used by the heartbeat sender.
+//! * [`ScheduledBundleRunner`] — concrete
+//!   [`crate::ws::request_handler::BundleRunner`] implementation wired
+//!   to the existing collect + upload pipeline.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
 use tracing::{info, warn};
 
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::collectors::agent_logs::AgentLogsCollector;
 use crate::collectors::dsregcmd::DsRegCmdCollector;
@@ -56,9 +70,11 @@ pub const STOP_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Windows service dispatcher go through this builder so the set of
 /// dependencies can't drift between the two entry points.
 pub struct AgentComponents {
-    pub queue: Queue,
-    pub orchestrator: EvidenceOrchestrator,
-    pub uploader: Uploader,
+    /// Wrapped in `Arc` so the heartbeat-driven on-demand runner can
+    /// share the same instance with the drain/config-sync task loop.
+    pub queue: Arc<Queue>,
+    pub orchestrator: Arc<EvidenceOrchestrator>,
+    pub uploader: Arc<Uploader>,
     pub work_root: PathBuf,
     /// Server-pushed config overrides. Held behind a `Mutex` because
     /// `ConfigSync::sync` / `record_*` take `&mut self` and the task loop
@@ -133,16 +149,21 @@ pub async fn build_components(
     )?;
 
     Ok(AgentComponents {
-        queue,
-        orchestrator,
-        uploader,
+        queue: Arc::new(queue),
+        orchestrator: Arc::new(orchestrator),
+        uploader: Arc::new(uploader),
         work_root,
         config_sync: Mutex::new(config_sync),
     })
 }
 
-/// Drive the collect + drain task loop until `stop_rx` flips to `true`
-/// (or the sender is dropped), then run one final bounded drain.
+/// Drive the drain + config-sync task loop until `stop_rx` flips to
+/// `true` (or the sender is dropped), then run one final bounded drain.
+///
+/// **Agent 0.2.0:** the periodic `collect_tick` has been removed.
+/// Collection is now triggered exclusively by the server via
+/// `ServerFrame::RequestBundle`. The drain tick and config-sync tick
+/// continue as before.
 ///
 /// This is the shared body of CLI daemon mode and the service
 /// dispatcher's task loop. It never returns until a stop signal is
@@ -152,7 +173,6 @@ pub async fn run_task_loop(
     components: &AgentComponents,
     mut stop_rx: watch::Receiver<bool>,
 ) {
-    let mut collect_tick = tokio::time::interval(COLLECT_INTERVAL);
     let mut drain_tick = tokio::time::interval(DRAIN_INTERVAL);
     // Per-device-jittered fetch interval keeps the fleet from stampeding
     // /v1/config/{id} simultaneously. Read once here so the interval is
@@ -161,25 +181,16 @@ pub async fn run_task_loop(
     let config_fetch_interval = components.config_sync.lock().await.fetch_interval();
     let mut config_tick = tokio::time::interval(config_fetch_interval);
 
-    // Skip the first immediate collect tick — let the daemon finish
-    // booting. Drain fires immediately so crash-survivor queue entries
-    // are uploaded quickly after a restart. ConfigSync's initial fetch
+    // Drain fires immediately so crash-survivor queue entries are
+    // uploaded quickly after a restart. ConfigSync's initial fetch
     // already happened in `build_components`; skip the first immediate
     // config tick to avoid back-to-back fetches.
-    collect_tick.tick().await;
     config_tick.tick().await;
 
-    info!("entering agent task loop");
+    info!("entering agent task loop (pull-only, no collect tick)");
 
     loop {
         tokio::select! {
-            _ = collect_tick.tick() => {
-                collect_and_enqueue(
-                    &components.orchestrator,
-                    &components.queue,
-                    &components.work_root,
-                ).await;
-            }
             _ = drain_tick.tick() => {
                 drain(&components.queue, &components.uploader).await;
                 // Treat "drain happened without surfacing a panic" as a
@@ -242,6 +253,170 @@ pub async fn collect_and_enqueue(
             // Future use: partition staging by collection run id.
             let _ = work_root;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WS subsystem concrete implementations
+// ---------------------------------------------------------------------------
+
+/// Concrete [`crate::ws::heartbeat::Snapshot`] that reads real agent state.
+///
+/// Holds an `Arc<AgentConfig>` so it can cheaply cross the `tokio::spawn`
+/// boundary without cloning the full config. More dynamic fields (queue
+/// depth, last_collect_at, uptime) are left at their zero values for the
+/// 0.2.0 release; a follow-up PR can wire them once the agent accumulates
+/// runtime state in a shared struct.
+pub struct RuntimeSnapshot {
+    config: Arc<crate::config::AgentConfig>,
+}
+
+impl RuntimeSnapshot {
+    pub fn new(config: Arc<crate::config::AgentConfig>) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ws::heartbeat::Snapshot for RuntimeSnapshot {
+    async fn snapshot(&self) -> crate::ws::heartbeat::SnapshotData {
+        crate::ws::heartbeat::SnapshotData {
+            device_id: self.config.resolved_device_id(),
+            device_name: hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_default(),
+            intune_device_id: None,
+            ninjaone_device_id: None,
+            asset_tag: None,
+            agent_version: env!("CARGO_PKG_VERSION").into(),
+            os_version: os_info::get().version().to_string(),
+            last_collect_at: None,
+            queue_depth: 0,
+            errors_24h: 0,
+            disk_free_pct: 100,
+            uptime_seconds: 0,
+        }
+    }
+}
+
+/// Concrete [`crate::ws::request_handler::BundleRunner`] that drives the
+/// existing collection + upload pipeline on demand.
+///
+/// When the server sends a `RequestBundle` frame, this runner:
+///   1. Runs the evidence orchestrator to produce a new bundle.
+///   2. Enqueues it and uploads immediately, passing `request_id` as
+///      `X-Bundle-Request-Id` on the init POST so the server-side T12
+///      correlation can match the bundle to the operator request.
+///
+/// The bundle_id returned is the uuid from the evidence orchestrator;
+/// the uploader's `session_id` is a separate server-assigned identifier.
+///
+/// Fields are held by `Arc` so the struct is cheaply `Clone` + `Send`.
+pub struct ScheduledBundleRunner {
+    config: Arc<crate::config::AgentConfig>,
+    orchestrator: Arc<crate::collectors::evidence::EvidenceOrchestrator>,
+    queue: Arc<crate::queue::Queue>,
+    uploader: Arc<crate::uploader::Uploader>,
+}
+
+impl ScheduledBundleRunner {
+    /// Construct from a config `Arc` and the *already-built* components.
+    /// Takes ownership of the three component fields it needs; call this
+    /// before moving `components` into the task loop.
+    pub fn new(
+        config: Arc<crate::config::AgentConfig>,
+        orchestrator: Arc<crate::collectors::evidence::EvidenceOrchestrator>,
+        queue: Arc<crate::queue::Queue>,
+        uploader: Arc<crate::uploader::Uploader>,
+    ) -> Self {
+        Self {
+            config,
+            orchestrator,
+            queue,
+            uploader,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ws::request_handler::BundleRunner for ScheduledBundleRunner {
+    async fn run(&self, request_id: Uuid) -> anyhow::Result<Uuid> {
+        use crate::queue::QueueState;
+
+        // Step 1: collect evidence.
+        let bundle = self
+            .orchestrator
+            .collect_once()
+            .await
+            .map_err(|e| anyhow::anyhow!("collection failed: {e}"))?;
+
+        let bundle_id = bundle.metadata.bundle_id;
+        let metadata = bundle.metadata.clone();
+        let staging_zip = bundle.zip_path.clone();
+        let staging_dir = bundle.staging_dir.clone();
+
+        // Step 2: enqueue. The queue renames the zip from staging into its
+        // own root; the returned `QueuedBundle.zip_path` is the queue-owned
+        // path we must upload from.
+        let queued = self
+            .queue
+            .enqueue(metadata.clone(), &staging_zip)
+            .await
+            .map_err(|e| anyhow::anyhow!("enqueue failed: {e}"))?;
+
+        // Clean up staging dir now that zip is in the queue (best-effort).
+        if let Err(e) = tokio::fs::remove_dir_all(&staging_dir).await {
+            warn!(dir = %staging_dir.display(), error = %e, "failed to clean staging dir after on-demand collect");
+        }
+
+        info!(%bundle_id, %request_id, "on-demand bundle enqueued");
+
+        // Step 3: upload immediately with the request_id for correlation.
+        // Using `upload_with_request_id` so the `X-Bundle-Request-Id` header
+        // is set on the init POST, enabling server-side T12 correlation.
+        if let Err(e) = self.queue.mark_uploading(bundle_id).await {
+            warn!(%bundle_id, error = %e, "mark_uploading failed");
+        }
+
+        let resp = self
+            .uploader
+            .upload_with_request_id(&metadata, &queued.zip_path, Some(request_id))
+            .await
+            .map_err(|e| anyhow::anyhow!("upload failed: {e}"))?;
+
+        info!(
+            %bundle_id,
+            session_id = %resp.session_id,
+            parse_state = %resp.parse_state,
+            %request_id,
+            "on-demand upload succeeded"
+        );
+
+        if let Err(e) = self.queue.mark_done(bundle_id).await {
+            warn!(%bundle_id, error = %e, "mark_done failed after on-demand upload");
+        }
+
+        // Purge the zip now that it's committed — keep the sidecar for
+        // queue inspection. Mirror the normal drain path.
+        if let Ok(current) = self.queue.get(bundle_id).await {
+            if matches!(current.state, QueueState::Done { .. }) {
+                let _ = tokio::fs::remove_file(&current.zip_path).await;
+            }
+        }
+
+        Ok(bundle_id)
+    }
+
+    fn device_id(&self) -> String {
+        self.config.resolved_device_id()
+    }
+
+    fn device_name(&self) -> String {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_default()
     }
 }
 

@@ -77,6 +77,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim AS dataprep
 RUN mkdir -p /data && chown 65532:65532 /data
 
+# ---- FD-limit prep ----------------------------------------------------------
+# Each connected agent holds one WebSocket fd. The default per-process limit
+# is 1024, which caps a single replica at ~1k simultaneous agents after
+# overhead. This stage bumps the soft+hard limits to 65536 so large fleets
+# don't hit the cap.
+#
+# NOTE: /etc/security/limits.conf has no effect inside Docker containers
+# by default — the kernel enforces the limit set by the container runtime
+# (Docker --ulimit, Compose `ulimits:`, or Azure ACA `resourceLimits`). The
+# lines below document the required value so any future non-distroless base
+# image picks it up, but the real setting MUST be applied at the container
+# orchestrator level.  See infra/ or the cutover runbook for the ACA config.
+FROM debian:bookworm-slim AS limitprep
+RUN echo "* soft nofile 65536" >> /etc/security/limits.conf \
+ && echo "* hard nofile 65536" >> /etc/security/limits.conf
+
 # ---- Runtime ----------------------------------------------------------------
 FROM gcr.io/distroless/cc-debian12 AS runtime
 

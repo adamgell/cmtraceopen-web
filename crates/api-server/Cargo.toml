@@ -39,7 +39,7 @@ path = "src/lib.rs"
 # Future S3 / GCS backends slot in here as additional feature flags
 # (`s3 = ["object_store/aws"]`, `gcs = ["object_store/gcp"]`) and a matching
 # `BlobBackend` enum variant in `config.rs`.
-default = ["mtls", "crl", "azure", "sqlite"]
+default = ["mtls", "crl", "azure", "sqlite", "postgres"]
 
 # SQLite metadata backend. Uses `tls-none` so sqlite-only builds on dev boxes
 # without cmake/NASM don't trigger the aws-lc-sys C+asm build path in sqlx's

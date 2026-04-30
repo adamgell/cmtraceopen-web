@@ -34,9 +34,10 @@
 #![deny(unsafe_code)]
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use cmtraceopen_agent::config::AgentConfig;
-use cmtraceopen_agent::runtime::{self, AgentComponents};
+use cmtraceopen_agent::runtime::{self, AgentComponents, RuntimeSnapshot, ScheduledBundleRunner};
 use cmtraceopen_agent::banner;
 use tokio::signal;
 use tokio::sync::watch;
@@ -99,6 +100,18 @@ async fn run_cli() -> ExitCode {
 
 /// Concrete runtime. Returns on graceful shutdown or fatal error.
 async fn run(config: AgentConfig, oneshot: bool) -> Result<(), Box<dyn std::error::Error>> {
+    // Emit a deprecation warning if a push-schedule was configured.
+    // The field is kept for config backwards-compat but the 0.2.0 agent
+    // is pull-only — the schedule tick has been removed.
+    if config.collection.schedule.interval_hours != 0 {
+        warn!(
+            interval_hours = config.collection.schedule.interval_hours,
+            "CMTRACE_SCHEDULE_INTERVAL_HOURS / interval_hours is deprecated; \
+             agent 0.2.0 is pull-only. Set up a server-side schedule instead."
+        );
+    }
+
+    let config = Arc::new(config);
     let components: AgentComponents = runtime::build_components(&config).await?;
 
     if oneshot {
@@ -114,13 +127,46 @@ async fn run(config: AgentConfig, oneshot: bool) -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    // Daemon mode: drive the shared task loop with a watch channel that
-    // ctrl-c flips to `true`. Mirrors how `service.rs` drives the same
-    // loop from the SCM control handler. The task loop owns the
-    // collect/drain/config-sync select! — including the per-device-jittered
-    // config-fetch tick so a fleet doesn't stampede /v1/config/{id} every
-    // six hours.
+    // Daemon mode: spin up the WS subsystem (client, heartbeat sender,
+    // request handler) before entering the task loop.
 
+    // Build the on-demand runner. The runner clones the Arc-wrapped
+    // orchestrator/queue/uploader so both it and the drain task loop
+    // hold independent refs to the same underlying components.
+    let runner = ScheduledBundleRunner::new(
+        config.clone(),
+        components.orchestrator.clone(),
+        components.queue.clone(),
+        components.uploader.clone(),
+    );
+
+    // WS client: maintains a persistent, auto-reconnecting connection to
+    // the api-server WebSocket endpoint. Returns channel handles that
+    // survive individual connect/disconnect cycles.
+    let ws_handles = cmtraceopen_agent::ws::client::spawn(
+        config.api_endpoint.clone(),
+        config.resolved_device_id(),
+    );
+
+    // Heartbeat sender: fires every 45 s, reads a snapshot of agent state,
+    // and sends it as an AgentFrame::Heartbeat over the outbound channel.
+    let snap = RuntimeSnapshot::new(config.clone());
+    let _hb_task = tokio::spawn(
+        cmtraceopen_agent::ws::heartbeat::run(snap, ws_handles.outbound_tx.clone())
+    );
+
+    // Request handler: waits for ServerFrame::RequestBundle, runs the
+    // collect + upload pipeline, then sends RequestAck + RequestComplete.
+    let _req_task = tokio::spawn(
+        cmtraceopen_agent::ws::request_handler::run(
+            runner,
+            ws_handles.inbound_rx,
+            ws_handles.outbound_tx,
+        )
+    );
+
+    // Task loop: drain + config-sync (no collect tick — agent is pull-only).
+    // A watch channel lets ctrl-c or the SCM stop handler signal shutdown.
     let (stop_tx, stop_rx) = watch::channel(false);
 
     let task_loop = tokio::spawn(async move {

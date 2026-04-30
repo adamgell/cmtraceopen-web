@@ -116,7 +116,7 @@ impl UploaderConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Uploader {
     client: Client,
     cfg: UploaderConfig,
@@ -161,14 +161,31 @@ impl Uploader {
     /// Upload one bundle end-to-end. Idempotent: re-invoking with the
     /// same `metadata.bundle_id` after a mid-upload crash will resume
     /// from the server-recorded offset.
+    ///
+    /// `bundle_request_id` — when `Some`, sent as the `X-Bundle-Request-Id`
+    /// header on the init POST so the server's bundle-request correlation
+    /// (T12) can match the uploaded bundle to the operator request that
+    /// triggered it.
     pub async fn upload(
         &self,
         metadata: &BundleMetadata,
         zip_path: &Path,
     ) -> Result<BundleFinalizeResponse, UploaderError> {
+        self.upload_with_request_id(metadata, zip_path, None).await
+    }
+
+    /// Upload one bundle end-to-end with an optional correlation id.
+    /// Called by [`ScheduledBundleRunner`] when the collection was triggered
+    /// by an operator `RequestBundle` WS frame.
+    pub async fn upload_with_request_id(
+        &self,
+        metadata: &BundleMetadata,
+        zip_path: &Path,
+        bundle_request_id: Option<uuid::Uuid>,
+    ) -> Result<BundleFinalizeResponse, UploaderError> {
         // Stage 1: init.
         let init = self
-            .with_retries("init", || self.init_once(metadata))
+            .with_retries("init", || self.init_once(metadata, bundle_request_id))
             .await?;
         info!(
             upload_id = %init.upload_id,
@@ -216,7 +233,11 @@ impl Uploader {
         Ok(fin)
     }
 
-    async fn init_once(&self, metadata: &BundleMetadata) -> Result<BundleInitResponse, UploaderError> {
+    async fn init_once(
+        &self,
+        metadata: &BundleMetadata,
+        bundle_request_id: Option<uuid::Uuid>,
+    ) -> Result<BundleInitResponse, UploaderError> {
         let url = format!("{}/v1/ingest/bundles", self.cfg.endpoint);
         let body = BundleInitRequest {
             bundle_id: metadata.bundle_id,
@@ -225,14 +246,15 @@ impl Uploader {
             size_bytes: metadata.size_bytes,
             content_kind: metadata.content_kind.clone(),
         };
-        let resp = self
+        let mut req = self
             .client
             .post(url)
             .header("x-device-id", &self.cfg.device_id)
-            .json(&body)
-            .send()
-            .await
-            .map_err(classify_send_error)?;
+            .json(&body);
+        if let Some(rid) = bundle_request_id {
+            req = req.header("x-bundle-request-id", rid.to_string());
+        }
+        let resp = req.send().await.map_err(classify_send_error)?;
         parse_response(resp, "init").await
     }
 
@@ -531,11 +553,14 @@ mod tests {
     #[test]
     fn delay_for_clamps_to_last_entry() {
         let p = RetryPolicy::default();
-        assert_eq!(p.delay_for(1), Duration::from_secs(1));
-        assert_eq!(p.delay_for(2), Duration::from_secs(5));
+        // Default policy: 5 attempts at 2s/10s/30s/60s/120s (hardened in
+        // 3477907 from the original 3-attempt 1/5/30 schedule).
+        assert_eq!(p.delay_for(1), Duration::from_secs(2));
+        assert_eq!(p.delay_for(2), Duration::from_secs(10));
         assert_eq!(p.delay_for(3), Duration::from_secs(30));
+        assert_eq!(p.delay_for(5), Duration::from_secs(120));
         // Past the end — clamp to last.
-        assert_eq!(p.delay_for(99), Duration::from_secs(30));
+        assert_eq!(p.delay_for(99), Duration::from_secs(120));
         // Zero-attempt is ZERO (edge-case).
         assert_eq!(p.delay_for(0), Duration::ZERO);
     }
