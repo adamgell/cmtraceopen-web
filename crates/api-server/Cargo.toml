@@ -213,6 +213,9 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false }
 # the trusted-proxy IP-source check used by the rate limiter.
 # Pure-Rust, no ring / openssl dependency.
 ipnet = "2"
+cron = "0.12"
+rand = "0.9"
+rand_chacha = "0.9"
 
 [dependencies.rcgen]
 version = "0.13"

@@ -423,6 +423,14 @@ async fn main() -> ExitCode {
         tokio::spawn(api_server::ws::sweeper::run(pool));
     }
 
+    // Spawn the schedule worker (Postgres only). Uses pg_try_advisory_lock
+    // for leader election so only one replica fires schedules at a time.
+    #[cfg(feature = "postgres")]
+    if let Some(pool) = state.meta.pg_pool().cloned() {
+        let s = state.clone();
+        tokio::spawn(api_server::schedule::worker::run(s, pool));
+    }
+
     let app = router(state).layer(TraceLayer::new_for_http());
 
     // Serve path: TLS-terminating axum-server when `tls_enabled` is true and
