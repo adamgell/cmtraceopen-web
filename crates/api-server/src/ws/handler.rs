@@ -85,7 +85,7 @@ pub async fn run_connection(
                                 if let Ok(json) = serde_json::to_string(&ack) {
                                     let _ = sink.send(Message::Text(json.into())).await;
                                 }
-                                let _ = inbound.heartbeats.try_send(hb);
+                                crate::ws::persister::try_enqueue(&inbound.heartbeats, hb);
                             }
                             f @ (AgentFrame::RequestAck { .. } | AgentFrame::RequestComplete { .. }) => {
                                 let _ = inbound.request_acks.try_send(f);

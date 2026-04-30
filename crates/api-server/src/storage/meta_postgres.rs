@@ -163,6 +163,64 @@ impl MetadataStore for PgMetadataStore {
         )
     }
 
+    async fn upsert_agent_and_heartbeat(
+        &self,
+        hb: &common_wire::ws::Heartbeat,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO agents (device_id, device_name, intune_device_id,
+                                 ninjaone_device_id, asset_tag,
+                                 agent_version, os_version,
+                                 first_seen_at, last_seen_at, last_collect_at,
+                                 queue_depth, errors_24h, disk_free_pct, uptime_seconds)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10,$11,$12,$13)
+             ON CONFLICT (device_id) DO UPDATE SET
+               device_name = EXCLUDED.device_name,
+               intune_device_id = EXCLUDED.intune_device_id,
+               ninjaone_device_id = EXCLUDED.ninjaone_device_id,
+               asset_tag = EXCLUDED.asset_tag,
+               agent_version = EXCLUDED.agent_version,
+               os_version = EXCLUDED.os_version,
+               last_seen_at = EXCLUDED.last_seen_at,
+               last_collect_at = EXCLUDED.last_collect_at,
+               queue_depth = EXCLUDED.queue_depth,
+               errors_24h = EXCLUDED.errors_24h,
+               disk_free_pct = EXCLUDED.disk_free_pct,
+               uptime_seconds = EXCLUDED.uptime_seconds"
+        )
+        .bind(&hb.device_id)
+        .bind(&hb.device_name)
+        .bind(hb.intune_device_id.as_deref())
+        .bind(hb.ninjaone_device_id.as_deref())
+        .bind(hb.asset_tag.as_deref())
+        .bind(&hb.agent_version)
+        .bind(&hb.os_version)
+        .bind(hb.ts)
+        .bind(hb.last_collect_at)
+        .bind(hb.queue_depth as i64)
+        .bind(hb.errors_24h as i64)
+        .bind(hb.disk_free_pct as i64)
+        .bind(hb.uptime_seconds)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO heartbeats (device_id, ts, queue_depth, errors_24h,
+                                     disk_free_pct, uptime_seconds)
+             VALUES ($1,$2,$3,$4,$5,$6)"
+        )
+        .bind(&hb.device_id)
+        .bind(hb.ts)
+        .bind(hb.queue_depth as i64)
+        .bind(hb.errors_24h as i64)
+        .bind(hb.disk_free_pct as i64)
+        .bind(hb.uptime_seconds)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn sessions_older_than(
         &self,
         ttl_days: u32,

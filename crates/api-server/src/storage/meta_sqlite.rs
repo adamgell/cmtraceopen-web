@@ -873,6 +873,16 @@ impl MetadataStore for SqliteMetadataStore {
         Ok(out)
     }
 
+    async fn upsert_agent_and_heartbeat(
+        &self,
+        _hb: &common_wire::ws::Heartbeat,
+    ) -> Result<(), StorageError> {
+        // TODO: SQLite backend does not track agents/heartbeats yet.
+        // The agents and heartbeats tables only exist in migrations-pg/.
+        // This no-ops so the trait is satisfied for test builds.
+        Ok(())
+    }
+
     async fn sessions_older_than(
         &self,
         ttl_days: u32,

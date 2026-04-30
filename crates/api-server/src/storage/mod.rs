@@ -990,6 +990,13 @@ pub trait MetadataStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<EntryRow>, StorageError>;
 
+    // ----- heartbeat -----
+
+    async fn upsert_agent_and_heartbeat(
+        &self,
+        hb: &common_wire::ws::Heartbeat,
+    ) -> Result<(), StorageError>;
+
     // ----- retention -----
 
     /// Return up to `batch_size` sessions whose `ingested_utc` is older than
