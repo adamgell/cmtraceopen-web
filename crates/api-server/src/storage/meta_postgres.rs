@@ -46,8 +46,19 @@ use super::{
 /// this crate's `Cargo.toml` (the manifest dir).
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations-pg");
 
-/// Max connections the pool is permitted to grow to.
-const POOL_MAX_CONNECTIONS: u32 = 16;
+/// Max connections the pool is permitted to grow to. Override via
+/// `CMTRACE_PG_POOL_MAX_CONNECTIONS`. Default 16 keeps the small-deployment
+/// footprint sane; load-test harnesses or high-concurrency replicas should
+/// raise it to 2-4× their `CMTRACE_PARSE_CONCURRENCY`.
+const POOL_MAX_CONNECTIONS_DEFAULT: u32 = 16;
+
+fn pool_max_connections() -> u32 {
+    std::env::var("CMTRACE_PG_POOL_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &u32| n > 0)
+        .unwrap_or(POOL_MAX_CONNECTIONS_DEFAULT)
+}
 
 #[derive(Clone)]
 pub struct PgMetadataStore {
@@ -62,7 +73,7 @@ impl PgMetadataStore {
         let opts = PgConnectOptions::from_str(url)?;
 
         let pool = PgPoolOptions::new()
-            .max_connections(POOL_MAX_CONNECTIONS)
+            .max_connections(pool_max_connections())
             .connect_with(opts)
             .await?;
 
@@ -78,6 +89,28 @@ impl PgMetadataStore {
     #[doc(hidden)]
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+}
+
+/// Append `s` to `buf`, escaping the four characters PG's COPY text format
+/// treats specially: backslash, tab, newline, carriage return.
+fn push_text(buf: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '\\' => buf.push_str("\\\\"),
+            '\t' => buf.push_str("\\t"),
+            '\n' => buf.push_str("\\n"),
+            '\r' => buf.push_str("\\r"),
+            c => buf.push(c),
+        }
+    }
+}
+
+/// Like [`push_text`] but emits PG's `\N` NULL marker for `None`.
+fn push_text_or_null(buf: &mut String, s: Option<&str>) {
+    match s {
+        Some(v) => push_text(buf, v),
+        None => buf.push_str("\\N"),
     }
 }
 
@@ -111,7 +144,7 @@ impl MetadataStore for PgMetadataStore {
         PoolStats {
             size: self.pool.size(),
             idle: u32::try_from(self.pool.num_idle()).unwrap_or(u32::MAX),
-            max_size: POOL_MAX_CONNECTIONS,
+            max_size: pool_max_connections(),
         }
     }
 
@@ -662,42 +695,50 @@ impl MetadataStore for PgMetadataStore {
         if entries.is_empty() {
             return Ok(());
         }
-        // Bulk insert in chunks of 500 rows using multi-row VALUES to
-        // minimize round-trips. Postgres param limit is 65535; 9 params
-        // per row × 500 = 4500, well within budget.
-        const CHUNK: usize = 500;
-        let mut tx = self.pool.begin().await?;
-        for batch in entries.chunks(CHUNK) {
-            let mut sql = String::from(
-                "INSERT INTO entries \
-                 (session_id, file_id, line_number, ts_ms, \
-                  severity, component, thread, message, extras_json) VALUES ",
-            );
-            let mut args = sqlx::postgres::PgArguments::default();
-            for (i, e) in batch.iter().enumerate() {
-                if i > 0 { sql.push(','); }
-                let base = i * 9;
-                sql.push_str(&format!(
-                    "(${}, ${}, ${}, ${}, ${}, ${}, ${}, ${}, ${})",
-                    base+1, base+2, base+3, base+4, base+5,
-                    base+6, base+7, base+8, base+9,
-                ));
-                use sqlx::Arguments;
-                args.add(e.session_id.to_string()).ok();
-                args.add(e.file_id.to_string()).ok();
-                args.add(e.line_number as i64).ok();
-                args.add(e.ts_ms).ok();
-                args.add(e.severity as i64).ok();
-                args.add(e.component.as_deref().map(|s| s.to_string())).ok();
-                args.add(e.thread.as_deref().map(|s| s.to_string())).ok();
-                args.add(e.message.clone()).ok();
-                args.add(e.extras_json.as_deref().map(|s| s.to_string())).ok();
+        // Bulk-load via `COPY ... FROM STDIN (FORMAT text)`. PG's COPY skips
+        // the per-row parse/plan that multi-row VALUES pays — typically 2-5×
+        // faster on entry loads of this shape. We stream rows into the COPY
+        // sink as tab-separated lines with backslash escapes for tab, newline,
+        // CR, and backslash; NULL is the literal `\N`.
+        let mut conn = self.pool.acquire().await?;
+        let mut copy = conn
+            .copy_in_raw(
+                "COPY entries \
+                 (session_id, file_id, line_number, ts_ms, severity, \
+                  component, thread, message, extras_json) \
+                 FROM STDIN WITH (FORMAT text)",
+            )
+            .await?;
+
+        // Buffer the whole batch into one String and send it in one call.
+        // Per-row `send` would round-trip per row and is dramatically slower
+        // than per-batch `send` for the bundle sizes we see.
+        let mut buf = String::with_capacity(entries.len().saturating_mul(160));
+        for e in &entries {
+            buf.push_str(&e.session_id.to_string());
+            buf.push('\t');
+            buf.push_str(&e.file_id.to_string());
+            buf.push('\t');
+            buf.push_str(&e.line_number.to_string());
+            buf.push('\t');
+            match e.ts_ms {
+                Some(t) => buf.push_str(&t.to_string()),
+                None => buf.push_str("\\N"),
             }
-            sqlx::query_with(&sql, args)
-                .execute(&mut *tx)
-                .await?;
+            buf.push('\t');
+            buf.push_str(&e.severity.to_string());
+            buf.push('\t');
+            push_text_or_null(&mut buf, e.component.as_deref());
+            buf.push('\t');
+            push_text_or_null(&mut buf, e.thread.as_deref());
+            buf.push('\t');
+            push_text(&mut buf, &e.message);
+            buf.push('\t');
+            push_text_or_null(&mut buf, e.extras_json.as_deref());
+            buf.push('\n');
         }
-        tx.commit().await?;
+        copy.send(buf.as_bytes()).await?;
+        copy.finish().await?;
         Ok(())
     }
 
@@ -936,7 +977,7 @@ mod tests {
         let url = pg_url_or_skip();
         let store = PgMetadataStore::connect(&url).await.unwrap();
         let stats = store.pool_stats();
-        assert_eq!(stats.max_size, POOL_MAX_CONNECTIONS);
+        assert_eq!(stats.max_size, pool_max_connections());
         assert!(stats.size <= stats.max_size, "size {} > max {}", stats.size, stats.max_size);
         assert!(stats.idle <= stats.size, "idle {} > size {}", stats.idle, stats.size);
     }

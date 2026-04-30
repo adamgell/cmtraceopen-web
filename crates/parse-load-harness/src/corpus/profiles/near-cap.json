@@ -1,0 +1,7 @@
+{
+  "files_per_bundle": { "p50": 50, "p90": 60, "p99": 70, "max_observed": 80 },
+  "bytes_per_file": { "p50": 700000, "p90": 1000000, "p99": 1100000, "max_observed": 1500000 },
+  "parser_kind_weights": { "Ccm": 0.5, "Timestamped": 0.5 },
+  "fallback_rate_per_kb": { "Ccm": 0.00005, "Timestamped": 0.0001 },
+  "encoding_weights": { "Utf8": 1.0 }
+}
