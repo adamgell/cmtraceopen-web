@@ -29,6 +29,7 @@ pub mod scheduler;
 pub mod service;
 pub mod tls;
 pub mod uploader;
+pub mod ws;
 
 /// Human-readable banner string, emitted at startup and handy in tests.
 pub fn banner() -> String {

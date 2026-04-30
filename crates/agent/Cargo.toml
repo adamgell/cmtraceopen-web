@@ -91,6 +91,10 @@ rand = "0.9"
 # agent binary yet (no HTTP /metrics endpoint for the edge agent); using
 # the `metrics` facade means adding a backend later is a one-liner.
 metrics = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+url = "2"
+futures = "0.3"
+anyhow = "1"
 
 [dev-dependencies]
 # Drive an in-process api-server during integration tests. Match the
