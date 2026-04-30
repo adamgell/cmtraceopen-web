@@ -375,6 +375,49 @@ impl MetadataStore for PgMetadataStore {
         Ok(entries_deleted)
     }
 
+    async fn record_request_ack(
+        &self,
+        request_id: Uuid,
+        accepted: bool,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE bundle_requests
+             SET acked_at = now(),
+                 outcome = CASE WHEN $1 THEN outcome ELSE 'error' END,
+                 error   = CASE WHEN $1 THEN error ELSE 'agent rejected request' END
+             WHERE request_id = $2"
+        )
+        .bind(accepted)
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn record_request_complete(
+        &self,
+        request_id: Uuid,
+        bundle_id: Option<Uuid>,
+        outcome: &str,
+        error: Option<&str>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE bundle_requests
+             SET completed_at = now(),
+                 bundle_id = COALESCE($1, bundle_id),
+                 outcome = $2,
+                 error = $3
+             WHERE request_id = $4"
+        )
+        .bind(bundle_id)
+        .bind(outcome)
+        .bind(error)
+        .bind(request_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn correlate_bundle_request(
         &self,
         request_id: Uuid,

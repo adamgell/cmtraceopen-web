@@ -1,6 +1,7 @@
 //! Per-replica WebSocket subsystem. Holds the in-memory map from
 //! `device_id` to outbound mpsc; spawns the per-connection handler tasks.
 
+pub mod ack_worker;
 pub mod auth;
 pub mod handler;
 pub mod persister;

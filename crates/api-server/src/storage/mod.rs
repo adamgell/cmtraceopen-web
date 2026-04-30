@@ -1097,6 +1097,41 @@ pub trait MetadataStore: Send + Sync + 'static {
     /// rationale as `BlobStore::delete_blob`.
     async fn delete_session(&self, session_id: Uuid) -> Result<u64, StorageError>;
 
+    /// Record an agent ACK for a bundle request.
+    ///
+    /// When `accepted` is true the `outcome` and `error` columns are left
+    /// unchanged (the request remains in-flight). When false, the request is
+    /// immediately closed with `outcome = 'error'` and a canned rejection
+    /// message.
+    ///
+    /// No-op (`Ok(())`) on backends without a `bundle_requests` table (SQLite /
+    /// mocks).
+    async fn record_request_ack(
+        &self,
+        _request_id: uuid::Uuid,
+        _accepted: bool,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Record the final outcome of a bundle request sent by the agent.
+    ///
+    /// Sets `completed_at = now()`, optionally stamps `bundle_id` if the agent
+    /// produced one, and writes the outcome string (`"ok"` / `"error"`) plus an
+    /// optional error message.
+    ///
+    /// No-op (`Ok(())`) on backends without a `bundle_requests` table (SQLite /
+    /// mocks).
+    async fn record_request_complete(
+        &self,
+        _request_id: uuid::Uuid,
+        _bundle_id: Option<uuid::Uuid>,
+        _outcome: &str,
+        _error: Option<&str>,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     /// Link a completed bundle request to its session and bundle in one
     /// transaction:
     ///   - `sessions.request_id  = request_id` for the given session.

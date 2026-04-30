@@ -290,7 +290,7 @@ async fn main() -> ExitCode {
     // (after AppState is constructed). The ack receiver is kept alive until
     // Task 13 wires in a real consumer — dropping it would close the channel.
     let (hb_tx, hb_rx) = api_server::ws::persister::channel();
-    let (ack_tx, _ack_rx) = tokio::sync::mpsc::channel::<common_wire::ws::AgentFrame>(64);
+    let (ack_tx, ack_rx) = tokio::sync::mpsc::channel::<common_wire::ws::AgentFrame>(64);
     let ws_registry = api_server::ws::ConnectionRegistry::new();
     let replica_id = std::env::var("CMTRACE_REPLICA_ID")
         .unwrap_or_else(|_| format!("replica-{}", uuid::Uuid::now_v7().simple()));
@@ -404,6 +404,14 @@ async fn main() -> ExitCode {
     tokio::spawn(api_server::ws::persister::run(
         Arc::clone(&state.meta),
         hb_rx,
+    ));
+
+    // Spawn the ack worker. Drains RequestAck / RequestComplete frames from
+    // the ack_rx channel and writes their state into the bundle_requests table.
+    // Exits naturally when ack_tx (held inside AppState) is dropped.
+    tokio::spawn(api_server::ws::ack_worker::run(
+        Arc::clone(&state.meta),
+        ack_rx,
     ));
 
     // Spawn the stale-connection sweeper (Postgres only). Marks rows whose
