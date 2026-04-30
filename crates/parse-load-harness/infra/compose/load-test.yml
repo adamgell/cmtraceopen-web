@@ -15,6 +15,10 @@ services:
 
   api:
     image: ${CMTRACE_API_IMAGE:-cmtraceopen-api:latest}
+    # Run as root so the api process can write to /var/lib/cmtrace inside
+    # the named volume (which mounts root-owned). Load-test container only;
+    # never use this in production.
+    user: "0:0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -25,6 +29,14 @@ services:
       CMTRACE_PARSE_CONCURRENCY: ${CMTRACE_PARSE_CONCURRENCY:-4}
       CMTRACE_AUTH_MODE: disabled
       CMTRACE_CLIENT_CA_BUNDLE: ${CMTRACE_CLIENT_CA_BUNDLE:-}
+      # Disable rate limiting for load tests — the harness's poll loop and
+      # parallel agents all hit the same scopes and would trip 429 instantly.
+      CMTRACE_RATE_LIMIT_INGEST_PER_DEVICE_HOUR: "0"
+      CMTRACE_RATE_LIMIT_INGEST_PER_IP_MINUTE: "0"
+      CMTRACE_RATE_LIMIT_QUERY_PER_IP_MINUTE: "0"
+      # Match harness peak concurrency by default; raise via env if you push
+      # the harness past --concurrency=64.
+      CMTRACE_PG_POOL_MAX_CONNECTIONS: ${CMTRACE_PG_POOL_MAX_CONNECTIONS:-64}
     volumes:
       - api-blobs:/var/lib/cmtrace
       - ${CMTRACE_LOAD_TEST_CA_DIR:-/dev/null}:/etc/cmtrace/test-ca:ro
