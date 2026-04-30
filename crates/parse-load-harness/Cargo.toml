@@ -13,7 +13,7 @@ name = "mine-dump"
 path = "bin/mine-dump.rs"
 
 [dependencies]
-api-server = { path = "../api-server" }
+api-server = { path = "../api-server", features = ["postgres"] }
 common-wire = { path = "../common-wire" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "process", "io-util"] }
