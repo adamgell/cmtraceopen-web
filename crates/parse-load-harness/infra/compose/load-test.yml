@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cmtrace
+      POSTGRES_PASSWORD: cmtrace
+      POSTGRES_DB: cmtrace
+    ports:
+      - "127.0.0.1:0:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmtrace"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  api:
+    image: ${CMTRACE_API_IMAGE:-cmtraceopen-api:latest}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CMTRACE_DATABASE_URL: postgres://cmtrace:cmtrace@postgres:5432/cmtrace
+      CMTRACE_BLOB_BACKEND: local
+      CMTRACE_DATA_DIR: /var/lib/cmtrace
+      CMTRACE_PARSE_CONCURRENCY: ${CMTRACE_PARSE_CONCURRENCY:-4}
+      CMTRACE_AUTH_MODE: disabled
+      CMTRACE_CLIENT_CA_BUNDLE: ${CMTRACE_CLIENT_CA_BUNDLE:-}
+    volumes:
+      - api-blobs:/var/lib/cmtrace
+      - ${CMTRACE_LOAD_TEST_CA_DIR:-/dev/null}:/etc/cmtrace/test-ca:ro
+    ports:
+      - "127.0.0.1:0:8080"
+
+volumes:
+  api-blobs:
