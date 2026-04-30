@@ -15,7 +15,7 @@ path = "bin/mine-dump.rs"
 [dependencies]
 api-server = { path = "../api-server", features = ["postgres"] }
 common-wire = { path = "../common-wire" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "fs", "process", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots-no-provider", "multipart", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
