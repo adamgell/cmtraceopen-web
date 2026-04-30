@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{post, put};
 use axum::{Json, Router};
 use bytes::Bytes;
@@ -84,6 +84,7 @@ fn validate_content_kind(k: &str) -> Result<(), AppError> {
 async fn init(
     State(state): State<Arc<AppState>>,
     identity: DeviceIdentity,
+    headers: HeaderMap,
     Json(req): Json<BundleInitRequest>,
 ) -> Result<(StatusCode, Json<BundleInitResponse>), AppError> {
     let device_id = identity.device_id.clone();
@@ -92,6 +93,13 @@ async fn init(
     if req.size_bytes == 0 {
         return Err(AppError::BadRequest("sizeBytes must be > 0".into()));
     }
+
+    // Extract optional correlation header. Invalid values are silently ignored
+    // so a malformed header never blocks an otherwise valid upload.
+    let bundle_request_id: Option<Uuid> = headers
+        .get("x-bundle-request-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| Uuid::parse_str(s).ok());
 
     let now = Utc::now();
 
@@ -203,6 +211,7 @@ async fn init(
                 expected_sha256: req.sha256.to_lowercase(),
                 content_kind: req.content_kind.clone(),
                 staged_path,
+                request_id: bundle_request_id,
             },
             now,
         )
@@ -469,6 +478,27 @@ async fn finalize_inner(
             ));
         }
         Err(e) => return Err(AppError::from(e)),
+    }
+
+    // Best-effort correlation: if this finalize was triggered by an operator
+    // bundle request, stamp `sessions.request_id` and close the
+    // `bundle_requests` row in one transaction. Errors here are non-fatal —
+    // the agent already has its session_id and the correlation can be
+    // retried or filled in by the RequestComplete ack (Task 13).
+    if let Some(rid) = upload.request_id {
+        if let Err(e) = state
+            .meta
+            .correlate_bundle_request(rid, session_id, upload.bundle_id)
+            .await
+        {
+            warn!(
+                error = %e,
+                request_id = %rid,
+                %session_id,
+                bundle_id = %upload.bundle_id,
+                "bundle request correlation failed (non-fatal)"
+            );
+        }
     }
 
     // Spawn the parse worker as a fire-and-forget background task. We

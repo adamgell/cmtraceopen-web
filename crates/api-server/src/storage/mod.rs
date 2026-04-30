@@ -573,6 +573,11 @@ pub struct UploadRow {
     pub staged_path: String,
     pub created_utc: DateTime<Utc>,
     pub finalized: bool,
+    /// Set when the upload was triggered by a `bundle_requests` row. Threaded
+    /// from the `X-Bundle-Request-Id` header on `POST /v1/ingest/bundles`
+    /// through to finalize, where [`MetadataStore::correlate_bundle_request`]
+    /// stamps both `sessions.request_id` and the `bundle_requests` row.
+    pub request_id: Option<Uuid>,
 }
 
 /// Row-shaped view of the `sessions` table.
@@ -706,6 +711,9 @@ pub struct NewUpload {
     pub expected_sha256: String,
     pub content_kind: String,
     pub staged_path: String,
+    /// `X-Bundle-Request-Id` header value parsed by the init handler. `None`
+    /// for spontaneous (non-operator-requested) uploads.
+    pub request_id: Option<Uuid>,
 }
 
 /// A logical file discovered inside a bundle and fed through the parser.
@@ -1088,6 +1096,27 @@ pub trait MetadataStore: Send + Sync + 'static {
     /// sessions return `Ok(0)` rather than an error — same idempotency
     /// rationale as `BlobStore::delete_blob`.
     async fn delete_session(&self, session_id: Uuid) -> Result<u64, StorageError>;
+
+    /// Link a completed bundle request to its session and bundle in one
+    /// transaction:
+    ///   - `sessions.request_id  = request_id` for the given session.
+    ///   - `bundle_requests.bundle_id = bundle_id`, `completed_at = now()`,
+    ///     `outcome = 'ok'` for the given request.
+    ///
+    /// Called at the end of `finalize_inner` when the init handler received
+    /// an `X-Bundle-Request-Id` header.  Errors are logged but do **not**
+    /// abort the finalize response — correlation is best-effort.
+    ///
+    /// The default no-op impl is used by the SQLite backend (which lacks the
+    /// `bundle_requests` table) and by any future mock stores.
+    async fn correlate_bundle_request(
+        &self,
+        _request_id: Uuid,
+        _session_id: Uuid,
+        _bundle_id: Uuid,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
 }
 
 // ===========================================================================

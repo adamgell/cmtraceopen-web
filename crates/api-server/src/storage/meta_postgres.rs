@@ -375,6 +375,34 @@ impl MetadataStore for PgMetadataStore {
         Ok(entries_deleted)
     }
 
+    async fn correlate_bundle_request(
+        &self,
+        request_id: Uuid,
+        session_id: Uuid,
+        bundle_id: Uuid,
+    ) -> Result<(), StorageError> {
+        // sessions.session_id is TEXT in this schema (see migrations-pg/0001),
+        // so bind as string. bundle_requests.request_id and bundle_id are uuid
+        // native columns (added in 0007/0008), so bind as Uuid directly.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE sessions SET request_id = $1 WHERE session_id = $2")
+            .bind(request_id)
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE bundle_requests \
+             SET bundle_id = $1, completed_at = now(), outcome = 'ok' \
+             WHERE request_id = $2",
+        )
+        .bind(bundle_id)
+        .bind(request_id)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn upsert_device(
         &self,
         device_id: &str,
@@ -458,8 +486,9 @@ impl MetadataStore for PgMetadataStore {
             r#"
             INSERT INTO uploads
               (upload_id, bundle_id, device_id, size_bytes, expected_sha256,
-               content_kind, offset_bytes, staged_path, created_utc, finalized)
-            VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, 0)
+               content_kind, offset_bytes, staged_path, created_utc, finalized,
+               request_id)
+            VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, 0, $9)
             "#,
         )
         .bind(new.upload_id.to_string())
@@ -470,6 +499,7 @@ impl MetadataStore for PgMetadataStore {
         .bind(&new.content_kind)
         .bind(&new.staged_path)
         .bind(now.to_rfc3339())
+        .bind(new.request_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -479,7 +509,8 @@ impl MetadataStore for PgMetadataStore {
         let row = sqlx::query(
             r#"
             SELECT upload_id, bundle_id, device_id, size_bytes, expected_sha256,
-                   content_kind, offset_bytes, staged_path, created_utc, finalized
+                   content_kind, offset_bytes, staged_path, created_utc, finalized,
+                   request_id
             FROM uploads WHERE upload_id = $1
             "#,
         )
@@ -499,6 +530,7 @@ impl MetadataStore for PgMetadataStore {
             staged_path: row.get::<String, _>("staged_path"),
             created_utc: parse_ts(&row.get::<String, _>("created_utc"))?,
             finalized: row.get::<i32, _>("finalized") != 0,
+            request_id: row.get::<Option<Uuid>, _>("request_id"),
         })
     }
 
@@ -568,7 +600,8 @@ impl MetadataStore for PgMetadataStore {
         let row = sqlx::query(
             r#"
             SELECT upload_id, bundle_id, device_id, size_bytes, expected_sha256,
-                   content_kind, offset_bytes, staged_path, created_utc, finalized
+                   content_kind, offset_bytes, staged_path, created_utc, finalized,
+                   request_id
             FROM uploads
             WHERE device_id = $1 AND bundle_id = $2 AND finalized = 0
             ORDER BY created_utc DESC
@@ -592,6 +625,7 @@ impl MetadataStore for PgMetadataStore {
                 staged_path: row.get::<String, _>("staged_path"),
                 created_utc: parse_ts(&row.get::<String, _>("created_utc"))?,
                 finalized: row.get::<i32, _>("finalized") != 0,
+                request_id: row.get::<Option<Uuid>, _>("request_id"),
             })
         })
         .transpose()

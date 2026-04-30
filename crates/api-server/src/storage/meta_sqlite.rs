@@ -279,6 +279,8 @@ impl MetadataStore for SqliteMetadataStore {
             staged_path: row.get::<String, _>("staged_path"),
             created_utc: parse_ts(&row.get::<String, _>("created_utc"))?,
             finalized: row.get::<i64, _>("finalized") != 0,
+            // SQLite schema has no request_id column on uploads — always None.
+            request_id: None,
         })
     }
 
@@ -378,6 +380,8 @@ impl MetadataStore for SqliteMetadataStore {
                 staged_path: row.get::<String, _>("staged_path"),
                 created_utc: parse_ts(&row.get::<String, _>("created_utc"))?,
                 finalized: row.get::<i64, _>("finalized") != 0,
+                // SQLite schema has no request_id column on uploads — always None.
+                request_id: None,
             })
         })
         .transpose()
