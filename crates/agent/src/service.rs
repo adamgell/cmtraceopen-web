@@ -154,6 +154,38 @@ fn run_service(_args: Vec<OsString>) -> Result<(), Box<dyn std::error::Error>> {
     })?;
     info!("service status set to Running");
 
+    // Wire the WS subsystem into the service runtime. main.rs::run_cli does
+    // the same thing for CLI/foreground mode; we have to mirror it here
+    // because `try_run_as_service` returns `Some(...)` and main.rs never
+    // reaches `run_cli` when the SCM dispatcher takes over.
+    //
+    // Spawns three background tasks:
+    //   1. ws::client — long-lived WebSocket with exponential reconnect
+    //   2. ws::heartbeat — 45-second status frame sender
+    //   3. ws::request_handler — receives request_bundle frames, drives
+    //      the existing collect+upload pipeline through ScheduledBundleRunner
+    let cfg_arc = std::sync::Arc::new(config.clone());
+    let runner = runtime::ScheduledBundleRunner::new(
+        cfg_arc.clone(),
+        components.orchestrator.clone(),
+        components.queue.clone(),
+        components.uploader.clone(),
+    );
+    let ws_handles = rt.block_on(async {
+        crate::ws::client::spawn(
+            config.api_endpoint.clone(),
+            config.resolved_device_id(),
+        )
+    });
+    let snap = runtime::RuntimeSnapshot::new(cfg_arc.clone());
+    rt.spawn(crate::ws::heartbeat::run(snap, ws_handles.outbound_tx.clone()));
+    rt.spawn(crate::ws::request_handler::run(
+        runner,
+        ws_handles.inbound_rx,
+        ws_handles.outbound_tx,
+    ));
+    info!("ws subsystem spawned in service runtime");
+
     // Drive the shared task loop until a stop/shutdown signal arrives.
     rt.block_on(runtime::run_task_loop(&components, stop_rx));
 
